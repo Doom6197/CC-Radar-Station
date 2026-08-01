@@ -1,0 +1,24 @@
+# Radar Station v4 - files the in-game installer downloads.
+# One path per line, relative to the repository root.
+# Blank lines and lines starting with # are ignored.
+
+radar.lua
+radar/alerts.lua
+radar/app.lua
+radar/config.lua
+radar/environment.lua
+radar/glyphs.lua
+radar/hardware.lua
+radar/logbook.lua
+radar/pixel.lua
+radar/scan.lua
+radar/sky.lua
+radar/theme.lua
+radar/ui.lua
+radar/util.lua
+radar/views/contacts.lua
+radar/views/log.lua
+radar/views/radar.lua
+radar/views/settings.lua
+radar/views/status.lua
+radar/views/weather.lua
