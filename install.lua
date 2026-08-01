@@ -3,7 +3,7 @@
 
   Run this on a CC: Tweaked computer:
 
-    wget run https://raw.githubusercontent.com/JeffDoom/cc-radar-station/main/install.lua
+    wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 
   It fetches the file list from manifest.txt, downloads everything into memory,
   and only then writes to disk -- so a dropped connection leaves the computer
@@ -26,7 +26,7 @@
     wget run <url> dev --dir /apps       -- dev branch into /apps
 ]]
 
-local DEFAULT_REPO   = "JeffDoom/cc-radar-station"
+local DEFAULT_REPO   = "Doom6197/cc-radar-station"
 local DEFAULT_BRANCH = "main"
 local BASALT_URL     = "https://basalt.madefor.cc/2.5/install.lua"
 
@@ -124,7 +124,7 @@ if not manifest then
   fail("could not read manifest.txt", "" ..
     "Checked " .. BASE .. "manifest.txt\n" ..
     "(" .. tostring(manifestError) .. ")\n" ..
-    "If your GitHub username is not JeffDoom, pass your own:\n" ..
+    "If your GitHub username is not Doom6197, pass your own:\n" ..
     "  wget run <url> yourname/cc-radar-station")
 end
 
