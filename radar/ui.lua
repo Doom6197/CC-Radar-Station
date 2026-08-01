@@ -116,6 +116,39 @@ function Root:cyclePage(step)
   self:setPage(self.pages[next])
 end
 
+-- ------------------------------------------------------------- rotation ---
+-- A monitor can walk itself through a set of pages on a timer, so one screen
+-- covers the whole station. The page it lands on is deliberately NOT persisted
+-- -- writing the config every few seconds would be pointless disk churn, and
+-- on restart the monitor should return to the page the operator chose.
+
+--- Restarts the dwell timer, so a manual tap gets a full interval to be read
+--- before the rotation moves on.
+function Root:holdCycle()
+  self.cycleAt = os.clock()
+end
+
+function Root:tickCycle(now)
+  if not self.monitor then return end
+  local entry = self.app:displayConfig(self.monitor.name)
+  if not entry.cycle then
+    self.cycleAt = now
+    return
+  end
+  if now - (self.cycleAt or 0) < entry.cycleSeconds then return end
+  self.cycleAt = now
+
+  local pages = config.cyclePages(entry)
+  if #pages < 2 then
+    if pages[1] ~= self.page then self:setPage(pages[1], false) end
+    return
+  end
+  -- A page that has been dropped from the rotation has no index, so the next
+  -- tick lands on the first page still in it.
+  local index = pageIndex(pages, self.page) or #pages
+  self:setPage(pages[(index % #pages) + 1], false)
+end
+
 function Root:refreshView()
   local view = self.views[self.page]
   if view and view.refresh then
@@ -213,6 +246,7 @@ local function buildRoot(app, rootFrame, opts)
     for _, span in ipairs(self.tabSpans or {}) do
       if x >= span.x1 and x <= span.x2 then
         self:setPage(span.id)
+        self:holdCycle()
         return
       end
     end
@@ -228,10 +262,23 @@ local function buildRoot(app, rootFrame, opts)
     end,
     background = theme.bg,
   })
-  -- Without a tab strip there is nowhere to press, so a tap anywhere on a
-  -- monitor moves to the next page.
+  -- Monitors have no keyboard, so the screen itself is the control: using a
+  -- monitor in game (a right-click) arrives as a touch anywhere on the
+  -- content, and moves it to the next page. The tab strip sits in its own
+  -- canvas and still jumps straight to whichever tab was pressed.
+  --
+  -- On the terminal the mouse has real work to do -- the settings page is
+  -- nothing but buttons -- so a click only cycles when the window is too small
+  -- to show a tab strip at all.
   self.content:onClick(function()
-    if not self:hasTabs() then self:cyclePage(1) end
+    if self.monitor then
+      if self.app.cfg.tapCycle then
+        self:cyclePage(1)
+        self:holdCycle()
+      end
+    elseif not self:hasTabs() then
+      self:cyclePage(1)
+    end
   end)
 
   -- alert overlay -----------------------------------------------------------
@@ -276,6 +323,16 @@ function ui.registerKeys(app, roots, terminalRoot)
   KEY_ACTIONS[keys.right] = function() terminal():cyclePage(1) end
   KEY_ACTIONS[keys.r]     = function() app:rotate(45) end
   KEY_ACTIONS[keys.t]     = function() app:toggleMode() end
+  KEY_ACTIONS[keys.l]     = function()
+    local unlocked = app:toggleOrientation()
+    if not unlocked then
+      terminal():toast("Orientation locked - " .. config.rotationLabel(app.cfg), "info")
+    elseif app.heading then
+      terminal():toast("Orientation unlocked - following your heading", "success")
+    else
+      terminal():toast("Unlocked, but your heading is unreadable. Set a username.", "warning")
+    end
+  end
   KEY_ACTIONS[keys.a]     = function()
     app:toggleAlerts()
     terminal():toast(app.cfg.alert and "Alerts on" or "Alerts muted",
@@ -363,6 +420,9 @@ function ui.build(app)
   app:on("config", refreshAll)
   app:on("log", refreshAll)
   app:on("ignore", refreshAll)
+  -- With smoothing off, or animation off entirely, the heading poll is the
+  -- only thing that will ever move the scope.
+  app:on("heading", refreshAll)
 
   app:on("anim", function()
     for _, root in ipairs(roots) do
@@ -391,6 +451,18 @@ function ui.build(app)
       end
     end)
   end
+
+  -- Page rotation. One loop for every monitor: each root decides for itself
+  -- whether it is due, so adding a screen costs nothing extra.
+  local now = os.clock()
+  for _, root in ipairs(roots) do root.cycleAt = now end
+  basalt.schedule(function()
+    while app.running do
+      sleep(0.5)
+      local tick = os.clock()
+      for _, root in ipairs(roots) do pcall(root.tickCycle, root, tick) end
+    end
+  end)
 
   ui.registerKeys(app, roots, terminalRoot)
   refreshAll()

@@ -161,6 +161,12 @@ function view.build(container, app)
       push(left, "DIM ", snap.dimensionName or "-", theme.text)
     end
     push(left, "BIOM", snap.biomeName or "-", theme.text)
+    -- What the artwork below is actually drawing, which is not always what
+    -- the biome is called: an unrecognised modded biome falls back, and the
+    -- scenery can be forced outright from the settings page.
+    push(left, "GRND", (sceneData.groundLabel or "-")
+      .. (sceneData.groundForced and "  (forced)" or ""),
+      sceneData.groundForced and theme.warn or theme.dim)
 
     push(right, "LGHT", string.format("sky %s  blk %s",
       snap.skyLight or "?", snap.blockLight or "?"), theme.text)

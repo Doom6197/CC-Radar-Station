@@ -18,11 +18,17 @@ local scan        = require("radar.scan")
 local logbook     = require("radar.logbook")
 local alertsLib   = require("radar.alerts")
 local environment = require("radar.environment")
+local util        = require("radar.util")
 
 local app = {}
 app.__index = app
 
 local ANIM_FPS = 5
+
+-- Fraction of the remaining turn the drawn heading closes each animation
+-- frame. At 5 fps this settles a 180 degree spin in well under a second while
+-- still reading as a turn rather than a jump.
+local HEADING_EASE = 0.34
 
 function app.new()
   local cfg, logEntries, ignore, imported = config.load()
@@ -42,6 +48,9 @@ function app.new()
     scanError = nil,
     firstScan = true,
     lastScanAt = 0,
+
+    heading = nil,        -- bearing the operator faces, nil when unreadable
+    headingShown = nil,   -- eased toward `heading`; what actually gets drawn
 
     anim = 0,
     animWanted = 0,       -- number of visible views asking for frames
@@ -102,7 +111,7 @@ function app:rescan()
   self.alerts:setKit(self.kit)
   for _, monitor in ipairs(self.kit.monitors) do
     if not self.cfg.displays[monitor.name] then
-      self.cfg.displays[monitor.name] = { page = "radar", scale = 0.5 }
+      self.cfg.displays[monitor.name] = config.displayDefaults()
     end
   end
   self:saveConfig()
@@ -112,10 +121,54 @@ end
 function app:displayConfig(name)
   local entry = self.cfg.displays[name]
   if not entry then
-    entry = { page = "radar", scale = 0.5 }
+    entry = config.displayDefaults()
     self.cfg.displays[name] = entry
   end
   return entry
+end
+
+-- ---------------------------------------------------------------- heading ---
+-- With the orientation unlocked the scope turns with the operator, so the top
+-- of the picture is always the way they are looking. That needs the yaw more
+-- often than a sweep provides it, but the reading is a single detector call,
+-- so it gets its own cheap loop rather than making every sweep faster.
+
+--- The bearing drawn at the top of the scope right now.
+function app:rotation()
+  if config.isUnlocked(self.cfg) and self.headingShown then
+    return self.headingShown
+  end
+  return self.cfg.rotation
+end
+
+--- Re-reads the operator's yaw.
+---@return boolean changed True when the snapped heading moved
+function app:readHeading()
+  local pos = scan.myPosition(self.kit, self.cfg)
+  local raw = pos and util.headingOf(pos.yaw) or nil
+  local heading = raw and util.snapAngle(raw, self.cfg.headingStep) or nil
+
+  local changed = heading ~= self.heading
+  self.heading = heading
+
+  -- Without smoothing, or with nothing running the animation loop, the drawn
+  -- value has to follow immediately or the scope would never turn at all.
+  if heading and (not self.cfg.headingSmooth or not self.cfg.animate
+                  or self.headingShown == nil) then
+    self.headingShown = heading
+  end
+  return changed
+end
+
+--- Advances the eased heading one animation frame.
+function app:easeHeading()
+  if not config.isUnlocked(self.cfg) or not self.heading then return end
+  if not self.cfg.headingSmooth then
+    self.headingShown = self.heading
+    return
+  end
+  self.headingShown = util.approachAngle(
+    self.headingShown or self.heading, self.heading, HEADING_EASE)
 end
 
 -- ------------------------------------------------------------------ sweep ---
@@ -183,11 +236,27 @@ function app:start()
     end
   end)
 
+  -- The heading is only worth reading while the orientation is unlocked, so
+  -- the loop idles cheaply the rest of the time rather than costing a detector
+  -- call every half second for a scope that is not going to turn.
+  basalt.schedule(function()
+    while self.running do
+      if config.isUnlocked(self.cfg) then
+        local ok, changed = pcall(self.readHeading, self)
+        if ok and changed then self:emit("heading") end
+        sleep(self.cfg.headingSeconds)
+      else
+        sleep(1)
+      end
+    end
+  end)
+
   basalt.schedule(function()
     while self.running do
       sleep(1 / ANIM_FPS)
       if self.cfg.animate and self.animWanted > 0 then
         self.anim = self.anim + 1 / ANIM_FPS
+        self:easeHeading()
         self:emit("anim")
       end
     end
@@ -220,6 +289,20 @@ function app:rangeDown() self:setRangeIndex(self.cfg.rangeIndex - 1) end
 function app:rotate(degrees)
   self.cfg.rotation = (self.cfg.rotation + degrees) % 360
   self:saveConfig()
+end
+
+--- Locks the scope to a fixed bearing, or unlocks it to follow the operator.
+---@return boolean unlocked The state it ended up in
+function app:toggleOrientation()
+  self.cfg.orientation = config.isUnlocked(self.cfg) and "fixed" or "heading"
+  if config.isUnlocked(self.cfg) then
+    -- Take a reading now rather than leaving the scope pointing at the old
+    -- fixed bearing until the heading loop next comes round.
+    self.headingShown = nil
+    pcall(self.readHeading, self)
+  end
+  self:saveConfig()
+  return config.isUnlocked(self.cfg)
 end
 
 function app:toggleAlerts()

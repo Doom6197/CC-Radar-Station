@@ -9,6 +9,7 @@
 local basalt = require("basalt")
 local config = require("radar.config")
 local alertsLib = require("radar.alerts")
+local biomes = require("radar.biomes")
 local scan   = require("radar.scan")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
@@ -220,26 +221,80 @@ function view.build(container, app, root)
 
     note("Your own name is excluded from the radar.")
 
-    row("Rotation", function() return config.rotationLabel(cfg) end, function()
+    -- orientation -----------------------------------------------------------
+    heading("ORIENTATION")
+
+    row("Scope", function()
+      return config.isUnlocked(cfg) and "UNLOCKED - follows you" or "LOCKED - fixed bearing"
+    end, function()
+      local unlocked = app:toggleOrientation()
+      if unlocked and not app.heading then
+        root:toast("Unlocked, but your heading is unreadable. Set a username.", "warning")
+      end
+    end, function() return config.isUnlocked(cfg) and theme.accent or theme.text end)
+
+    row("Bearing up", function() return config.rotationLabel(cfg) end, function()
+      local names = {
+        [0] = "North", [45] = "North-East", [90] = "East", [135] = "South-East",
+        [180] = "South", [225] = "South-West", [270] = "West", [315] = "North-West",
+      }
       local entries = {}
       for degrees = 0, 315, 45 do
-        local names = {
-          [0] = "North", [45] = "North-East", [90] = "East", [135] = "South-East",
-          [180] = "South", [225] = "South-West", [270] = "West", [315] = "North-West",
-        }
         entries[#entries + 1] = {
           label = ("%3d deg - %s at the top"):format(degrees, names[degrees]),
           value = degrees,
         }
       end
-      openPicker("DISPLAY ROTATION", entries, cfg.rotation, function(value)
+      openPicker("BEARING AT THE TOP", entries, cfg.rotation, function(value)
         cfg.rotation = value
         app:saveConfig()
         refreshRows()
       end)
+    end, function() return config.isUnlocked(cfg) and theme.line or theme.text end)
+
+    note("Used while locked. Turns the picture only; bearings stay true.")
+
+    row("Heading steps", function() return config.headingStepLabel(cfg) end, function()
+      openPicker("HEADING STEPS",
+        entriesOf(config.HEADING_STEPS,
+          function(s) return s.label end, function(s) return s.value end),
+        cfg.headingStep,
+        function(value)
+          cfg.headingStep = value
+          app:readHeading()
+          app:saveConfig()
+          refreshRows()
+        end)
     end)
 
-    note("Turns the picture only. Bearings stay true.")
+    row("Heading rate", function() return cfg.headingSeconds .. " seconds" end, function()
+      openPicker("HEADING POLL RATE",
+        entriesOf(config.HEADING_INTERVALS,
+          function(v) return v .. " seconds" end, function(v) return v end),
+        cfg.headingSeconds,
+        function(value)
+          cfg.headingSeconds = value
+          app:saveConfig()
+          refreshRows()
+        end)
+    end)
+
+    row("Ease turns", function() return onOff(cfg.headingSmooth) end, function()
+      cfg.headingSmooth = not cfg.headingSmooth
+      app:readHeading()
+      app:saveConfig()
+    end, onOffColor(function() return cfg.headingSmooth end))
+
+    row("Now facing", function()
+      return config.orientationLabel(cfg, app.heading)
+    end, function()
+      app:readHeading()
+      root:toast(app.heading and ("Heading " .. math.floor(app.heading) .. " deg")
+        or "No heading - set your username", app.heading and "info" or "warning")
+    end, function() return app.heading and theme.good or theme.dim end)
+
+    note("Unlocking needs your username, so the radar can read your yaw.")
+    note("The L key locks and unlocks it too.")
     spacer()
 
     -- scanning --------------------------------------------------------------
@@ -495,6 +550,29 @@ function view.build(container, app, root)
     end, onOffColor(function() return cfg.animate end))
 
     note("Animation drives the sky, clouds, rain and radar sweep.")
+
+    row("Scenery", function()
+      if cfg.biomeScene == "auto" then
+        local snap = app:snapshot()
+        local live = snap and snap.scene and snap.scene.groundLabel
+        return live and ("auto - " .. live) or "auto - follows the biome"
+      end
+      return "forced - " .. biomes.label(cfg.biomeScene)
+    end, function()
+      local entries = { { label = "Auto - follow the biome", value = "auto" } }
+      for _, id in ipairs(biomes.ids()) do
+        entries[#entries + 1] = { label = biomes.label(id), value = id }
+      end
+      openPicker("WEATHER PAGE SCENERY", entries, cfg.biomeScene, function(value)
+        cfg.biomeScene = value
+        app:saveConfig()
+        app:pollEnvironment(true)
+        refreshRows()
+      end)
+    end, function() return cfg.biomeScene == "auto" and theme.text or theme.accent end)
+
+    note("The ground the weather page draws. Force one if your pack")
+    note("reports a biome the station does not recognise.")
     spacer()
 
     -- displays --------------------------------------------------------------
@@ -509,11 +587,19 @@ function view.build(container, app, root)
         end)
     end)
 
+    row("Tap to change", function() return onOff(cfg.tapCycle) end, function()
+      cfg.tapCycle = not cfg.tapCycle
+      app:saveConfig()
+    end, onOffColor(function() return cfg.tapCycle end))
+
+    note("Right-click a monitor in game to move it to the next page.")
+
     if #app.kit.monitors == 0 then
       note("No monitors attached.")
     end
     for _, monitor in ipairs(app.kit.monitors) do
       local displayCfg = app:displayConfig(monitor.name)
+
       row(util.shorten(monitor.name, LABEL_WIDTH - 1), function()
         return ("%s   scale %.1f"):format(displayCfg.page, displayCfg.scale)
       end, function()
@@ -527,6 +613,7 @@ function view.build(container, app, root)
             refreshRows()
           end)
       end)
+
       row("  text scale", function() return ("%.1f"):format(displayCfg.scale) end, function()
         openPicker("TEXT SCALE FOR " .. monitor.name,
           entriesOf({ 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0 },
@@ -539,6 +626,66 @@ function view.build(container, app, root)
             refreshRows()
           end)
       end)
+
+      row("  auto cycle", function()
+        if not displayCfg.cycle then return "off" end
+        return ("every %ds   %d pages"):format(
+          displayCfg.cycleSeconds, #config.cyclePages(displayCfg))
+      end, function()
+        displayCfg.cycle = not displayCfg.cycle
+        app:saveConfig()
+      end, function() return displayCfg.cycle and theme.good or theme.dim end)
+
+      row("  cycle every", function() return displayCfg.cycleSeconds .. " seconds" end, function()
+        openPicker("CYCLE INTERVAL FOR " .. monitor.name,
+          entriesOf(config.CYCLE_INTERVALS,
+            function(v) return v .. " seconds" end, function(v) return v end),
+          displayCfg.cycleSeconds,
+          function(value)
+            displayCfg.cycleSeconds = value
+            app:saveConfig()
+            refreshRows()
+          end)
+      end)
+
+      -- The rotation list is a set rather than a single choice, so the picker
+      -- toggles one page and opens itself again for the next.
+      local function editRotation()
+        local entries = {}
+        for _, page in ipairs(config.PAGES) do
+          local inRotation = not displayCfg.cycleSkip[page]
+          entries[#entries + 1] = {
+            label = (inRotation and "[x] " or "[ ] ") .. page,
+            value = page,
+          }
+        end
+        entries[#entries + 1] = { label = "-- done --", value = false }
+        openPicker("PAGES IN ROTATION: " .. monitor.name, entries, nil, function(page)
+          if not page then refreshRows(); return end
+          local skip = displayCfg.cycleSkip
+          skip[page] = (not skip[page]) or nil
+          -- Refuse to empty the rotation. config.cyclePages papers over an
+          -- empty set by handing back one page, so the count has to be taken
+          -- from the skip list itself.
+          local remaining = 0
+          for _, id in ipairs(config.PAGES) do
+            if not skip[id] then remaining = remaining + 1 end
+          end
+          if remaining == 0 then
+            skip[page] = nil
+            root:toast("At least one page has to stay in the rotation", "warning")
+          end
+          app:saveConfig()
+          refreshRows()
+          editRotation()
+        end)
+      end
+
+      row("  cycle pages", function()
+        local pages = config.cyclePages(displayCfg)
+        if #pages == #config.PAGES then return "all pages" end
+        return table.concat(pages, " ")
+      end, editRotation)
     end
 
     action("Rescan peripherals", function()
@@ -615,6 +762,7 @@ function view.build(container, app, root)
       "Lt / Rt  previous / next page",
       "Up / Dn  scan range up / down",
       "R        rotate the picture 45 deg",
+      "L        lock / unlock the orientation",
       "T        FIXED / SELF tracking",
       "A        mute or unmute alerts",
       "P        test the alert sound",
@@ -624,7 +772,7 @@ function view.build(container, app, root)
       "Q        quit",
     }
     for _, line in ipairs(shortcuts) do note(line) end
-    note("Tap a monitor without a tab strip to change its page.")
+    note("Right-click a monitor to move it to the next page.")
     spacer()
 
     action("Quit Radar Station", function()

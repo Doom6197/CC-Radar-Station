@@ -62,6 +62,37 @@ function util.bearingToScreen(bearing, rotation)
   return math.sin(a), -math.cos(a)
 end
 
+-- Minecraft entity yaw is not a compass bearing: yaw 0 faces SOUTH and yaw
+-- grows westward. Turning it half a circle lands on the true bearing the
+-- player is looking along, which is what "heading up" needs at the top of the
+-- scope.
+
+--- True compass bearing a Minecraft yaw is facing, or nil when there is no yaw.
+function util.headingOf(yaw)
+  yaw = tonumber(yaw)
+  if not yaw then return nil end
+  return (yaw + 180) % 360
+end
+
+--- Shortest signed turn from bearing a to bearing b, in degrees [-180, 180).
+function util.angleDelta(a, b)
+  return (b - a + 180) % 360 - 180
+end
+
+--- Moves `from` a fraction `t` of the way toward `to`, always the short way
+--- round, so easing across north does not spin the whole compass.
+function util.approachAngle(from, to, t)
+  return (from + util.angleDelta(from, to) * t) % 360
+end
+
+--- Snaps a bearing to the nearest multiple of `step`. A step of 0 (or nil)
+--- leaves it untouched, which is what "smooth" rotation wants.
+function util.snapAngle(deg, step)
+  deg = deg % 360
+  if not step or step <= 0 then return deg end
+  return (math.floor(deg / step + 0.5) * step) % 360
+end
+
 function util.shorten(value, n)
   return string.sub(tostring(value), 1, n)
 end

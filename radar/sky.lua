@@ -1,4 +1,4 @@
--- Procedural sky, weather and horizon painting.
+-- Procedural sky, weather, ground and horizon painting.
 --
 -- Rather than shipping a fixed picture per weather type, the scene is drawn
 -- from the live snapshot: the sun and moon really do climb and set along the
@@ -6,25 +6,33 @@
 -- lightning strikes, and the palette shifts with the hour. Dawn, noon, dusk,
 -- night, rain, snow, thunder, the Nether and the End each look distinct.
 --
--- Everything is painted by palette INDEX into a radar.pixel grid, using only
--- the nine entries a sky palette defines:
+-- Under all of that sits the ground, and the ground comes from the biome. A
+-- profile from radar.biomes picks a terrain silhouette and a kind of plant to
+-- grow on it, so a desert gets dunes and cactus, a coast gets surf, a cave
+-- gets a ceiling, and a skyblock world gets floating islands over open air.
 --
---   1 skyHigh  2 skyMid  3 skyLow  4 body  5 glow
---   6 cloud    7 cloudShade        8 land  9 landShade
+-- Everything is painted by palette INDEX into a radar.pixel grid, using only
+-- the ten entries a sky palette defines:
+--
+--   1 skyHigh  2 skyMid  3 skyLow  4 body   5 glow
+--   6 cloud    7 cloudShade        8 land   9 landShade   10 accent
 --
 -- No colour outside that set is used, which is what keeps the weather page
--- inside the sixteen hardware palette slots.
+-- inside the sixteen hardware palette slots. The biome only ever replaces
+-- 8, 9 and 10, so a change of scenery costs no extra colours at all.
 
-local util = require("radar.util")
+local util   = require("radar.util")
+local biomes = require("radar.biomes")
 
 local sky = {}
 
 local SKY_HIGH, SKY_MID, SKY_LOW = 1, 2, 3
 local BODY, GLOW = 4, 5
 local CLOUD, CLOUD_SHADE = 6, 7
-local LAND, LAND_SHADE = 8, 9
+local LAND, LAND_SHADE, ACCENT = 8, 9, 10
 
 local floor, sin, cos, pi, sqrt = math.floor, math.sin, math.cos, math.pi, math.sqrt
+local min, max, abs = math.min, math.max, math.abs
 local hash = util.hash01
 
 -- ---------------------------------------------------------------- pieces ---
@@ -110,43 +118,6 @@ local function moon(grid, cx, cy, r, phase)
   end
 end
 
---- Two overlapping ridge lines: a distant one and a darker near one.
---- The ground is laid down as a solid block first: a ridge that happens to dip
---- below the horizon must not leave unpainted pixels behind it.
-local function terrain(grid, w, h, horizon)
-  local depth = h - horizon
-  if depth < 1 then return end
-  grid:rect(1, horizon, w, depth + 1, LAND)
-
-  for x = 1, w do
-    local t = x / w
-    local ridge = sin(t * 5.7) * 0.45 + sin(t * 12.9 + 1.7) * 0.22 + sin(t * 2.1 + 0.6) * 0.33
-    grid:vline(x, horizon - ridge * depth * 0.55, h, LAND)
-  end
-  for x = 1, w do
-    local t = x / w
-    local ridge = sin(t * 3.1 + 2.2) * 0.55 + sin(t * 8.3 + 0.4) * 0.25
-    grid:vline(x, horizon + depth * 0.42 - ridge * depth * 0.3, h, LAND_SHADE)
-  end
-end
-
---- Conifer silhouettes along the far ridge. Skipped when there is no room.
-local function trees(grid, w, h, horizon)
-  local depth = h - horizon
-  if depth < 7 then return end
-  local count = math.max(2, floor(w / 14))
-  for i = 1, count do
-    local x = floor(hash(i, 41) * (w - 4)) + 2
-    local th = 4 + floor(hash(i, 42) * 3)
-    local base = horizon + depth * 0.30
-    grid:vline(x, base - 1, base + 1, LAND_SHADE)
-    for row = 0, th - 1 do
-      local halfWidth = floor((th - row) * 0.6)
-      grid:hline(x - halfWidth, x + halfWidth, base - 1 - row, LAND_SHADE)
-    end
-  end
-end
-
 local function rain(grid, w, h, horizon, anim, density, index)
   local reach = horizon + 4
   for i = 1, density do
@@ -181,7 +152,7 @@ local function lightning(grid, w, horizon, anim)
   -- in the darkest tone keep it distinct from the rain drawn over it.
   local x = 6 + hash(slot, 3) * (w - 12)
   local y = 1
-  local step = math.max(3, floor(horizon / 6))
+  local step = max(3, floor(horizon / 6))
   while y < horizon do
     local nx = x + (hash(slot, y) * 2 - 1) * step
     grid:line(x, y, nx, y + step, LAND_SHADE)
@@ -195,14 +166,449 @@ local function lightning(grid, w, horizon, anim)
   return true
 end
 
+-- ---------------------------------------------------------------- terrain ---
+-- One painter per ground silhouette. Each covers every pixel from `horizon`
+-- down -- the cell compiler reads all six sub-pixels of every cell, and an
+-- unpainted one has no palette index at all -- and returns:
+--
+--   groundAt(x)   the row a plant standing at x grows from, or nil where
+--                 nothing can grow (open water, the gap between islands)
+--   foreground()  optional, run AFTER the flora, so a near ridge can stand in
+--                 front of the trees on the ridge behind it
+--
+-- `p` is the radar.biomes profile, which is what makes ACCENT mean foliage on
+-- a forest, water on a coast and glow underground.
+
+local TERRAIN = {}
+
+function TERRAIN.hills(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return horizon end end
+
+  local function far(x)
+    local t = x / w
+    local ridge = sin(t * 5.7) * 0.45 + sin(t * 12.9 + 1.7) * 0.22 + sin(t * 2.1 + 0.6) * 0.33
+    return horizon - ridge * depth * 0.55
+  end
+  for x = 1, w do grid:vline(x, far(x), h, LAND) end
+
+  return far, function()
+    for x = 1, w do
+      local t = x / w
+      local ridge = sin(t * 3.1 + 2.2) * 0.55 + sin(t * 8.3 + 0.4) * 0.25
+      grid:vline(x, horizon + depth * 0.42 - ridge * depth * 0.3, h, LAND_SHADE)
+    end
+  end
+end
+
+function TERRAIN.flat(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return horizon end end
+
+  local function surface(x)
+    local t = x / w
+    return horizon - (sin(t * 6.1) * 0.14 + sin(t * 15.3 + 1.1) * 0.07) * depth
+  end
+  for x = 1, w do grid:vline(x, surface(x), h, LAND) end
+
+  return surface, function()
+    for x = 1, w do
+      local t = x / w
+      grid:vline(x, horizon + depth * (0.62 + sin(t * 4.3) * 0.08), h, LAND_SHADE)
+    end
+  end
+end
+
+function TERRAIN.dunes(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return horizon end end
+
+  local function crest(x)
+    local t = x / w
+    return horizon - (sin(t * 4.1) * 0.4 + sin(t * 9.7 + 2.3) * 0.25) * depth * 0.5
+  end
+  for x = 1, w do grid:vline(x, crest(x), h, LAND) end
+
+  -- The lee side of each dune, in shadow. Offsetting the same wave rather
+  -- than inventing a second one is what makes the shadow sit on the dune.
+  -- Unlike a ridge line this is not a foreground pass: there is nothing in
+  -- front of it, and drawing it after the flora would bury the cactus.
+  for x = 1, w do
+    local t = x / w
+    grid:vline(x, horizon + depth * 0.34 - sin(t * 4.1 - 1.15) * depth * 0.22, h, LAND_SHADE)
+  end
+
+  return crest
+end
+
+function TERRAIN.peaks(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND_SHADE)
+  if depth < 2 then return function() return horizon end end
+
+  local tops = {}
+  for x = 1, w do tops[x] = horizon end
+
+  -- Two ranges: a tall pale one behind, a shorter dark one in front.
+  for pass = 1, 2 do
+    local index = (pass == 1) and LAND or LAND_SHADE
+    local count = max(2, floor(w / (pass == 1 and 15 or 11)))
+    local footing = horizon + depth * (pass == 1 and 0.34 or 0.66)
+    for i = 0, count do
+      local cx = (i + 0.5 + (hash(i, 20 + pass) - 0.5) * 0.7) * (w / count)
+      local halfW = (w / count) * (0.7 + hash(i, 30 + pass) * 0.7)
+      local top = footing - depth * (0.55 + hash(i, 40 + pass) * 0.85)
+        * (pass == 1 and 1.0 or 0.55)
+      local x0, x1 = max(1, floor(cx - halfW)), min(w, floor(cx + halfW))
+      for x = x0, x1 do
+        local slope = top + abs(x - cx) / max(1, halfW) * (footing - top)
+        grid:vline(x, slope, h, index)
+        if pass == 1 and slope < tops[x] then tops[x] = slope end
+        -- Snow, or a treeline, depending on how cold the biome is: either way
+        -- the very top of the ridge is a different colour from its flanks.
+        local capTo = top + depth * 0.22
+        if p.cold and slope < capTo then
+          grid:vline(x, slope, capTo, ACCENT)
+        end
+      end
+    end
+  end
+
+  return function(x)
+    return tops[util.clamp(floor(x), 1, w)] or horizon
+  end
+end
+
+function TERRAIN.plateau(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND_SHADE)
+  if depth < 2 then return function() return horizon end end
+
+  -- Flat-topped steps rather than a smooth ridge: that squared-off skyline is
+  -- most of what makes badlands read as badlands.
+  local steps = max(3, floor(w / 11))
+  local tops = {}
+  for x = 1, w do
+    local step = floor((x - 1) / w * steps)
+    tops[x] = horizon - depth * (0.12 + hash(step, 61) * 0.55)
+    grid:vline(x, tops[x], h, LAND)
+  end
+
+  -- Horizontal strata banding the exposed rock face.
+  local bandHeight = max(1, depth / 8)
+  for row = 0, floor(depth * 1.2) do
+    local y = horizon - depth * 0.7 + row
+    local band = floor(row / bandHeight) % 3
+    if band ~= 0 then
+      local index = (band == 1) and LAND_SHADE or ACCENT
+      for x = 1, w do
+        if y >= tops[x] then grid:set(x, y, index) end
+      end
+    end
+  end
+
+  return function(x)
+    return tops[util.clamp(floor(x), 1, w)] or horizon
+  end
+end
+
+function TERRAIN.ocean(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return nil end end
+
+  -- Deeper water in the foreground, with a slow swell along the join.
+  for x = 1, w do
+    grid:vline(x, horizon + depth * 0.55 + sin(x * 0.18 + anim * 1.1) * max(1, depth * 0.07),
+      h, LAND_SHADE)
+  end
+
+  -- Crests, packed tighter toward the horizon where the swell foreshortens.
+  local rows = max(2, floor(depth))
+  for r = 1, rows do
+    local t = (r / rows) ^ 1.7
+    local y = horizon + t * depth
+    local drift = anim * (2 + t * 8) + r * 2.7
+    local period = max(4, floor(4 + (1 - t) * 12))
+    for x = 1, w do
+      if floor(x + drift + sin(x * 0.25 + r) * 2) % period == 0 then
+        grid:set(x, y, ACCENT)
+      end
+    end
+  end
+
+  -- Ice floes float; trees do not.
+  return function(x)
+    if p.flora == "iceSpike" then return horizon + depth * 0.2 end
+    return nil
+  end
+end
+
+function TERRAIN.shore(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return horizon end end
+
+  -- The waterline runs from the horizon down and to the right, so the sand
+  -- widens toward the viewer the way a beach actually does.
+  local function strand(y)
+    local t = (y - horizon) / max(1, depth)
+    return w * (0.14 + t * 0.30)
+  end
+
+  for y = floor(horizon), h do
+    local edge = strand(y)
+    grid:hline(1, edge, y, ACCENT)
+    -- Surf: a band of wet sand that creeps up and down the beach.
+    grid:hline(edge, edge + 1.5 + sin(y * 0.9 + anim * 1.6) * 1.2, y, LAND_SHADE)
+  end
+
+  -- Only the dry side, well clear of the surf, can hold a tree.
+  local dryFrom = strand(h) + max(2, w * 0.06)
+  return function(x)
+    if x < dryFrom then return nil end
+    return horizon + depth * 0.12
+  end
+end
+
+function TERRAIN.swamp(grid, w, h, horizon, p, anim)
+  local depth = h - horizon
+  grid:rect(1, horizon, w, depth + 1, LAND)
+  if depth < 2 then return function() return horizon end end
+
+  for x = 1, w do
+    grid:vline(x, horizon - sin(x / w * 7.3) * depth * 0.08, h, LAND)
+  end
+  grid:rect(1, floor(horizon + depth * 0.7), w, h, LAND_SHADE)
+
+  -- Standing water, in flat pools rather than a single sheet.
+  local pools = {}
+  for i = 1, max(2, floor(w / 16)) do
+    local cx = hash(i, 71) * w
+    local halfW = w * (0.05 + hash(i, 72) * 0.09)
+    local y = horizon + depth * (0.22 + hash(i, 73) * 0.62)
+    local rows = max(1, floor(depth * 0.14))
+    pools[i] = { cx = cx, halfW = halfW, y = y, rows = rows }
+    for row = 0, rows do
+      -- Pools narrow as they recede, so they read as lying flat.
+      local squeeze = halfW * (1 - row / (rows + 2) * 0.3)
+      grid:hline(cx - squeeze, cx + squeeze, y + row, ACCENT)
+    end
+  end
+
+  return function(x)
+    for _, pool in ipairs(pools) do
+      if x > pool.cx - pool.halfW and x < pool.cx + pool.halfW then return nil end
+    end
+    return horizon + depth * 0.1
+  end
+end
+
+--- Skyblock: no ground at all, just rock hanging in open air. The islands are
+--- painted straight into the sky gradient, which already covers the frame.
+function TERRAIN.void(grid, w, h, horizon, p, anim)
+  local isles = {}
+  local count = max(1, floor(w / 24))
+  for i = 0, count do
+    local cx = (i + 0.5 + (hash(i, 91) - 0.5) * 0.6) * (w / (count + 1))
+    local halfW = w * (0.07 + hash(i, 92) * 0.10)
+    -- A slow bob, so the scene is alive even with nothing else moving.
+    local top = h * (0.40 + hash(i, 93) * 0.34) + sin(anim * 0.2 + i * 1.7) * max(1, h * 0.02)
+    local deep = max(3, halfW * 1.6)
+
+    for row = 0, deep do
+      local taper = halfW * (1 - (row / (deep + 1)) ^ 1.5)
+      if taper >= 0.5 then
+        local index = LAND_SHADE
+        if row < 1 then index = ACCENT               -- grass cap
+        elseif row < deep * 0.4 then index = LAND end
+        grid:hline(cx - taper, cx + taper, top + row, index)
+      end
+    end
+    isles[#isles + 1] = { cx = cx, halfW = halfW, top = top }
+  end
+
+  return function(x)
+    for _, isle in ipairs(isles) do
+      if x > isle.cx - isle.halfW * 0.65 and x < isle.cx + isle.halfW * 0.65 then
+        return isle.top
+      end
+    end
+    return nil
+  end
+end
+
+-- ----------------------------------------------------------------- flora ---
+-- One painter per kind of plant. `base` is the row it grows from, `growth` a
+-- height budget derived from the room below the horizon, and `seed` its index
+-- so the same plant keeps the same shape between frames.
+
+local FLORA = {}
+
+function FLORA.conifer(grid, x, base, growth, seed)
+  local height = max(3, floor(growth * 0.5) + floor(hash(seed, 42) * 3))
+  grid:vline(x, base - 1, base + 1, LAND_SHADE)
+  for row = 0, height - 1 do
+    local halfW = floor((height - row) * 0.6)
+    grid:hline(x - halfW, x + halfW, base - 1 - row, ACCENT)
+  end
+end
+
+function FLORA.broadleaf(grid, x, base, growth, seed)
+  local trunk = max(2, floor(growth * 0.3) + floor(hash(seed, 42) * 3))
+  local r = max(1.5, trunk * 0.62)
+  grid:vline(x, base - trunk, base + 1, LAND_SHADE)
+  grid:disc(x, base - trunk - r * 0.4, r, ACCENT)
+  grid:disc(x - r * 0.75, base - trunk + r * 0.2, r * 0.6, ACCENT)
+  grid:disc(x + r * 0.75, base - trunk + r * 0.15, r * 0.65, ACCENT)
+end
+
+--- Pale trunks are the whole point of a birch, so they borrow the cloud tone
+--- rather than the ground shadow every other tree uses.
+function FLORA.birch(grid, x, base, growth, seed)
+  local trunk = max(3, floor(growth * 0.45) + floor(hash(seed, 42) * 3))
+  local r = max(1.2, trunk * 0.4)
+  grid:vline(x, base - trunk, base + 1, CLOUD)
+  grid:disc(x, base - trunk - r * 0.3, r, ACCENT)
+  grid:disc(x - r * 0.6, base - trunk + r * 0.3, r * 0.55, ACCENT)
+end
+
+function FLORA.acacia(grid, x, base, growth, seed)
+  local trunk = max(3, floor(growth * 0.42) + floor(hash(seed, 42) * 2))
+  local spread = max(2, floor(trunk * 0.95))
+  grid:line(x, base + 1, x - 1, base - trunk, LAND_SHADE)
+  grid:line(x, base + 1, x + 2, base - trunk + 1, LAND_SHADE)
+  grid:hline(x - spread, x + spread, base - trunk, ACCENT)
+  grid:hline(x - spread + 1, x + spread - 1, base - trunk - 1, ACCENT)
+end
+
+-- A cactus is the smallest thing anything grows, and the cell compiler keeps
+-- only the two commonest colours in each cell: a two-by-three splash of green
+-- loses to the sand around it and disappears. Hence the generous proportions.
+function FLORA.cactus(grid, x, base, growth, seed)
+  local height = max(4, floor(growth * 0.5) + floor(hash(seed, 42) * 3))
+  grid:rect(x, base - height, 2, height + 1, ACCENT)
+  if hash(seed, 43) > 0.35 then
+    local arm = base - height + max(2, floor(height * 0.45))
+    local reach = max(2, floor(height * 0.4))
+    grid:hline(x - reach, x, arm, ACCENT)
+    grid:vline(x - reach, arm - max(2, floor(height * 0.35)), arm, ACCENT)
+  end
+end
+
+function FLORA.bamboo(grid, x, base, growth, seed)
+  local height = max(3, floor(growth * 0.7) + floor(hash(seed, 42) * 4))
+  for k = -1, 1 do
+    local sx = x + k
+    local top = base - height + floor(hash(seed, 44 + k) * 3)
+    grid:vline(sx, top, base + 1, ACCENT)
+    grid:set(sx + (k >= 0 and 1 or -1), top - 1, ACCENT)
+  end
+end
+
+function FLORA.mushroom(grid, x, base, growth, seed)
+  local stem = max(2, floor(growth * 0.3) + floor(hash(seed, 42) * 3))
+  local r = max(2, stem * 0.9)
+  grid:vline(x, base - stem, base + 1, CLOUD)
+  -- The upper half of a disc only, so the cap sits on the stem as a dome.
+  for row = 0, floor(r) do
+    local span = r * r - row * row
+    if span >= 0 then
+      local half = sqrt(span)
+      grid:hline(x - half, x + half, base - stem - row, ACCENT)
+    end
+  end
+end
+
+function FLORA.iceSpike(grid, x, base, growth, seed)
+  local height = max(3, floor(growth * 0.75) + floor(hash(seed, 42) * 4))
+  local halfW = max(1, floor(height * 0.22))
+  for row = 0, height do
+    local taper = floor(halfW * (1 - row / height))
+    grid:hline(x - taper, x + taper, base - row, row > height * 0.55 and CLOUD or ACCENT)
+  end
+end
+
+--- Bare branches, drawn in the accent rather than the ground shadow: on snow
+--- the shadow tone is very nearly the ground itself, and a tree that cannot be
+--- told apart from the field it stands in is not worth drawing.
+function FLORA.deadTree(grid, x, base, growth, seed)
+  local trunk = max(3, floor(growth * 0.45) + floor(hash(seed, 42) * 3))
+  local reach = max(2, floor(trunk * 0.5))
+  grid:vline(x, base - trunk, base + 1, ACCENT)
+  local fork = base - trunk + floor(trunk * 0.35)
+  grid:line(x, fork, x - reach, fork - floor(trunk * 0.45), ACCENT)
+  grid:line(x, fork - 1, x + reach, fork - floor(trunk * 0.5), ACCENT)
+end
+
+function FLORA.palm(grid, x, base, growth, seed)
+  local height = max(4, floor(growth * 0.6) + floor(hash(seed, 42) * 3))
+  local lean = (hash(seed, 43) > 0.5) and 1 or -1
+  local tipX, tipY = x, base - height
+  for row = 0, height do
+    tipX = x + lean * (row / height) ^ 2 * height * 0.35
+    tipY = base - row
+    grid:set(tipX, tipY, LAND_SHADE)
+  end
+  for frond = -2, 2 do
+    grid:line(tipX, tipY,
+      tipX + frond * height * 0.3,
+      tipY + abs(frond) * height * 0.16 - height * 0.12, ACCENT)
+  end
+end
+
+--- Hangs downward from `base` rather than growing up from it: this is what a
+--- lush or sculk cave ceiling is wearing.
+function FLORA.glowVine(grid, x, base, growth, seed)
+  local length = max(2, floor(growth * 0.5) + floor(hash(seed, 42) * 3))
+  grid:vline(x, base, base + length, ACCENT)
+  grid:set(x - 1, base + length, ACCENT)
+  grid:set(x + 1, base + floor(length * 0.6), ACCENT)
+end
+
+function FLORA.fungus(grid, x, base, growth, seed)
+  local stem = max(3, floor(growth * 0.5) + floor(hash(seed, 42) * 3))
+  grid:vline(x, base - stem, base + 1, LAND_SHADE)
+  grid:disc(x, base - stem, max(2, stem * 0.45), ACCENT)
+  grid:disc(x - stem * 0.35, base - stem + stem * 0.25, max(1, stem * 0.3), ACCENT)
+end
+
+function FLORA.crystal(grid, x, base, growth, seed)
+  local height = max(3, floor(growth * 0.5) + floor(hash(seed, 42) * 3))
+  for row = 0, height do
+    local taper = max(0, floor((1 - abs(row / height * 2 - 1)) * height * 0.24))
+    grid:hline(x - taper, x + taper, base - row, ACCENT)
+  end
+end
+
+--- Scatters a biome's flora across the ground. Positions come from a hash, so
+--- the same trees stand in the same places every frame.
+local function paintFlora(grid, w, growth, profile, groundAt, anim)
+  local painter = FLORA[profile.flora]
+  if not painter or growth < 5 then return end
+
+  local count = max(1, floor(w / 14 * (profile.density or 1)))
+  for i = 1, count do
+    local x = floor(hash(i, 41) * (w - 4)) + 2
+    local base = groundAt and groundAt(x) or nil
+    if base then
+      painter(grid, x, floor(base), growth, i, anim, profile)
+    end
+  end
+end
+
 -- ------------------------------------------------------------ dimensions ---
 
-local function paintNether(grid, w, h, anim)
+local function paintNether(grid, w, h, anim, scene)
+  local profile = scene and scene.ground or biomes.PROFILES.netherWastes
   grid:ditherGradient(1, h, { SKY_HIGH, SKY_MID, SKY_LOW })
 
   -- Netherrack ceiling with stalactites, in the darkest tone so it separates
   -- from the red haze behind it.
-  local ceiling = math.max(2, floor(h * 0.22))
+  local ceiling = max(2, floor(h * 0.22))
   for x = 1, w do
     local t = x / w
     local drip = sin(t * 9.1) * 0.4 + sin(t * 21.3 + 2.1) * 0.25
@@ -217,13 +623,21 @@ local function paintNether(grid, w, h, anim)
     grid:vline(x, surface + wave, h, GLOW)
     grid:vline(x, surface + wave, surface + wave + 1, BODY)
   end
-  for i = 1, math.max(4, floor(w / 6)) do
+  for i = 1, max(4, floor(w / 6)) do
     local x = (hash(i, 31) * w + anim * (2 + hash(i, 32) * 3)) % w
     grid:set(x, surface + 2 + hash(i, 33) * (h - surface - 2), BODY)
   end
 
+  -- Whatever grows on the shore of it. Crimson and warped forests are the
+  -- only real scenery the Nether has.
+  local growth = max(0, surface - ceiling)
+  if h >= 12 and w >= 20 then
+    paintFlora(grid, w, growth * 0.6, profile,
+      function() return surface end, anim)
+  end
+
   -- Ash motes drifting upward.
-  for i = 1, math.max(8, floor(w / 3)) do
+  for i = 1, max(8, floor(w / 3)) do
     local sx, sy = hash(i, 51), hash(i, 52)
     local x = sx * w + sin(anim * 0.7 + i) * 2
     local y = h - ((sy * h + anim * (3 + sy * 4)) % (h - ceiling))
@@ -231,16 +645,16 @@ local function paintNether(grid, w, h, anim)
   end
 end
 
-local function paintEnd(grid, w, h, anim)
+local function paintEnd(grid, w, h, anim, scene)
   grid:ditherGradient(1, h, { SKY_HIGH, SKY_MID, SKY_LOW })
-  stars(grid, w, h, anim, math.max(14, floor(w * h / 26)), BODY, GLOW)
+  stars(grid, w, h, anim, max(14, floor(w * h / 26)), BODY, GLOW)
 
   -- A floating island: end stone on top, tapering to a dark root. The top is
   -- deliberately not BODY, which the stars own; a near-white slab across the
   -- middle of the frame reads as a stray line rather than terrain.
   local cx, top = floor(w / 2), floor(h * 0.54)
-  local halfWidth = math.max(4, floor(w * 0.30))
-  local depth = math.max(3, floor(h * 0.26))
+  local halfWidth = max(4, floor(w * 0.30))
+  local depth = max(3, floor(h * 0.26))
   for row = 0, depth do
     local taper = floor(halfWidth * (1 - (row / (depth + 1)) ^ 1.6))
     if taper > 0 then
@@ -250,19 +664,66 @@ local function paintEnd(grid, w, h, anim)
   end
 
   -- An obsidian pillar with a lit crystal, so the scene is unmistakably the End.
-  local pillarWidth = math.max(1, floor(w * 0.025))
-  local pillarHeight = math.max(4, floor(h * 0.22))
+  local pillarWidth = max(1, floor(w * 0.025))
+  local pillarHeight = max(4, floor(h * 0.22))
   grid:rect(cx - pillarWidth, top - pillarHeight, pillarWidth * 2 + 1, pillarHeight, LAND_SHADE)
-  grid:disc(cx, top - pillarHeight, math.max(1, pillarWidth), BODY)
+  grid:disc(cx, top - pillarHeight, max(1, pillarWidth), BODY)
+
+  -- Chorus-purple shards along the rim of the island.
+  if h >= 12 and w >= 20 then
+    local profile = scene and scene.ground or biomes.PROFILES.theEnd
+    paintFlora(grid, w, depth, profile, function(x)
+      if x > cx - halfWidth * 0.8 and x < cx + halfWidth * 0.8 then return top end
+      return nil
+    end, anim)
+  end
 
   -- Endermen-purple haze drifting over the void.
-  for i = 1, math.max(5, floor(w / 8)) do
+  for i = 1, max(5, floor(w / 8)) do
     local x = (hash(i, 81) * (w + 20) + anim * (1 + hash(i, 82) * 2)) % (w + 20) - 10
     grid:disc(x, h * 0.82 + sin(anim * 0.5 + i) * 2, 2 + hash(i, 83) * 2, CLOUD_SHADE)
   end
 end
 
+--- Underground there is no sky to paint: the whole frame is rock, with a
+--- chamber cut out of the middle of it.
+local function paintCavern(grid, w, h, profile, anim, roomy)
+  grid:rect(1, 1, w, h, LAND_SHADE)
+
+  local ceiling = max(1, floor(h * 0.26))
+  local floorY = h - max(1, floor(h * 0.26))
+
+  for x = 1, w do
+    local drip = sin(x * 0.29) * 0.45 + sin(x * 0.13 + 2.1) * 0.3 + sin(x * 0.71 + 1.1) * 0.2
+    grid:vline(x, 1, ceiling + drip * ceiling, LAND)
+  end
+  for x = 1, w do
+    local bump = sin(x * 0.23 + 1.4) * 0.4 + sin(x * 0.61 + 0.3) * 0.25
+    grid:vline(x, floorY - bump * max(1, h - floorY), h, LAND)
+  end
+
+  if roomy then
+    paintFlora(grid, w, max(0, floorY - ceiling), profile,
+      function(x)
+        local drip = sin(x * 0.29) * 0.45 + sin(x * 0.13 + 2.1) * 0.3
+        return ceiling + drip * ceiling
+      end, anim)
+  end
+
+  -- Motes of light in the dark, so the chamber is not a flat silhouette.
+  for i = 1, max(5, floor(w / 5)) do
+    local x = hash(i, 101) * w
+    local y = ceiling + hash(i, 102) * max(1, floorY - ceiling)
+    if hash(i, floor(anim * 1.5) % 89) > 0.55 then grid:set(x, y, ACCENT) end
+  end
+end
+
 -- ------------------------------------------------------------------ main ---
+
+-- Grounds that change the shape of the frame itself rather than just the
+-- silhouette at the bottom of it.
+local ENCLOSED = { cavern = true }     -- no sky at all
+local OPEN_SKY = { void = true }       -- sky all the way down, no horizon
 
 --- Paints a complete scene into a pixel grid.
 ---@param grid table radar.pixel grid, already sized and given scene.palette
@@ -272,37 +733,45 @@ function sky.paint(grid, scene, anim)
   anim = anim or 0
   local w, h = grid.w, grid.h
 
-  if scene.kind == "nether" then return paintNether(grid, w, h, anim) end
-  if scene.kind == "the_end" then return paintEnd(grid, w, h, anim) end
+  if scene.kind == "nether" then return paintNether(grid, w, h, anim, scene) end
+  if scene.kind == "the_end" then return paintEnd(grid, w, h, anim, scene) end
 
-  -- Sky above, ground below. Between them the two together must cover every
-  -- pixel: the cell compiler reads all six sub-pixels of every cell, and an
-  -- unpainted one has no palette index at all.
-  local horizon = math.max(2, floor(h * 0.72))
-  grid:ditherGradient(1, horizon, { SKY_HIGH, SKY_MID, SKY_LOW })
-  if h > horizon then grid:rect(1, horizon + 1, w, h - horizon, LAND) end
+  local profile = scene.ground or biomes.PROFILES[biomes.DEFAULT]
+  local shape = profile.terrain
 
   -- Tiny surfaces get the palette and the celestial body only; anything more
   -- turns to mush below about four character rows.
   local roomy = h >= 12 and w >= 20
 
+  if ENCLOSED[shape] then
+    return paintCavern(grid, w, h, profile, anim, roomy)
+  end
+
+  -- Sky above, ground below. Between them the two together must cover every
+  -- pixel: the cell compiler reads all six sub-pixels of every cell, and an
+  -- unpainted one has no palette index at all.
+  local openSky = OPEN_SKY[shape] == true
+  local horizon = openSky and h or max(2, floor(h * 0.72))
+  grid:ditherGradient(1, horizon, { SKY_HIGH, SKY_MID, SKY_LOW })
+  if not openSky and h > horizon then grid:rect(1, horizon + 1, w, h - horizon, LAND) end
+
   -- Stars belong to the night. At dusk the palette's bright entries are warm
   -- orange, so a star field there reads as drifting embers rather than sky.
   if scene.weather == "clear" and scene.phase == "night" then
-    stars(grid, w, horizon, anim, math.max(10, floor(w * horizon / 30)), BODY, GLOW)
+    stars(grid, w, horizon, anim, max(10, floor(w * horizon / 30)), BODY, GLOW)
   end
 
   -- Overcast skies are filled from the top; fair-weather cloud sits low, out
   -- of the sun's way.
   if roomy then
     if scene.weather == "storm" then
-      clouds(grid, w, horizon, anim, 3, math.max(3, floor(w / 12)), 5, 0.10, 0.50)
+      clouds(grid, w, horizon, anim, 3, max(3, floor(w / 12)), 5, 0.10, 0.50)
     elseif scene.weather == "rain" then
-      clouds(grid, w, horizon, anim, 3, math.max(3, floor(w / 14)), 2, 0.12, 0.48)
+      clouds(grid, w, horizon, anim, 3, max(3, floor(w / 14)), 2, 0.12, 0.48)
     elseif scene.weather == "snow" then
-      clouds(grid, w, horizon, anim, 2, math.max(2, floor(w / 18)), 8, 0.18, 0.45)
+      clouds(grid, w, horizon, anim, 2, max(2, floor(w / 18)), 8, 0.18, 0.45)
     elseif scene.phase ~= "night" then
-      clouds(grid, w, horizon, anim, 2, math.max(1, floor(w / 30)), 1, 0.52, 0.26)
+      clouds(grid, w, horizon, anim, 2, max(1, floor(w / 30)), 1, 0.52, 0.26)
     end
   end
 
@@ -311,12 +780,12 @@ function sky.paint(grid, scene, anim)
   -- cloud looks exactly like a crescent moon at this resolution.
   if scene.body == "sun" or scene.body == "moon" then
     local u = util.clamp(scene.bodyProgress or 0.5, 0, 1)
-    local r = util.clamp(math.min(w, h) * 0.11, 2, 9)
-    local margin = math.max(3, w * 0.1)
+    local r = util.clamp(min(w, h) * 0.11, 2, 9)
+    local margin = max(3, w * 0.1)
     local cx = util.lerp(margin, w - margin, u)
     -- The arc has to top out low enough that the halo still fits on screen,
     -- or the sun and moon lose their top edge every noon and midnight.
-    local peak = math.min(horizon - 1, math.max(r * 1.9, h * 0.10))
+    local peak = min(horizon - 1, max(r * 1.9, h * 0.10))
     local cy = horizon - sin(pi * u) * (horizon - peak)
     if scene.body == "sun" then
       sun(grid, cx, cy, r)
@@ -325,16 +794,23 @@ function sky.paint(grid, scene, anim)
     end
   end
 
-  terrain(grid, w, h, horizon)
-  if roomy then trees(grid, w, h, horizon) end
+  -- The ground, whatever shape this biome makes it.
+  local painter = TERRAIN[shape] or TERRAIN.hills
+  local groundAt, foreground = painter(grid, w, h, horizon, profile, anim)
+
+  -- Open sky has no horizon to measure a tree against, so island plants get a
+  -- height budget from the frame instead.
+  local growth = openSky and max(3, floor(h * 0.16)) or (h - horizon)
+  if roomy then paintFlora(grid, w, growth, profile, groundAt, anim) end
+  if foreground then foreground() end
 
   if scene.weather == "rain" then
-    rain(grid, w, h, horizon, anim, math.max(10, floor(w * 0.9)), BODY)
+    rain(grid, w, h, horizon, anim, max(10, floor(w * 0.9)), BODY)
   elseif scene.weather == "storm" then
     local struck = lightning(grid, w, horizon, anim)
-    rain(grid, w, h, horizon, anim, math.max(14, floor(w * 1.4)), struck and LAND or BODY)
+    rain(grid, w, h, horizon, anim, max(14, floor(w * 1.4)), struck and LAND or BODY)
   elseif scene.weather == "snow" then
-    snowfall(grid, w, h, horizon, anim, math.max(12, floor(w * 1.1)), BODY)
+    snowfall(grid, w, h, horizon, anim, max(12, floor(w * 1.1)), BODY)
   end
 end
 
@@ -349,5 +825,7 @@ function sky.badge(scene)
   local byPhase = { dawn = "DAWN", day = "CLEAR", dusk = "DUSK", night = "NIGHT" }
   return byPhase[scene.phase] or "CLEAR"
 end
+
+sky.TERRAIN, sky.FLORA = TERRAIN, FLORA
 
 return sky

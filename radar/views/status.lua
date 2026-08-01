@@ -71,7 +71,10 @@ function view.build(container, app)
 
     ly = row(leftX, ly, "Range", config.rangeLabel(app.cfg) ..
       "   every " .. config.scanInterval(app.cfg) .. "s")
-    ly = row(leftX, ly, "Rotation", config.rotationLabel(app.cfg))
+    ly = row(leftX, ly, "Scope", config.orientationLabel(app.cfg, app.heading),
+      config.isUnlocked(app.cfg)
+        and (app.heading and theme.accent or theme.warn)
+        or theme.text)
     ly = row(leftX, ly, "Alerts", (app.cfg.alert and "on" or "MUTED") ..
       "  within " .. config.alertRangeLabel(app.cfg),
       app.cfg.alert and theme.good or theme.warn)
@@ -105,6 +108,9 @@ function view.build(container, app)
         ry = row(rightX, ry, "Moon", snap.moonName or "-")
       end
       ry = row(rightX, ry, "Biome", snap.biomeName or "-")
+      ry = row(rightX, ry, "Ground", (scene.groundLabel or "-")
+        .. (scene.groundForced and "  (forced)" or ""),
+        scene.groundForced and theme.warn or theme.dim)
       ry = row(rightX, ry, "Light", ("sky %s   block %s"):format(
         snap.skyLight or "?", snap.blockLight or "?"))
     else

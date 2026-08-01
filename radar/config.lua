@@ -4,7 +4,8 @@
 -- the older pocket version it grew out of) are imported on first run, so an
 -- existing station keeps its base coordinates, ignore list and history.
 
-local util = require("radar.util")
+local util   = require("radar.util")
+local biomes = require("radar.biomes")
 
 local config = {}
 
@@ -44,6 +45,29 @@ config.SCAN_INTERVALS = { 0.5, 1, 2, 3, 5 }
 -- Page ids a display can show. "settings" is deliberately absent: it is
 -- reachable from the terminal only, since monitors have no keyboard.
 config.PAGES = { "radar", "contacts", "weather", "log", "status" }
+
+-- ------------------------------------------------------------ orientation ---
+-- FIXED keeps a chosen bearing at the top of the scope for a monitor bolted to
+-- a wall. HEADING unlocks it and turns the picture with the operator, which is
+-- what you want on anything that moves.
+
+config.ORIENTATIONS = {
+  { id = "fixed",   label = "Locked",   hint = "a chosen bearing stays at the top" },
+  { id = "heading", label = "Unlocked", hint = "the scope turns with you" },
+}
+
+config.HEADING_STEPS = {
+  { value = 0,  label = "Smooth - free rotation" },
+  { value = 5,  label = "5 deg steps" },
+  { value = 15, label = "15 deg steps" },
+  { value = 45, label = "45 deg steps - 8 point compass" },
+  { value = 90, label = "90 deg steps - quarter turns" },
+}
+
+config.HEADING_INTERVALS = { 0.25, 0.5, 1, 2 }
+
+-- How long a monitor rests on a page before the rotation moves it along.
+config.CYCLE_INTERVALS = { 5, 10, 15, 20, 30, 45, 60, 120, 300 }
 
 config.RS_MODES = {
   { id = "pulse",  label = "Pulse",  hint = "brief blip on each new contact" },
@@ -135,7 +159,12 @@ function config.defaults()
     rangeIndex      = config.MAX_RANGE_INDEX,
     alertRangeIndex = config.MAX_RANGE_INDEX,
     scanIndex       = 2,                 -- SCAN_INTERVALS[2] = 1 second
-    rotation        = 0,                 -- true bearing shown at the top
+
+    orientation     = "fixed",           -- "fixed" or "heading"
+    rotation        = 0,                 -- bearing at the top while fixed
+    headingStep     = 0,                 -- snap the heading; 0 = free rotation
+    headingSeconds  = 0.5,               -- how often the yaw is re-read
+    headingSmooth   = true,              -- ease into a turn instead of jumping
 
     alert     = true,                    -- master alert switch
     flash     = true,                    -- flash every screen red
@@ -145,8 +174,10 @@ function config.defaults()
     env        = true,                   -- poll the environment detector
     envSeconds = 2,                      -- how often, in seconds
     animate    = true,                   -- animate the sky and radar sweep
+    biomeScene = "auto",                 -- weather-page scenery, or a forced one
 
     terminalPage = "status",
+    tapCycle     = true,                 -- tapping a monitor moves it on a page
 
     sound = {
       enabled = true,
@@ -165,8 +196,33 @@ function config.defaults()
       invert     = false,
     },
 
-    displays = {},                       -- [peripheralName] = {page=, scale=}
+    displays = {},                       -- [peripheralName] = displayDefaults()
   }
+end
+
+--- Per-monitor settings. `cycleSkip` holds the pages left OUT of the automatic
+--- rotation, so a page added in a later version joins the rotation by default
+--- rather than silently disappearing from it.
+function config.displayDefaults()
+  return {
+    page         = "radar",
+    scale        = 0.5,
+    cycle        = false,
+    cycleSeconds = 15,
+    cycleSkip    = {},
+  }
+end
+
+--- Pages a display rotates through, in PAGES order. Never returns an empty
+--- list: a rotation that excluded everything would strand the monitor.
+function config.cyclePages(entry)
+  local skip = type(entry) == "table" and entry.cycleSkip or {}
+  local pages = {}
+  for _, page in ipairs(config.PAGES) do
+    if not skip[page] then pages[#pages + 1] = page end
+  end
+  if #pages == 0 then return { config.PAGES[1] } end
+  return pages
 end
 
 -- -------------------------------------------------------------- sanitising ---
@@ -178,6 +234,30 @@ local function indexOfId(list, id)
     if entry.id == id or entry == id then return i end
   end
   return nil
+end
+
+--- Nearest legal entry of a { value = , label = } list.
+local function snapToValue(list, value, fallback)
+  value = tonumber(value)
+  if not value then return fallback end
+  local best, bestGap = fallback, math.huge
+  for _, entry in ipairs(list) do
+    local gap = math.abs(entry.value - value)
+    if gap < bestGap then best, bestGap = entry.value, gap end
+  end
+  return best
+end
+
+--- Nearest legal entry of a plain array of numbers.
+local function snapToNumber(list, value, fallback)
+  value = tonumber(value)
+  if not value then return fallback end
+  local best, bestGap = fallback, math.huge
+  for _, entry in ipairs(list) do
+    local gap = math.abs(entry - value)
+    if gap < bestGap then best, bestGap = entry, gap end
+  end
+  return best
 end
 
 --- Fills in missing keys and forces every value back into a legal range, so a
@@ -203,6 +283,10 @@ function config.sanitise(cfg)
   cfg.rotation        = math.floor(tonumber(cfg.rotation) or 0) % 360
   cfg.envSeconds      = clamp(tonumber(cfg.envSeconds) or 2, 1, 30)
 
+  if not indexOfId(config.ORIENTATIONS, cfg.orientation) then cfg.orientation = "fixed" end
+  cfg.headingStep    = snapToValue(config.HEADING_STEPS, cfg.headingStep, 0)
+  cfg.headingSeconds = snapToNumber(config.HEADING_INTERVALS, cfg.headingSeconds, 0.5)
+
   cfg.sound.index   = clamp(math.floor(tonumber(cfg.sound.index) or 1), 1, #config.SOUNDS)
   cfg.sound.volume  = clamp(tonumber(cfg.sound.volume) or 2, 0, 3)
   cfg.sound.pitch   = clamp(tonumber(cfg.sound.pitch) or 1, 0.5, 2)
@@ -217,14 +301,38 @@ function config.sanitise(cfg)
   if type(cfg.myName) ~= "string" or #cfg.myName == 0 then cfg.myName = nil end
 
   if not config.isPage(cfg.terminalPage) then cfg.terminalPage = "status" end
+  cfg.tapCycle = cfg.tapCycle ~= false
+
+  if cfg.biomeScene ~= "auto" and not biomes.PROFILES[cfg.biomeScene] then
+    cfg.biomeScene = "auto"
+  end
 
   if type(cfg.displays) ~= "table" then cfg.displays = {} end
   for name, entry in pairs(cfg.displays) do
     if type(entry) ~= "table" then
-      cfg.displays[name] = { page = "radar", scale = 0.5 }
+      cfg.displays[name] = config.displayDefaults()
     else
+      for key, value in pairs(config.displayDefaults()) do
+        if entry[key] == nil then entry[key] = value end
+      end
       if not config.isPage(entry.page) then entry.page = "radar" end
       entry.scale = clamp(tonumber(entry.scale) or 0.5, 0.5, 5)
+      entry.cycle = entry.cycle == true
+      entry.cycleSeconds = snapToNumber(config.CYCLE_INTERVALS, entry.cycleSeconds, 15)
+
+      -- Only real page ids may sit in the skip set, and it may never cover
+      -- every page: a rotation with nothing in it would freeze the monitor.
+      local skip = {}
+      if type(entry.cycleSkip) == "table" then
+        for page, on in pairs(entry.cycleSkip) do
+          if on and config.isPage(page) then skip[page] = true end
+        end
+      end
+      local kept = 0
+      for _, page in ipairs(config.PAGES) do
+        if not skip[page] then kept = kept + 1 end
+      end
+      entry.cycleSkip = kept > 0 and skip or {}
     end
   end
 
@@ -299,13 +407,34 @@ function config.alertRangeLabel(cfg) return config.RANGES[cfg.alertRangeIndex].l
 function config.scanInterval(cfg)   return config.SCAN_INTERVALS[cfg.scanIndex] end
 function config.sound(cfg)          return config.SOUNDS[cfg.sound.index] end
 
+local UP_NAMES = {
+  [0] = "N up", [45] = "NE up", [90] = "E up", [135] = "SE up",
+  [180] = "S up", [225] = "SW up", [270] = "W up", [315] = "NW up",
+}
+
 function config.rotationLabel(cfg)
-  local names = {
-    [0] = "N up", [45] = "NE up", [90] = "E up", [135] = "SE up",
-    [180] = "S up", [225] = "SW up", [270] = "W up", [315] = "NW up",
-  }
-  local name = names[cfg.rotation]
+  local name = UP_NAMES[cfg.rotation]
   return cfg.rotation .. (name and (" deg, " .. name) or " deg")
+end
+
+function config.headingStepLabel(cfg)
+  for _, entry in ipairs(config.HEADING_STEPS) do
+    if entry.value == cfg.headingStep then return entry.label end
+  end
+  return cfg.headingStep .. " deg steps"
+end
+
+function config.isUnlocked(cfg) return cfg.orientation == "heading" end
+
+--- One line describing how the scope is oriented. `heading` is the bearing
+--- currently being followed, or nil when the operator's yaw is unreadable.
+function config.orientationLabel(cfg, heading)
+  if not config.isUnlocked(cfg) then
+    return "locked - " .. config.rotationLabel(cfg)
+  end
+  if not heading then return "unlocked - no heading fix" end
+  return ("unlocked - %d deg%s"):format(util.round(heading) % 360,
+    cfg.headingStep > 0 and (", " .. cfg.headingStep .. " deg steps") or "")
 end
 
 return config

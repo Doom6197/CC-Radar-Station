@@ -15,8 +15,8 @@
 
     OPTIONAL
       Environment Detector (Advanced Peripherals)
-                         unlocks the WEATHER page: live sky, time of day,
-                         moon phase, biome and light levels
+                         unlocks the WEATHER page: live sky, biome scenery,
+                         time of day, moon phase and light levels
       Advanced Monitor(s)
                          any size; each monitor shows its own page
       Speaker(s)         every speaker on the network plays the alert
@@ -25,7 +25,7 @@
   ---------------------------------------------------------------------------
   INSTALL
   ---------------------------------------------------------------------------
-    wget run https://raw.githubusercontent.com/JeffDoom/cc-radar-station/main/install.lua
+    wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 
     That fetches every file and offers to install Basalt 2.5 too. Add
     --startup to launch the radar on boot. Then:
@@ -47,6 +47,7 @@
     Left/Right previous / next page
     Up/Down    scan range up / down
     R          rotate the picture 45 degrees
+    L          lock / unlock the scope orientation
     T          toggle FIXED / SELF tracking
     A          mute or unmute alerts
     P          test the alert sound
@@ -55,8 +56,9 @@
     C          clear the log
     Q          quit
 
-    Mouse and monitor taps work everywhere. Tapping a monitor that is too
-    small for a tab strip moves it to the next page.
+    Mouse and monitor taps work everywhere. Right-clicking a monitor moves it
+    to the next page, and a monitor can cycle its pages on a timer -- both are
+    set up under Settings / Displays.
 
   ---------------------------------------------------------------------------
   NOTES
@@ -64,6 +66,15 @@
     ROTATION only turns the picture, so a monitor can hang on any wall with
     "up" matching the way you face. Distances and the N/NE/E labels stay true
     compass bearings.
+
+    ORIENTATION can instead be UNLOCKED, so the scope turns with you and the
+    top of the picture is whatever you are looking at. That reads your yaw,
+    which needs your username set. Press L, or use Settings / Orientation.
+
+    SCENERY on the weather page comes from the biome the Environment Detector
+    reports: terrain, plants and colours all follow it, and the Nether and the
+    End vary by sub-biome too. A pack whose biome the station reads wrongly
+    can force one under Settings / Environment / Scenery.
 
     FIXED vs SELF: getPlayersInRange() is always centred on the Player
     Detector BLOCK. FIXED changes only what distances are measured FROM, so

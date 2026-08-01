@@ -103,10 +103,21 @@ function view.build(container, app)
     grid:hline(cx - 2, cx + 2, cy, BRIGHT)
     grid:vline(cx, cy - 2, cy + 2, BRIGHT)
 
+    -- Lubber line: with the orientation unlocked the top of the scope is
+    -- wherever the operator is looking, so it needs marking. A fixed scope
+    -- gets no line, because the compass letters already say which way is up.
+    local unlocked = config.isUnlocked(app.cfg)
+    if unlocked and app.heading then
+      grid:vline(cx, cy - radiusPx - 2, cy - radiusPx + 1, BRIGHT)
+      grid:hline(cx - 1, cx + 1, cy - radiusPx, BRIGHT)
+    end
+
+    local rotation = app:rotation()
+
     -- Contacts, furthest first so the nearest wins the pixel.
     for i = #app.contacts, 1, -1 do
       local contact = app.contacts[i]
-      local rx, rz = util.rotateXZ(contact.dx, contact.dz, app.cfg.rotation)
+      local rx, rz = util.rotateXZ(contact.dx, contact.dz, rotation)
       local px, py = cx + rx * scale, cy + rz * scale
       -- Clamp anything past the edge onto the rim rather than dropping it.
       local dx, dy = px - cx, py - cy
@@ -136,7 +147,7 @@ function view.build(container, app)
     local bearings = cellW >= 34
       and { 0, 45, 90, 135, 180, 225, 270, 315 } or { 0, 90, 180, 270 }
     for _, bearing in ipairs(bearings) do
-      local sx, sy = util.bearingToScreen(bearing, app.cfg.rotation)
+      local sx, sy = util.bearingToScreen(bearing, rotation)
       local label = util.DIR_NAMES[floor(bearing / 45) + 1]
       local tx, ty = cellOf(cx + sx * (radiusPx + 3), cy + sy * (radiusPx + 3))
       tx = util.clamp(tx - floor(#label / 2), 1, cellW - #label + 1)
@@ -157,9 +168,20 @@ function view.build(container, app)
       buf:blit(max(1, cellW - #text + 1), 1, text, nearest.zoneColor, theme.bg)
     end
 
-    if app.cfg.rotation ~= 0 then
-      local text = app.cfg.rotation .. " deg"
-      buf:blit(max(1, cellW - #text + 1), cellH, text, theme.line, theme.bg)
+    -- Orientation readout, bottom right. An unlocked scope always says so,
+    -- because "which way is up" is no longer something you can assume.
+    local text, color
+    if unlocked then
+      if app.heading then
+        text, color = ("HDG %03d"):format(util.round(app:rotation()) % 360), theme.accent
+      else
+        text, color = "HDG --", theme.warn
+      end
+    elseif app.cfg.rotation ~= 0 then
+      text, color = app.cfg.rotation .. " deg", theme.line
+    end
+    if text then
+      buf:blit(max(1, cellW - #text + 1), cellH, text, color, theme.bg)
     end
 
     if app.scanError then

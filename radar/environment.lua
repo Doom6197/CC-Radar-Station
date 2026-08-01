@@ -6,31 +6,18 @@
 -- cadence. The result is a single flat snapshot table plus a `scene` table
 -- that the sky painter consumes without knowing anything about peripherals.
 
-local util  = require("radar.util")
-local theme = require("radar.theme")
+local util   = require("radar.util")
+local theme  = require("radar.theme")
+local biomes = require("radar.biomes")
 
 local environment = {}
 environment.__index = environment
 
 local DAY = 24000
 
--- Blocks where precipitation falls as snow rather than rain.
-local COLD_BIOME = {
-  "snowy", "frozen", "ice_spikes", "grove", "jagged_peaks", "frozen_peaks",
-}
--- Blocks where it never visibly precipitates at all, however wet the world is.
-local DRY_BIOME = {
-  "desert", "badlands", "savanna", "mesa", "nether", "basalt_deltas",
-  "crimson_forest", "warped_forest", "soul_sand_valley",
-}
-
-local function matchesAny(text, list)
-  if not text then return false end
-  for _, needle in ipairs(list) do
-    if text:find(needle, 1, true) then return true end
-  end
-  return false
-end
+-- Whether precipitation falls as snow, and whether it shows at all, are both
+-- properties of the ground you are standing on, so they come from the biome
+-- profile rather than from a second list kept in step by hand.
 
 --- "minecraft:the_nether" -> "nether"
 local function dimensionKind(id)
@@ -148,7 +135,7 @@ function environment:poll(kit, cfg, force)
   snap.kind = dimensionKind(snap.dimension)
   snap.moonName = environment.MOON_NAMES[snap.moonId or 0] or "Unknown"
 
-  snap.scene = environment.describe(snap)
+  snap.scene = environment.describe(snap, cfg.biomeScene)
   self.snapshot = snap
   return snap
 end
@@ -156,8 +143,11 @@ end
 -- ----------------------------------------------------------------- scenes ---
 
 --- Turns a snapshot into everything the sky painter needs: which palette to
---- use, what is falling out of the sky, and where the sun or moon sits.
-function environment.describe(snap)
+--- use, what is falling out of the sky, where the sun or moon sits, and what
+--- kind of ground sits under all of it.
+---@param snap table
+---@param override? string A radar.biomes profile id to force, or "auto"/nil
+function environment.describe(snap, override)
   local scene = {
     kind = snap.kind,
     phase = snap.phase,
@@ -168,65 +158,69 @@ function environment.describe(snap)
     night = (snap.phase == "night"),
   }
 
+  -- The ground is chosen first, because whether it can rain or snow at all is
+  -- a property of the biome rather than of the sky.
+  local forced = (override and override ~= "auto" and biomes.PROFILES[override]) and override or nil
+  scene.groundKind = forced or biomes.classify(snap.biome, snap.kind)
+  scene.ground = biomes.profile(scene.groundKind)
+  scene.groundLabel = scene.ground.label
+  scene.groundForced = forced ~= nil
+
+  local base
   if snap.kind == "nether" then
-    scene.weather = "clear"
-    scene.palette = theme.skies.nether
+    scene.weather, base = "clear", theme.skies.nether
     scene.body = "none"
     scene.title = "The Nether"
-    scene.subtitle = "Ash and firelight"
-    return scene
-  end
-
-  if snap.kind == "the_end" then
-    scene.weather = "clear"
-    scene.palette = theme.skies.theEnd
+    scene.subtitle = scene.ground.label
+  elseif snap.kind == "the_end" then
+    scene.weather, base = "clear", theme.skies.theEnd
     scene.body = "none"
     scene.title = "The End"
     scene.subtitle = "Void sky"
-    return scene
-  end
-
-  local dry = matchesAny(snap.biome, DRY_BIOME)
-  local cold = matchesAny(snap.biome, COLD_BIOME)
-
-  if snap.thundering and not dry then
-    scene.weather = "storm"
-    scene.palette = theme.skies.storm
+  elseif snap.thundering and not scene.ground.dry then
+    scene.weather, base = "storm", theme.skies.storm
     scene.body = "none"
     scene.title = "Thunderstorm"
-  elseif snap.raining and not dry then
-    if cold then
+  elseif snap.raining and not scene.ground.dry then
+    if scene.ground.cold then
       scene.weather = "snow"
-      scene.palette = scene.night and theme.skies.snowNight or theme.skies.snow
+      base = scene.night and theme.skies.snowNight or theme.skies.snow
       scene.title = "Snowfall"
     else
       scene.weather = "rain"
-      scene.palette = scene.night and theme.skies.rainNight or theme.skies.rain
+      base = scene.night and theme.skies.rainNight or theme.skies.rain
       scene.title = "Rain"
     end
     scene.body = "none"
   else
     scene.weather = "clear"
-    scene.palette = theme.skies[snap.phase] or theme.skies.day
+    base = theme.skies[snap.phase] or theme.skies.day
     local titles = {
       dawn = "Sunrise", day = "Clear Skies",
       dusk = "Sunset", night = "Clear Night",
     }
     scene.title = titles[snap.phase] or "Clear"
-    if snap.raining and dry then
+    if snap.raining and scene.ground.dry then
       scene.subtitle = "Raining elsewhere; this biome stays dry"
     end
   end
+
+  -- Underground there is no sky to put anything in.
+  if scene.ground.terrain == "cavern" then
+    scene.body = "none"
+    scene.weather = "clear"
+    scene.title = scene.ground.label
+    scene.subtitle = scene.subtitle or "Underground"
+  end
+
+  scene.mood = biomes.moodFor(scene)
+  scene.palette = theme.scenePalette(base, scene.groundKind, scene.mood)
 
   if not scene.subtitle then
     if scene.body == "moon" then
       scene.subtitle = snap.moonName
     else
-      local phases = {
-        dawn = "Early morning", day = "Daytime",
-        dusk = "Evening", night = "After dark",
-      }
-      scene.subtitle = phases[snap.phase] or ""
+      scene.subtitle = scene.ground.label
     end
   end
 

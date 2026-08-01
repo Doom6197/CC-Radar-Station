@@ -71,10 +71,10 @@ wget run <url> master
 ## 4. Install in game
 
 ```
-wget run https://raw.githubusercontent.com/JeffDoom/cc-radar-station/main/install.lua
+wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 ```
 
-**If your GitHub username is not `JeffDoom`**, substitute it in that URL and
+**If your GitHub username is not `Doom6197`**, substitute it in that URL and
 also pass it as an argument, because the installer has the default baked in for
 the files it fetches afterwards:
 

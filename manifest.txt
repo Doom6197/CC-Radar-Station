@@ -5,6 +5,7 @@
 radar.lua
 radar/alerts.lua
 radar/app.lua
+radar/biomes.lua
 radar/config.lua
 radar/environment.lua
 radar/glyphs.lua
