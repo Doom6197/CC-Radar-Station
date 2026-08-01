@@ -1,0 +1,83 @@
+-- Detection history, plus the visitor tally derived from it.
+-- Wide displays get both side by side; narrow ones get the history only.
+
+local theme = require("radar.theme")
+local util  = require("radar.util")
+
+local view = {}
+
+local ZONE_COLORS = {
+  CLOSE   = theme.alarm,
+  MEDIUM  = theme.warn,
+  FAR     = theme.accent,
+  EXTREME = theme.dim,
+}
+
+function view.build(container, app)
+  local canvas = container:addCanvas({
+    x = 1, y = 1,
+    width = function(s) return s.parent.width end,
+    height = function(s) return s.parent.height end,
+    background = theme.bg,
+  })
+
+  canvas.draw = function(self, buf)
+    local w, h = self.width, self.height
+    buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+
+    local entries = app.log.entries
+    local twoPane = w >= 52
+    local historyWidth = twoPane and (w - 24) or w
+
+    buf:blit(2, 1, ("HISTORY (%d)"):format(#entries), theme.accent, theme.bg)
+    buf:fill(1, 2, historyWidth, 1, "-", theme.line, theme.bg)
+
+    if #entries == 0 then
+      buf:blit(2, 4, "Nothing logged yet.", theme.dim, theme.bg)
+      buf:blit(2, 5, "Arrivals are recorded automatically.", theme.line, theme.bg)
+    else
+      local showZone = historyWidth >= 44
+      local nameWidth = util.clamp(historyWidth - 24, 6, 14)
+      local row = 3
+      for _, entry in ipairs(entries) do
+        if row > h then break end
+        buf:blit(2, row, util.fit(entry.time or "", 10), theme.line, theme.bg)
+        buf:blit(13, row, util.shorten(entry.name, nameWidth), theme.text, theme.bg)
+        local distX = 13 + nameWidth + 1
+        buf:blit(distX, row, util.fit((entry.dist or 0) .. "m", 7, true),
+          ZONE_COLORS[entry.zone] or theme.dim, theme.bg)
+        buf:blit(distX + 8, row, util.fit(entry.dir or "", 3), theme.accent, theme.bg)
+        if showZone then
+          buf:blit(distX + 12, row, util.fit(entry.zone or "", 7),
+            ZONE_COLORS[entry.zone] or theme.dim, theme.bg)
+        end
+        row = row + 1
+      end
+    end
+
+    if not twoPane then return end
+
+    -- Visitor tally on the right.
+    local x = historyWidth + 2
+    buf:fill(x - 1, 1, 1, h, " ", theme.line, theme.line)
+    buf:blit(x + 1, 1, "TOP VISITORS", theme.accent, theme.bg)
+    buf:fill(x + 1, 2, w - x, 1, "-", theme.line, theme.bg)
+
+    local stats = app.log:stats()
+    if #stats == 0 then
+      buf:blit(x + 1, 4, "(none yet)", theme.dim, theme.bg)
+      return
+    end
+    local row = 3
+    for _, entry in ipairs(stats) do
+      if row > h then break end
+      buf:blit(x + 1, row, util.shorten(entry.name, 13), theme.text, theme.bg)
+      buf:blit(x + 15, row, util.fit("x" .. entry.count, 5, true), theme.warn, theme.bg)
+      row = row + 1
+    end
+  end
+
+  return { refresh = function() canvas:markRenderDirty() end }
+end
+
+return view
