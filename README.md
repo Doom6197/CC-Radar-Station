@@ -46,7 +46,7 @@ imported automatically on first run** — as are the older `pocket_radar.*` file
 On the computer in game:
 
 ```
-wget run https://raw.githubusercontent.com/JeffDoom/cc-radar-station/main/install.lua
+wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 ```
 
 That pulls down all 20 files and offers to install Basalt 2.5 for you. Then:
