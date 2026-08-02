@@ -25,7 +25,7 @@ over rednet — along with energy readings collected from any number of
 - [Profiles](#profiles) — base, pocket, airship
 - [Pages](#pages)
 - [Modules](#modules) — the plugin system, and how to write one
-- [Power](#power) � and the power clients that feed it
+- [Power](#power) — and the power clients that feed it
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
 - [The network: main base, mobiles and power clients](#the-network-main-base-mobiles-and-power-clients)
@@ -175,7 +175,7 @@ that is hard to read.
 | `4` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
 | `5` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
 | `6` | **Log** | Detection history, plus a visitor tally on wide screens |
-| `7` | **Settings** | Everything configurable, on one scrolling page � starting with the version and the profile |
+| `7` | **Settings** | Everything configurable, on one scrolling page — starting with the version and the profile |
 
 The number keys follow the tab strip rather than a fixed table, so switching a
 module off does not leave a hole in the numbering. Monitors can show any page
@@ -353,6 +353,28 @@ It needs a modem and at least one Energy Detector or battery. **No** Player
 Detector, no monitor, no Basalt. It draws a plain status readout so you can see
 at a glance that it is being heard.
 
+| Key | |
+|---|---|
+| `R` | **rename it** — this is the name the main base shows against its readings |
+| `B` | point it at a different main base |
+| `Q` | stop |
+
+Both are remembered in `powerclient.cfg` next to the program, so they are set
+once. A name on the command line is a deliberate rename and sticks too.
+
+### Which base a client reports to
+
+On a shared server there may be several unrelated main bases, each with their
+own clients. A client that shouted its readings to the whole world would put
+everybody's power into everybody's graph — so on first run it **listens for
+main bases announcing themselves, asks which one is yours**, and from then on
+addresses that computer directly. Nobody else receives it.
+
+The payload also carries the id of the base it was meant for, so a base ignores
+readings that were never meant for it even if it does hear them. *Any main base
+(broadcast)* is offered as well, for a single-player world where there is
+nothing to collide with.
+
 Run as many as you like. They are merged by computer id, so:
 
 - a client that stops reporting **drops out on its own** after about fifteen
@@ -367,15 +389,31 @@ Run as many as you like. They are merged by computer id, so:
 The main base needs the **MAIN BASE** role for this: the modem has to be open,
 and a STANDALONE station deliberately never opens one.
 
-### Which mods work
+### Which mods work, and what units they answer in
 
 Matching is on **method name**, never on peripheral type, so nothing here
 depends on a mod being installed. A block answering `getEnergy()` and
 `getMaxEnergy()` is a battery whatever it came from — which covers the
 Mekanism induction matrix, Powah cells and Flux Networks points among others,
-including spellings this was never tested against. Mekanism quotes joules and
-most other mods quote FE; nothing is converted, so pick the label you recognise
-under *Settings → Power → Units*.
+including spellings this was never tested against.
+
+Mods do not agree on what the number *means*. Most quote Forge Energy;
+**Mekanism quotes Joules**, and its API keeps doing so whatever the client is
+set to display. A Basic Energy Cube holding 1.6 MFE answers `getMaxEnergy()`
+with `4000000`, because Mekanism uses **2.5 J to the FE** — so reading it as FE
+overstates it by exactly two and a half times.
+
+Every device is therefore read raw and scaled per device on the way into the
+totals, so one grid can mix a Mekanism matrix with an Energy Detector and still
+add up. The unit is guessed from the methods the peripheral offers — a
+Forge-style `getEnergyCapacity()` means Forge Energy; Mekanism-only calls mean
+Joules — and it is **shown against the device** under
+*Settings → Power → Devices*, where you can correct it. Guessing wrong by 2.5×
+is exactly the kind of error that looks plausible until you check it, so it is
+never silent.
+
+*Settings → Power → Units* is a separate thing: the **label** printed after the
+numbers, for whichever of FE / RF / J / E you recognise.
 
 ---
 
@@ -672,7 +710,7 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 120 checks
+lua preview/smoke-test.lua .        # 127 checks
 lua preview/install-test.lua .      # 16 checks
 lua preview/render-preview.lua . preview
 ```
@@ -730,6 +768,13 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.1.** Mekanism reports **Joules**, not FE — a Basic Energy Cube holding
+1.6 MFE answers `getMaxEnergy()` with 4,000,000 — so every device is now read
+raw and scaled per device, with the unit guessed from the methods it offers and
+shown where you can correct it. Power clients **pair with one main base** and
+address it directly, so several crews on a server no longer pool their readings.
+A client can be renamed with `R` and repointed with `B`, and remembers both.
 
 **v8 — networked edition.** Roles renamed to what they are actually used for:
 **MAIN BASE** (the chunk-loaded master that holds the detectors), **MOBILE**

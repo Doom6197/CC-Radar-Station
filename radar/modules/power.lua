@@ -83,6 +83,7 @@ view.defaults = {
     alarm         = true,
     lowPercent    = 20,
     roles         = {},       -- source key -> "in" | "out" | "off"
+    units         = {},       -- source key -> "fe" | "j"; see radar/power.lua
 
     -- Accept readings from power clients. The modem still has to be open for
     -- its own reasons -- a STANDALONE station never opens one -- so in
@@ -139,6 +140,18 @@ function view.sanitise(cfg)
     end
   end
   p.roles = roles
+
+  -- Per-device unit overrides. Only ids that exist; anything else falls back
+  -- to what the device's own methods suggest.
+  local units = {}
+  if type(p.units) == "table" then
+    for name, id in pairs(p.units) do
+      if type(name) == "string" and powerLib.unit(id).id == id then
+        units[name] = id
+      end
+    end
+  end
+  p.units = units
 end
 
 -- Registered at load time rather than in attach(), so the mode exists before
@@ -172,12 +185,19 @@ function view.attach(app)
   -- computer has can be driven by the power page instead of the contact list.
   app.alerts:provideLevel("buffer", function() return app.power:fraction() end)
 
-  -- Readings arriving from a power client. Broadcast rather than paired: a
-  -- client has nothing worth protecting and no idea who is listening, so it
-  -- reports to whoever is, and the base decides what to do with it.
+  -- Readings arriving from a power client.
+  --
+  -- A paired client addresses this computer directly, so on a shared server
+  -- nobody else's readings can reach it. It also stamps the payload with the
+  -- base it meant, which is what makes a broadcasting client -- the "any main
+  -- base" option -- safe to ignore when it was meant for somebody else.
   linkLib.onProtocol(view.PROTOCOL, function(_, target, id, message)
     if not target or not target.cfg.power.clients then return false end
     if message.t ~= "pw" then return false end
+
+    local meantFor = tonumber(message.b)
+    if meantFor and meantFor ~= os.getComputerID() then return false end
+
     local accepted = target.power:applyClient(id, message)
     if accepted then target:emit("power") end
     return accepted
@@ -433,8 +453,11 @@ function view.build(container, app)
       if model.error then
         parts[#parts + 1] = model.error
       else
+        local state = model:bufferState()
         local seconds, direction = model:timeToLimit()
-        if seconds then
+        if state then
+          parts[#parts + 1] = state
+        elseif seconds then
           parts[#parts + 1] = ("%s in %s"):format(direction, powerLib.duration(seconds))
         elseif model.hasStore then
           parts[#parts + 1] = "holding"
@@ -504,24 +527,46 @@ function view.settings(ctx)
     -- One picker for the list, another for the chosen device's role, then back
     -- to the list -- the same shape the ignore list and the backdrop cycle use.
     local function editDevice(source)
+      local key = source.key or source.name
       local entries = {}
       for _, role in ipairs(view.ROLES) do
         entries[#entries + 1] = {
           label = ctx.withHint(role.label, role.hint),
-          value = role.id,
+          value = "role:" .. role.id,
         }
       end
+
+      -- The unit matters as much as the role and is far easier to get wrong:
+      -- Mekanism answers in Joules, and reading those as FE overstates a
+      -- battery by exactly two and a half times.
+      local current = powerLib.unitOf(app.cfg, source)
+      for _, unit in ipairs(powerLib.UNITS) do
+        entries[#entries + 1] = {
+          label = (unit.id == current.id and "* " or "  ")
+            .. ctx.withHint("reads " .. unit.label, unit.hint),
+          value = "unit:" .. unit.id,
+        }
+      end
+
       if source._limitSet then
         entries[#entries + 1] = { label = "-- clear the transfer limit --", value = "nolimit" }
       end
-      ctx.openPicker(source.name, entries, powerLib.roleOf(app.cfg, source), function(value)
+
+      ctx.openPicker(source.name, entries,
+        "role:" .. powerLib.roleOf(app.cfg, source), function(value)
         if value == "nolimit" then
           -- Advanced Peripherals treats a limit of the maximum as "no limit";
           -- there is no separate call to remove one.
           local ok, message = app.power:setLimit(source, 2147483647)
           root:toast(ok and "Transfer limit cleared" or message, ok and "success" or "error")
+        elseif value:sub(1, 5) == "unit:" then
+          cfg.units[key] = value:sub(6)
+          app:saveConfig()
+          pcall(app.power.poll, app.power, app.cfg)
+          root:toast(source.name .. " reads " ..
+            powerLib.unit(cfg.units[key]).label, "success")
         else
-          cfg.roles[source.key or source.name] = value
+          cfg.roles[key] = value:sub(6)
           app:saveConfig()
         end
         ctx.refreshRows()
@@ -539,6 +584,11 @@ function view.settings(ctx)
         bits[#bits + 1] = ("%d%%"):format(
           util.round(source.stored / max(1, source.capacity) * 100))
       end
+      -- A device being read in anything but plain FE says so here, because it
+      -- is the difference between a right answer and one 2.5 times too big.
+      local unit = powerLib.unitOf(app.cfg, source)
+      if unit.id ~= "fe" then bits[#bits + 1] = unit.label end
+
       if source.fault then bits[#bits + 1] = source.fault end
 
       -- A device on a client is named for the client as well as for itself:

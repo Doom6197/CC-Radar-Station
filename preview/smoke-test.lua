@@ -1020,16 +1020,29 @@ local function fakeMeter(rate)
   }
 end
 
---- A directly wrapped battery, in the Mekanism spelling.
+--- A directly wrapped battery, in the Mekanism spelling. Mekanism quotes
+--- JOULES, so these numbers are 2.5x the FE the game shows on the block.
 local function fakeBattery(stored, capacity, lastIn, lastOut)
   return {
     __type = "inductionMatrix",
     getEnergy = function() return stored end,
     getMaxEnergy = function() return capacity end,
+    getEnergyFilledPercentage = function() return stored / capacity end,
     getLastInput = function() return lastIn end,
     getLastOutput = function() return lastOut end,
   }
 end
+
+--- The other spelling: a Forge-style battery, quoting FE as reported.
+local function fakeForgeBattery(stored, capacity)
+  return {
+    __type = "energyCell",
+    getEnergy = function() return stored end,
+    getEnergyCapacity = function() return capacity end,
+  }
+end
+
+local JOULES = 1 / powerLib.JOULES_PER_FE
 
 check("energy peripherals are recognised by method name", function()
   assert(powerLib.looksLikeEnergy(fakeMeter(10)), "a transfer rate is enough")
@@ -1086,8 +1099,9 @@ check("the model totals meters by the role they are given", function()
 end)
 
 check("a battery gives stored, capacity and its own throughput", function()
+  -- A Forge-style battery, quoting FE: the numbers come through untouched.
   local kit = { energy = {
-    powerLib.describe("matrix", fakeBattery(2.5e9, 1e10, 900, 400), "inductionMatrix"),
+    powerLib.describe("cell", fakeForgeBattery(2.5e9, 1e10), "energyCell"),
   } }
   local cfg = config.sanitise({})
 
@@ -1095,14 +1109,99 @@ check("a battery gives stored, capacity and its own throughput", function()
   model:attach(kit, cfg)
   model:poll(cfg, 100)
 
-  assert(model.stored == 2.5e9, "stored read")
+  assert(model.stored == 2.5e9, "stored read, got " .. tostring(model.stored))
   assert(model.capacity == 1e10, "capacity read")
   assert(math.abs(model.percent - 25) < 0.001, "percentage derived, got " .. model.percent)
   assert(model.hasStore, "flagged as having a buffer")
-  assert(model.input == 900 and model.output == 400,
-    "its own throughput is used, got " .. model.input .. "/" .. model.output)
-  assert(model.net == 500, "net follows")
   assert(math.abs(model:fraction() - 0.25) < 0.001, "and the redstone fraction agrees")
+
+  -- And a Mekanism one reporting its own throughput.
+  kit.energy = {
+    powerLib.describe("matrix", fakeBattery(2.5e9, 1e10, 900, 400), "inductionMatrix"),
+  }
+  model:attach(kit, cfg)
+  model:poll(cfg, 101)
+  assert(math.abs(model.percent - 25) < 0.001, "a percentage is unit-free")
+  assert(model.input == 900 * JOULES and model.output == 400 * JOULES,
+    "its own throughput is used, got " .. model.input .. "/" .. model.output)
+  assert(model.net == model.input - model.output, "net follows")
+end)
+
+check("Mekanism joules are converted; forge energy is not", function()
+  -- A Basic Energy Cube holds 1.6 MFE and answers getMaxEnergy() with
+  -- 4,000,000 -- because Mekanism quotes JOULES, at 2.5 J to the FE. Reading
+  -- that as FE overstates the whole grid by exactly two and a half times.
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {
+    powerLib.describe("energyCube", fakeBattery(4e6, 4e6), "basicEnergyCube"),
+  } }, cfg)
+  model:poll(cfg, 1)
+
+  assert(model.capacity == 1.6e6,
+    "1.6 MFE, not 4M, got " .. powerLib.format(model.capacity))
+  assert(powerLib.format(model.capacity) == "1.60M",
+    "which is what the page shows, got " .. powerLib.format(model.capacity))
+  assert(model.percent == 100, "a full cube is still full")
+
+  -- The guess is made from the methods the peripheral offers, and is visible
+  -- and overridable rather than silent.
+  local source = model.sources[1]
+  assert(source.guessedUnit == "j", "guessed Joules from the Mekanism methods")
+  assert(powerLib.unitOf(cfg, source).id == "j", "and that is what it reads in")
+
+  cfg.power.units = { energyCube = "fe" }
+  model:poll(cfg, 2)
+  assert(model.capacity == 4e6, "overriding it back to FE is honoured")
+  assert(powerLib.unitOf(cfg, source).id == "fe", "and the unit says so")
+
+  cfg.power.units = { energyCube = "nonsense" }
+  config.sanitise(cfg)
+  assert(next(cfg.power.units) == nil, "an unknown unit is dropped")
+  model:poll(cfg, 3)
+  assert(model.capacity == 1.6e6, "falling back to the guess")
+
+  -- A Forge-style capacity call means a Forge-style number, whatever else the
+  -- peripheral happens to offer.
+  local forge = powerLib.describe("cell", fakeForgeBattery(1000, 2000), "energyCell")
+  assert(forge.guessedUnit == "fe", "getEnergyCapacity is Forge Energy")
+
+  -- Repeated polls must not compound the conversion.
+  local repeated = powerLib.new()
+  repeated:attach({ energy = {
+    powerLib.describe("cube", fakeBattery(4e6, 4e6), "basicEnergyCube"),
+  } }, cfg)
+  for i = 1, 5 do repeated:poll(config.sanitise({}), i) end
+  assert(repeated.capacity == 1.6e6,
+    "five polls, same answer, got " .. powerLib.format(repeated.capacity))
+end)
+
+check("a client's readings are converted on the base, not on the client", function()
+  -- The client sends raw numbers and its guess; the base decides. That keeps
+  -- the conversion one decision in one place, and lets it be corrected
+  -- without touching the client computer.
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {} }, cfg)
+
+  model:applyClient(5, { t = "pw", n = "Matrix room", s = {
+    { n = "matrix", s = 4e6, c = 4e6, u = "j" },
+  } }, 1)
+  model:poll(cfg, 1)
+  assert(model.capacity == 1.6e6,
+    "the client's Joules are converted here, got " .. powerLib.format(model.capacity))
+
+  cfg.power.units = { ["5:matrix"] = "fe" }
+  model:poll(cfg, 2)
+  assert(model.capacity == 4e6, "and can be overridden per client device")
+
+  -- A client that says nothing about units is taken at face value.
+  model:applyClient(6, { t = "pw", n = "Cells", s = {
+    { n = "bank", s = 1000, c = 2000 },
+  } }, 2)
+  model:poll(config.sanitise({}), 3)
+  assert(model.capacity == 1.6e6 + 2000,
+    "an unmarked client reads as FE, got " .. powerLib.format(model.capacity))
 end)
 
 check("with no meter anywhere the rate comes from the storage change", function()
@@ -1279,6 +1378,44 @@ check("time to empty follows the net rate", function()
   model:attach(kit, cfg)
   model:poll(cfg, 3)
   assert(model:timeToLimit() == nil, "a balanced grid is not going anywhere")
+  assert(model:bufferState() == nil, "and a half-full bank is neither full nor empty")
+end)
+
+check("a buffer at either end reads as a state, not a countdown", function()
+  -- A full bank with a surplus was reporting "full in 0s", which is a
+  -- countdown that has already finished and reads as a fault.
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {
+    powerLib.describe("matrix", fakeBattery(4e6, 4e6, 900, 126), "inductionMatrix"),
+  } }, cfg)
+  model:poll(cfg, 1)
+
+  assert(model.percent == 100, "the bank is full")
+  assert(model.net > 0, "with power still coming in")
+  assert(model:timeToLimit() == nil, "so there is no time to full, got "
+    .. tostring(model:timeToLimit()))
+  assert(model:bufferState() == "full", "it is simply full")
+
+  -- The same at the bottom.
+  local empty = powerLib.new()
+  empty:attach({ energy = {
+    powerLib.describe("matrix", fakeBattery(0, 4e6, 0, 900), "inductionMatrix"),
+  } }, cfg)
+  empty:poll(cfg, 1)
+  assert(empty:timeToLimit() == nil, "nothing left to drain")
+  assert(empty:bufferState() == "empty", "it is simply empty")
+
+  -- In between, the countdown is the useful answer.
+  local draining = powerLib.new()
+  draining:attach({ energy = {
+    powerLib.describe("matrix", fakeBattery(2e6, 4e6, 0, 900), "inductionMatrix"),
+  } }, cfg)
+  draining:poll(cfg, 1)
+  assert(draining:bufferState() == nil, "half full is a countdown")
+  local seconds, direction = draining:timeToLimit()
+  assert(seconds and seconds > 0 and direction == "empty",
+    "heading for empty, got " .. tostring(seconds))
 end)
 
 check("the transfer limit is only ever written on purpose", function()
@@ -3506,50 +3643,80 @@ check("client traffic rides the same modem as the sweep", function()
   app:setRole(saved)
 end)
 
-check("powerclient.lua runs, reads its hardware and broadcasts", function()
-  -- The client is a separate PROGRAM, not a module, so this drives the real
-  -- file the way install-test drives the real installer. It closes the loop
-  -- that matters: what the client puts on the wire is fed straight into the
-  -- main base's handler, so the two cannot drift apart without failing here.
+-- The client is a separate PROGRAM, not a module, so these drive the real file
+-- the way install-test drives the real installer. Between them they close the
+-- loop that matters: what the client puts on the wire is fed straight into the
+-- main base's handler, so the two cannot drift apart on the payload format.
+
+--- Runs powerclient.lua for a couple of passes and hands back what it posted.
+---@param options table { name = , settings = , answers = , receive = , clock = }
+local function runClient(options)
+  options = options or {}
   local posted = {}
-  local realBroadcast = rednet.broadcast
-  local realSleep = sleep
-  local realParallel = parallel
-  local realOpen, realClose = rednet.open, rednet.close
+  local saved = {
+    broadcast = rednet.broadcast, send = rednet.send, receive = rednet.receive,
+    open = rednet.open, close = rednet.close,
+    sleep = sleep, parallel = parallel, print = print, clock = os.clock,
+    read = _G.read, write = _G.write,
+  }
 
   rednet.broadcast = function(message, protocol)
-    posted[#posted + 1] = { message = message, protocol = protocol }
+    posted[#posted + 1] = { to = nil, message = message, protocol = protocol }
   end
-  rednet.open = function() end
-  rednet.close = function() end
+  rednet.send = function(id, message, protocol)
+    posted[#posted + 1] = { to = id, message = message, protocol = protocol }
+  end
+  rednet.receive = options.receive or function() return nil end
+  rednet.open, rednet.close = function() end, function() end
 
-  -- Two passes round the broadcast loop, then out. The client has no exit
-  -- condition of its own beyond a keypress, so the sleep is the seam.
+  -- The client has no exit condition of its own beyond a keypress, so the
+  -- sleep is the seam: two passes round the loop, then out.
   local rounds = 0
   _G.sleep = function()
     rounds = rounds + 1
     if rounds >= 2 then error("enough", 0) end
   end
+
+  -- A clock that actually moves, so the "listen for a few seconds" loop can
+  -- reach its deadline instead of spinning.
+  if options.clock then
+    local ticks = 0
+    os.clock = function() ticks = ticks + 0.5; return CLOCK + ticks end
+  end
+
+  local answers = options.answers or {}
+  _G.read = function() return table.remove(answers, 1) or "" end
   _G.write = function() end
+  _G.print = function() end
   parallel = { waitForAny = function(broadcast) pcall(broadcast) end }
 
-  -- The client draws a status readout on its terminal; swallow it so the test
-  -- run stays readable.
-  local realPrint = print
-  _G.print = function() end
+  FILES["powerclient.cfg"] = options.settings
+    and textutils.serialize(options.settings) or nil
 
   local chunk = assert(loadfile(PROJ .. "/powerclient.lua"))
-  local ranOk, runError = pcall(chunk, "Reactor room")
+  local ranOk, runError = pcall(chunk, options.name)
 
-  _G.print = realPrint
-  rednet.broadcast, rednet.open, rednet.close = realBroadcast, realOpen, realClose
-  _G.sleep = realSleep
-  parallel = realParallel
+  rednet.broadcast, rednet.send, rednet.receive = saved.broadcast, saved.send, saved.receive
+  rednet.open, rednet.close = saved.open, saved.close
+  _G.sleep, parallel, _G.print = saved.sleep, saved.parallel, saved.print
+  _G.read, _G.write, os.clock = saved.read, saved.write, saved.clock
 
-  assert(ranOk, "the client ran: " .. tostring(runError))
-  assert(#posted >= 1, "and broadcast something, got " .. #posted)
+  local written = FILES["powerclient.cfg"]
+  return {
+    ok = ranOk, error = runError, posted = posted,
+    settings = written and textutils.unserialize(written) or nil,
+  }
+end
 
-  local entry = posted[1]
+check("powerclient.lua reads its hardware and reports it", function()
+  local run = runClient({
+    settings = { name = "Reactor room", baseId = 12, baseName = "Hangar", paired = true },
+  })
+
+  assert(run.ok, "the client ran: " .. tostring(run.error))
+  assert(#run.posted >= 1, "and sent something, got " .. #run.posted)
+
+  local entry = run.posted[1]
   assert(entry.protocol == powerModule.PROTOCOL,
     "on the power protocol, got " .. tostring(entry.protocol))
   assert(entry.message.t == "pw", "with the payload type the base looks for")
@@ -3585,13 +3752,141 @@ check("powerclient.lua runs, reads its hardware and broadcasts", function()
     "the base totalled its supply meter, got " .. model.input)
   assert(model.output == GRID.demand,
     "and its demand meter, got " .. model.output)
-  assert(model.stored == GRID.stored, "and its battery")
   assert(model:clientList()[1].name == "Reactor room", "under its name")
+
+  -- The fake battery is Mekanism-shaped, so the whole chain -- the client's
+  -- guess, the wire, and the base's conversion -- has to land on FE.
+  local battery
+  for _, source in ipairs(model:allSources()) do
+    if source.name == "inductionMatrix_0" then battery = source end
+  end
+  assert(battery, "the battery came across")
+  assert(battery.guessedUnit == "j", "the client flagged it as Joules")
+  assert(names.inductionMatrix_0.u == "j", "and said so on the wire")
+  assert(model.stored == GRID.stored * JOULES,
+    "which the base converted, got " .. powerLib.format(model.stored))
 
   -- The payload has to survive being serialised, which is what rednet does
   -- to it in game.
   local wire = textutils.unserialize(textutils.serialize(entry.message))
   assert(model:applyClient(32, wire, 1), "a round-tripped payload still works")
+end)
+
+check("a paired client addresses its own base and nobody else", function()
+  -- The whole point on a shared server: several unrelated main bases, each
+  -- with their own clients, and no crossed wires between them.
+  local run = runClient({
+    settings = { name = "Reactor", baseId = 12, baseName = "Hangar", paired = true },
+  })
+  assert(run.ok, "ran: " .. tostring(run.error))
+
+  local entry = run.posted[1]
+  assert(entry.to == 12, "sent directly to the paired base, got " .. tostring(entry.to))
+  assert(entry.message.b == 12, "and stamped with the base it meant")
+
+  -- Which is what lets somebody else's base refuse it even if it hears it.
+  local mine = os.getComputerID()
+  assert(mine ~= 12, "this computer is not that base")
+
+  local saved = app.cfg.role
+  app:setRole("main")
+  assert(app.link:handle(app, 55, entry.message, powerModule.PROTOCOL) == false,
+    "a payload meant for another base is refused")
+
+  -- Addressed to this one, it is taken.
+  local forUs = textutils.unserialize(textutils.serialize(entry.message))
+  forUs.b = mine
+  assert(app.link:handle(app, 55, forUs, powerModule.PROTOCOL),
+    "and one meant for this base is accepted")
+
+  -- An unstamped payload -- a client set to "any main base" -- is still taken,
+  -- because that is the operator saying they do not care who hears it.
+  local anyone = textutils.unserialize(textutils.serialize(entry.message))
+  anyone.b = nil
+  assert(app.link:handle(app, 56, anyone, powerModule.PROTOCOL),
+    "an unaddressed client is accepted")
+
+  app.power.clients = {}
+  app:setRole(saved)
+end)
+
+check("an unpaired client is offered the bases it can hear", function()
+  -- Beacons the main bases are already broadcasting; the client hunts for
+  -- them rather than needing an id typed in.
+  local beacons = {
+    { 12, { t = "h", n = "Hangar" }, "radar_link_hello" },
+    { 40, { t = "h", n = "Ore Island" }, "radar_link_hello" },
+  }
+  local run = runClient({
+    receive = function()
+      local nextBeacon = table.remove(beacons, 1)
+      if not nextBeacon then return nil end
+      return nextBeacon[1], nextBeacon[2], nextBeacon[3]
+    end,
+    answers = { "2" },              -- pick the second, sorted by name
+    clock = true,
+  })
+
+  assert(run.ok, "ran: " .. tostring(run.error))
+  assert(run.settings, "it wrote its settings")
+  assert(run.settings.paired == true, "and recorded that it has been asked")
+  assert(run.settings.baseId == 40,
+    "pairing with the one chosen, got " .. tostring(run.settings.baseId))
+  assert(run.settings.baseName == "Ore Island", "under its name")
+  assert(run.posted[1].to == 40, "and reporting to it")
+end)
+
+check("a client can be told to report to any base", function()
+  local beacons = { { 12, { t = "h", n = "Hangar" }, "radar_link_hello" } }
+  local run = runClient({
+    receive = function()
+      local nextBeacon = table.remove(beacons, 1)
+      if not nextBeacon then return nil end
+      return nextBeacon[1], nextBeacon[2], nextBeacon[3]
+    end,
+    answers = { "2" },              -- one base heard, so 2 is "any main base"
+    clock = true,
+  })
+
+  assert(run.ok, "ran: " .. tostring(run.error))
+  assert(run.settings.paired == true, "it has been asked")
+  assert(run.settings.baseId == nil, "and pairs with nobody in particular")
+  assert(run.posted[1].to == nil, "so it broadcasts")
+  assert(run.posted[1].message.b == nil, "with no base stamped on it")
+end)
+
+check("a client remembers its name and what it is pointed at", function()
+  -- A name on the command line is a deliberate rename and sticks, so it does
+  -- not have to be typed again on every restart.
+  local run = runClient({
+    name = "Furnace hall",
+    settings = { name = "Old name", baseId = 12, baseName = "Hangar", paired = true },
+  })
+  assert(run.ok, "ran: " .. tostring(run.error))
+  assert(run.posted[1].message.n == "Furnace hall", "the new name is used")
+  assert(run.settings.name == "Furnace hall", "and saved for next time")
+  assert(run.settings.baseId == 12, "without disturbing the pairing")
+
+  -- With no name given, the saved one is kept rather than reset to the id.
+  local again = runClient({
+    settings = { name = "Furnace hall", baseId = 12, baseName = "Hangar", paired = true },
+  })
+  assert(again.posted[1].message.n == "Furnace hall",
+    "the saved name survives a restart, got " .. tostring(again.posted[1].message.n))
+
+  -- And with neither, it names itself after the computer.
+  local fresh = runClient({
+    settings = { baseId = 12, paired = true },
+  })
+  assert(fresh.posted[1].message.n == "Power " .. os.getComputerID(),
+    "falling back to the computer id, got " .. tostring(fresh.posted[1].message.n))
+
+  -- A name long enough to be a nuisance is cut down before it goes anywhere.
+  local long = runClient({
+    name = ("x"):rep(90),
+    settings = { baseId = 12, paired = true },
+  })
+  assert(#long.posted[1].message.n <= 24, "long names are capped")
 end)
 
 check("a standalone station still never opens the modem", function()

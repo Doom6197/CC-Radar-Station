@@ -61,12 +61,74 @@ local OUTPUT_METHODS = {
 local LIMIT_GET = { "getTransferRateLimit" }
 local LIMIT_SET = { "setTransferRateLimit" }
 
---- First method on `p` from `names`, or nil.
+--- First method on `p` from `names`, or nil, plus the name it was found under.
 local function pick(p, names)
   for _, name in ipairs(names) do
     if type(p[name]) == "function" then return p[name], name end
   end
   return nil
+end
+
+-- ------------------------------------------------------------------ units ---
+-- Mods do not agree on what a number means. Most quote Forge Energy; Mekanism
+-- quotes JOULES, and its API keeps doing so whatever the client is set to
+-- display -- so a Basic Energy Cube holding 1.6 MFE answers getMaxEnergy()
+-- with 4,000,000, and reporting that as FE overstates it by exactly 2.5x.
+--
+-- Everything is therefore read raw and scaled on the way into the totals, per
+-- device, so one grid can mix a Mekanism induction matrix with an Energy
+-- Detector and still add up.
+
+power.JOULES_PER_FE = 2.5
+
+power.UNITS = {
+  { id = "fe", label = "FE / RF", factor = 1,
+    hint = "the number as reported" },
+  { id = "j",  label = "Mekanism Joules", factor = 1 / power.JOULES_PER_FE,
+    hint = "2.5 J = 1 FE" },
+}
+
+function power.unit(id)
+  for _, entry in ipairs(power.UNITS) do
+    if entry.id == id then return entry end
+  end
+  return power.UNITS[1]
+end
+
+-- Methods only Mekanism's ComputerCraft integration exposes. `getMaxEnergy` on
+-- its own is the weakest of the three, so it is only trusted when the device
+-- offers no Forge-style capacity call at all.
+local MEKANISM_METHODS = {
+  "getEnergyFilledPercentage", "getEnergyNeeded", "getTotalEnergy",
+  "getMaxEnergy",
+}
+
+--- Which unit a device probably reports in. Only ever a starting point: it is
+--- shown on the device and can be overridden, because guessing wrong by 2.5x
+--- is exactly the kind of error that looks plausible until you check it.
+---@return string id
+function power.guessUnit(p, capacityMethod)
+  if type(p) ~= "table" then return "fe" end
+  -- A Forge-style capacity call means a Forge-style number.
+  if capacityMethod == "getEnergyCapacity"
+     or capacityMethod == "getMaxEnergyStored"
+     or capacityMethod == "getEnergyMaxStorage" then
+    return "fe"
+  end
+  for _, name in ipairs(MEKANISM_METHODS) do
+    if type(p[name]) == "function" then return "j" end
+  end
+  return "fe"
+end
+
+--- The unit a device is being read in, and the factor that turns its readings
+--- into FE.
+function power.unitOf(cfg, source)
+  local chosen = ((cfg.power or {}).units or {})[source.key or source.name]
+  for _, entry in ipairs(power.UNITS) do
+    if entry.id == chosen then return entry end
+  end
+  return power.unit(source.guessedUnit or "fe")
 end
 
 --- Calls a probed method and returns a number, or nil if it threw or answered
@@ -94,7 +156,7 @@ function power.describe(name, p, ptype)
 
   local rate     = pick(p, RATE_METHODS)
   local stored   = pick(p, STORED_METHODS)
-  local capacity = pick(p, CAPACITY_METHODS)
+  local capacity, capacityMethod = pick(p, CAPACITY_METHODS)
   local isStore  = stored ~= nil and capacity ~= nil
 
   if not rate and not isStore then return nil end
@@ -107,6 +169,10 @@ function power.describe(name, p, ptype)
     meter = rate ~= nil,
     store = isStore,
 
+    -- Which unit this device probably talks in, until told otherwise.
+    guessedUnit = power.guessUnit(p, capacityMethod),
+    capacityMethod = capacityMethod,
+
     _rate     = rate,
     _stored   = isStore and stored or nil,
     _capacity = isStore and capacity or nil,
@@ -115,8 +181,12 @@ function power.describe(name, p, ptype)
     _limitGet = pick(p, LIMIT_GET),
     _limitSet = pick(p, LIMIT_SET),
 
-    -- Last readings, kept per source so the settings page can show which one
-    -- is actually carrying the load.
+    -- Last readings. RAW is what the peripheral said; the unscaled fields are
+    -- the same numbers in FE, recomputed from raw on every poll. Keeping the
+    -- two apart is what stops a unit conversion compounding each time round.
+    rawRate = nil, rawStored = nil, rawCapacity = nil,
+    rawInput = nil, rawOutput = nil,
+
     rate = nil, stored = nil, capacity = nil,
     input = nil, output = nil, limit = nil,
     fault = nil,
@@ -262,19 +332,26 @@ function power:applyClient(id, message, now)
       sources[#sources + 1] = {
         name   = entry.n,
         -- Keyed by the computer that reported it, so two clients with a
-        -- peripheral of the same name keep their own roles.
+        -- peripheral of the same name keep their own roles and units.
         key    = id .. ":" .. entry.n,
         remote = true,
         client = name,
         clientId = id,
         meter  = entry.m == 1 or tonumber(entry.r) ~= nil,
         store  = isStore,
-        rate   = tonumber(entry.r),
-        stored = isStore and stored or nil,
-        capacity = isStore and capacity or nil,
-        input  = tonumber(entry.i),
-        output = tonumber(entry.o),
+
+        -- Raw, exactly as the client read it. The unit conversion happens on
+        -- the base along with everything else, so it is one decision in one
+        -- place rather than one per client.
+        rawRate   = tonumber(entry.r),
+        rawStored = isStore and stored or nil,
+        rawCapacity = isStore and capacity or nil,
+        rawInput  = tonumber(entry.i),
+        rawOutput = tonumber(entry.o),
         limit  = tonumber(entry.l),
+
+        -- What the client guessed from the methods the peripheral offered.
+        guessedUnit = (entry.u == "j") and "j" or "fe",
       }
     end
   end
@@ -370,25 +447,38 @@ function power:poll(cfg, now)
     source.fault = nil
 
     if source.meter then
-      source.rate = readNumber(source._rate)
-      if not source.rate then source.fault = "no rate" end
+      source.rawRate = readNumber(source._rate)
+      if not source.rawRate then source.fault = "no rate" end
       source.limit = readNumber(source._limitGet)
     end
 
     if source.store then
-      source.stored = readNumber(source._stored)
-      source.capacity = readNumber(source._capacity)
-      if not (source.stored and source.capacity and source.capacity > 0)
+      source.rawStored = readNumber(source._stored)
+      source.rawCapacity = readNumber(source._capacity)
+      if not (source.rawStored and source.rawCapacity and source.rawCapacity > 0)
          and not source.fault then
         source.fault = "no reading"
       end
-      source.input = readNumber(source._input)
-      source.output = readNumber(source._output)
+      source.rawInput = readNumber(source._input)
+      source.rawOutput = readNumber(source._output)
     end
   end
 
   for _, source in ipairs(self:allSources()) do
     if source.fault then faults = faults + 1 end
+
+    -- Everything is scaled into FE here, once, from the raw reading -- so a
+    -- Mekanism battery quoting Joules adds up against an Energy Detector
+    -- quoting FE instead of overstating itself by two and a half times.
+    local unit = power.unitOf(cfg, source)
+    local factor = unit.factor
+    source.unit = unit.id
+
+    source.rate = source.rawRate and (source.rawRate * factor) or nil
+    source.stored = source.rawStored and (source.rawStored * factor) or nil
+    source.capacity = source.rawCapacity and (source.rawCapacity * factor) or nil
+    source.input = source.rawInput and (source.rawInput * factor) or nil
+    source.output = source.rawOutput and (source.rawOutput * factor) or nil
 
     if source.meter and source.rate then
       sawRate = true
@@ -629,10 +719,24 @@ function power:timeToLimit()
   if not self.stored or not self.capacity or self.capacity <= 0 then return nil end
   local perSecond = self.net * TICKS_PER_SECOND
   if abs(perSecond) < 1e-6 then return nil end
-  if perSecond < 0 then
-    return self.stored / -perSecond, "empty"
-  end
-  return (self.capacity - self.stored) / perSecond, "full"
+
+  -- A buffer already at the limit is not "full in 0s"; it is full, and the
+  -- surplus is going nowhere. Same at the bottom.
+  local remaining = (perSecond < 0) and self.stored or (self.capacity - self.stored)
+  if remaining <= 0 then return nil end
+
+  return remaining / abs(perSecond), (perSecond < 0) and "empty" or "full"
+end
+
+--- One word for what the buffer is doing, or nil when there is no buffer.
+--- Separate from timeToLimit so a bank sitting at either end reads as a state
+--- rather than as a countdown that never finishes.
+---@return string|nil
+function power:bufferState()
+  if not self.percent then return nil end
+  if self.percent >= 99.5 then return "full" end
+  if self.percent <= 0.5 then return "empty" end
+  return nil
 end
 
 power.TICKS_PER_SECOND = TICKS_PER_SECOND
