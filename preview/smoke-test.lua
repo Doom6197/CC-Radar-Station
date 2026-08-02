@@ -3738,50 +3738,117 @@ check("a press that picked a contact does not also flip the page", function()
   assert(moved and moved ~= page, "empty space still cycles, got " .. tostring(moved))
 end)
 
-check("pressing the destination on the flight page goes back to HOME", function()
-  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+check("pressing the destination on the flight page swaps HOME and the waypoint", function()
+  local flightModule = modules.byId("flight")
+  local cfg = app.cfg
+  cfg.baseX, cfg.baseY, cfg.baseZ = 120, 64, -340
+  cfg.flightX, cfg.flightY, cfg.flightZ = -500, 90, 800
   app.flight:reset()
   for i = 0, 5 do
     app.flight:sample({ x = 300 + i * 8, y = 120, z = -100,
       dimension = "minecraft:overworld" }, CLOCK + i)
   end
 
-  app.cfg.flightTarget = "contact:" .. app.contacts[1].name
+  --- Where the destination row lands on a fifteen-cell screen, which is the
+  --- one size that has no footer button at all.
+  local function destRow()
+    for index, row in ipairs(flightModule.readings(app, false)) do
+      if row.key == "dest" then return index end
+    end
+  end
 
-  -- Tiny first: fifteen cells has no room for a button, so the destination
-  -- row itself is the one that is pressable.
+  cfg.flightTarget = "home"
   drawPage(terminalRoot, "flight", 15, 10)
   local view = terminalRoot.views.flight
   assert(type(view.touch) == "function", "the flight page takes presses")
 
-  local rows = modules.byId("flight").readings(app, false)
-  local destRow
-  for index, row in ipairs(rows) do
-    if row.key == "home" then destRow = index end
-  end
-  assert(destRow, "the panel has a destination row")
+  local row = destRow()
+  assert(row, "the panel has a destination row")
 
-  assert(view.touch(3, destRow), "pressing it was claimed")
-  assert(app.cfg.flightTarget == "home",
-    "and put the panel back on HOME, got " .. tostring(app.cfg.flightTarget))
-  assert(view.touch(3, destRow), "pressing it again is still claimed")
-  assert(app.cfg.flightTarget == "home", "and leaves it there")
+  assert(view.touch(3, row), "pressing HOME was claimed")
+  assert(cfg.flightTarget == "custom",
+    "and moved on to the waypoint, got " .. tostring(cfg.flightTarget))
+
+  drawPage(terminalRoot, "flight", 15, 10)
+  assert(view.touch(3, destRow()), "pressing the waypoint was claimed too")
+  assert(cfg.flightTarget == "home",
+    "and came back to HOME, got " .. tostring(cfg.flightTarget))
+
+  -- A contact is not in the cycle: it was chosen deliberately off the contact
+  -- list, and it drops straight back to HOME rather than being stepped past.
+  cfg.flightTarget = "contact:" .. app.contacts[1].name
+  drawPage(terminalRoot, "flight", 15, 10)
+  assert(view.touch(3, destRow()), "pressing a contact was claimed")
+  assert(cfg.flightTarget == "home",
+    "which goes to HOME, not to the waypoint, got " .. tostring(cfg.flightTarget))
+
+  -- With no waypoint there is nowhere to swap to, and the press says so
+  -- rather than silently doing nothing.
+  cfg.flightX, cfg.flightY, cfg.flightZ = nil, nil, nil
+  drawPage(terminalRoot, "flight", 15, 10)
+  assert(view.touch(3, destRow()), "the press is still claimed")
+  assert(cfg.flightTarget == "home", "and leaves the panel on HOME")
+  assert(flightModule.swapLabel(cfg) == nil, "with no button to draw for it")
 
   -- A row that is not the destination is not a button.
   assert(not view.touch(3, 1), "the speed row is not pressable")
 
-  -- Wide: the button is said out loud on the bottom row, and only while there
-  -- is somewhere else to come back from.
-  app.cfg.flightTarget = "contact:" .. app.contacts[1].name
+  cfg.flightX, cfg.flightY, cfg.flightZ = -500, 90, 800
+end)
+
+check("MARK drops the waypoint where the pilot is, and is not on a 1x1", function()
+  local cfg = app.cfg
+  cfg.flightTarget = "home"
+  cfg.flightX, cfg.flightY, cfg.flightZ = nil, nil, nil
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 + i * 4, y = 2200, z = -777,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
   local wide = drawPage(terminalRoot, "flight", 51, 19)
   local drawn = table.concat(wide.texts, "|")
-  assert(drawn:find("[ HOME ]", 1, true),
-    "the button is drawn when the panel is pointed elsewhere:\n" .. drawn)
+  assert(drawn:find("[ MARK ]", 1, true),
+    "the button is drawn on a terminal:\n" .. drawn)
+  -- Nothing to swap to yet, so that button is not there to be pressed by
+  -- mistake instead.
+  assert(not drawn:find("[ WPT ]", 1, true), "and the swap button is not")
 
-  app.cfg.flightTarget = "home"
-  local homeward = drawPage(terminalRoot, "flight", 51, 19)
-  assert(not table.concat(homeward.texts, "|"):find("[ HOME ]", 1, true),
-    "and not while it is already pointed home")
+  local view = terminalRoot.views.flight
+  -- The footer is the last content row: nineteen rows less the header and the
+  -- tab strip is seventeen.
+  assert(view.touch(48, 17), "pressing MARK was claimed")
+  assert(cfg.flightX == 1020 and cfg.flightZ == -777,
+    "the waypoint went where the pilot is, got "
+      .. tostring(cfg.flightX) .. ", " .. tostring(cfg.flightZ))
+  assert(cfg.flightY == 2200, "with the altitude too")
+  assert(cfg.flightTarget == "custom",
+    "and the panel flies to it, so a monitor shows that it worked")
+
+  -- Now there is somewhere to swap to, both buttons are up.
+  local both = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(both:find("[ HOME ]", 1, true), "the swap button appeared:\n" .. both)
+  assert(both:find("[ MARK ]", 1, true), "beside MARK")
+
+  -- A 1x1 gets neither: eight cells of button is half that screen, and the
+  -- destination row up above is already pressable there.
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local tiny = tinyScreen(monitorRoot, "flight")
+  assert(not tiny.text:find("MARK", 1, true),
+    "no MARK button on a fifteen-cell screen:\n" .. tiny.text)
+  assert(not tiny.text:find("[ HOME ]", 1, true), "and no footer swap button")
+  assert(#tiny.overflow == 0, "and nothing runs off the edge")
+
+  -- A pocket screen keeps MARK and drops the swap button: the note plus two
+  -- buttons does not fit twenty-six cells, and the destination row does the
+  -- swapping anyway.
+  local pocket = table.concat(drawPage(terminalRoot, "flight", 26, 20).texts, "|")
+  assert(pocket:find("[ MARK ]", 1, true), "MARK survives a pocket screen:\n" .. pocket)
+
+  cfg.flightTarget, cfg.flightX, cfg.flightY, cfg.flightZ = "home", nil, nil, nil
 end)
 
 ------------------------------------------------------------ the alert log --

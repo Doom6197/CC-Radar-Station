@@ -107,6 +107,31 @@ function view.setTarget(app, target)
   return true
 end
 
+--- Whether there is a waypoint to fly to at all. The height is optional: a
+--- bearing does not use it.
+function view.hasWaypoint(cfg)
+  return cfg.flightX ~= nil and cfg.flightZ ~= nil
+end
+
+--- The next destination in the press-to-change cycle.
+---
+--- HOME and the waypoint only. A contact is picked deliberately, off the
+--- contact list, and putting it in the cycle would mean pressing twice to get
+--- past somebody who happens to be the current target -- so a contact drops
+--- straight back to HOME instead.
+---@return string target Which may be the current one, when there is nowhere else
+function view.nextTarget(cfg)
+  if (cfg.flightTarget or "home") ~= "home" then return "home" end
+  return view.hasWaypoint(cfg) and "custom" or "home"
+end
+
+--- What the press-to-change button says, or nil when there is nowhere to go.
+function view.swapLabel(cfg)
+  local target = view.nextTarget(cfg)
+  if target == (cfg.flightTarget or "home") then return nil end
+  return target == "home" and "[ HOME ]" or "[ WPT ]"
+end
+
 --- A label for the destination row, for the settings page.
 function view.destinationLabel(app)
   local target = app.cfg.flightTarget or "home"
@@ -158,7 +183,7 @@ local function readings(app, wide)
   local out = {}
 
   --- `key` names a row the operator can press. Only the destination row has
-  --- one: pressing it aims the panel back at HOME.
+  --- one: pressing it swaps between HOME and the waypoint.
   local function push(label, value, colour, key)
     out[#out + 1] = { label = label, value = value,
                       colour = colour or theme.text, key = key }
@@ -196,21 +221,21 @@ local function readings(app, wide)
   if cfg.flightHome then
     local destination = view.destination(app)
     if not destination then
-      push("DEST", "not set", theme.dim, "home")
+      push("DEST", "not set", theme.dim, "dest")
     elseif destination.lost then
       -- A contact that has gone off the sweep. Its name stays on the panel so
       -- it is obvious what is being waited for.
-      push(destination.label, "lost", theme.warn, "home")
+      push(destination.label, "lost", theme.warn, "dest")
     else
       local distance, _, compass = model:vectorTo(destination.x, destination.z)
       if distance then
         push(destination.label, util.distanceLabel(distance),
-          destination.moving and theme.warn or theme.text, "home")
+          destination.moving and theme.warn or theme.text, "dest")
         push("BRG", compass or "--", theme.accent)
         local eta = model:eta(distance)
         push("ETA", flightLib.formatEta(eta), eta and theme.text or theme.dim)
       else
-        push(destination.label, "--", theme.dim, "home")
+        push(destination.label, "--", theme.dim, "dest")
       end
     end
   end
@@ -320,36 +345,93 @@ function view.build(container, app, root)
       local note = model.moving and "under way" or "stopped"
       if config.isMobile(app.cfg) then note = note .. "   relayed" end
 
-      -- The way back. A screen with room for it gets the button said out loud
-      -- rather than left to be discovered; a fifteen-cell one has the
-      -- destination row itself, which is pressable either way.
-      local homeButton = (app.cfg.flightTarget or "home") ~= "home"
-      if homeButton and w >= 30 then
-        local label = "[ HOME ]"
-        buf:blit(max(1, w - #label), h, label, theme.accent, theme.bg)
-        hits[#hits + 1] = { x1 = w - #label, x2 = w, y = h, key = "home" }
-        note = util.shorten(note, max(1, w - #label - 3))
+      -- Buttons along the bottom row, laid out from the right.
+      --
+      -- A 1x1 gets NEITHER. Eight cells of button is half that screen, and the
+      -- destination row up above is already pressable there -- which is the
+      -- one of these two that has to work without a wall of monitors.
+      local buttons = {}
+      if not tiny then
+        local swap = view.swapLabel(app.cfg)
+        if swap then buttons[#buttons + 1] = { label = swap, key = "dest" } end
+        buttons[#buttons + 1] = { label = "[ MARK ]", key = "mark" }
       end
-      buf:blit(2, h, util.shorten(note, w - 2), theme.line, theme.bg)
+
+      -- Dropped leftmost-first until what is left fits beside the note, rather
+      -- than drawn over the top of it.
+      local function roomFor(list)
+        local total = 0
+        for _, entry in ipairs(list) do total = total + #entry.label + 1 end
+        return 2 + #note + total
+      end
+      while #buttons > 0 and roomFor(buttons) > w do table.remove(buttons, 1) end
+
+      local edge = w + 1
+      for index = #buttons, 1, -1 do
+        local button = buttons[index]
+        edge = edge - #button.label
+        buf:blit(edge, h, button.label, theme.accent, theme.bg)
+        hits[#hits + 1] = {
+          x1 = edge, x2 = edge + #button.label - 1, y = h, key = button.key,
+        }
+        edge = edge - 1
+      end
+
+      buf:blit(2, h, util.shorten(note, max(1, edge - 2)), theme.line, theme.bg)
     end
+  end
+
+  --- Puts the panel on the next destination in the cycle: HOME and the
+  --- waypoint, and nothing else.
+  local function swapDestination()
+    local cfg = app.cfg
+    local target = view.nextTarget(cfg)
+    if target == (cfg.flightTarget or "home") then
+      if root then root:toast("No waypoint set - press MARK first", "info") end
+      return true
+    end
+    view.setTarget(app, target)
+    if root then
+      root:toast(target == "home" and "Destination: HOME"
+        or ("Destination: waypoint %d, %d"):format(cfg.flightX, cfg.flightZ),
+        "success")
+    end
+    canvas:markRenderDirty()
+    return true
+  end
+
+  --- Drops the waypoint where the pilot is standing, and flies to it. Setting
+  --- it as the destination as well is what makes this readable on a monitor,
+  --- which has no banner to tell you it worked: the panel changes to WPT in
+  --- front of you. Typed-in coordinates are still under Settings / Flight.
+  local function markWaypoint()
+    local pos = app.flight and app.flight.position
+    if not pos then
+      if root then root:toast("No position fix to mark", "warning") end
+      return true
+    end
+    local cfg = app.cfg
+    cfg.flightX, cfg.flightY, cfg.flightZ = floor(pos.x), floor(pos.y), floor(pos.z)
+    cfg.flightTarget = "custom"
+    app:saveConfig()
+    if root then
+      root:toast(("Waypoint %d, %d, %d"):format(cfg.flightX, cfg.flightY, cfg.flightZ),
+        "success")
+    end
+    canvas:markRenderDirty()
+    return true
   end
 
   return {
     refresh = function() canvas:markRenderDirty() end,
-    --- Pressing the destination -- the row, or the button beside the footer --
-    --- puts the panel back on HOME. It is the one destination that is always
-    --- somewhere, so it is the one worth a single press.
+    --- Two presses on this page: the destination -- either the row or the
+    --- button beside the footer -- swaps between HOME and the waypoint, and
+    --- MARK drops the waypoint where you are.
     touch = function(x, y)
       for _, hit in ipairs(hits) do
-        if y == hit.y and x >= hit.x1 and x <= hit.x2 and hit.key == "home" then
-          if (app.cfg.flightTarget or "home") == "home" then
-            if root then root:toast("Already flying HOME", "info") end
-            return true
-          end
-          view.setTarget(app, "home")
-          if root then root:toast("Destination: HOME", "success") end
-          canvas:markRenderDirty()
-          return true
+        if y == hit.y and x >= hit.x1 and x <= hit.x2 then
+          if hit.key == "mark" then return markWaypoint() end
+          if hit.key == "dest" then return swapDestination() end
         end
       end
       return false
@@ -401,6 +483,8 @@ function view.settings(ctx)
 
   ctx.note("HOME, anyone on the contact list, or a waypoint. A contact is "
     .. "followed as it moves.")
+  ctx.note("On the page itself, pressing the destination swaps between HOME "
+    .. "and the waypoint, and MARK drops the waypoint where you are.")
 
   -- The waypoint boxes only exist while a waypoint is what is selected;
   -- three empty inputs on a page about flying would be clutter otherwise.

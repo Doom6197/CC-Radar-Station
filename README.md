@@ -367,10 +367,19 @@ an airship has:
 - **Press a name on the CONTACTS page** and they become the destination. It is
   a list you are already reading, so choosing a chase target is a matter of
   recognising the name rather than typing it into a picker.
-- **Press the destination on the FLIGHT page** and it goes back to `HOME`. On a
-  screen with room for it the button is drawn on the bottom row as `[ HOME ]`;
-  on a 1×1 the destination row itself is the button, because fifteen cells has
-  no room for both.
+- **Press the destination on the FLIGHT page** and it swaps between `HOME` and
+  the waypoint — those two only. A contact was chosen deliberately off the
+  contact list, so it drops straight back to `HOME` rather than being one more
+  stop in the cycle. On a screen with room the button is on the bottom row as
+  `[ HOME ]` or `[ WPT ]`; on a 1×1 the destination row itself is the button.
+- **`[ MARK ]` drops the waypoint where you are standing** and flies to it.
+  That is the confirmation as well as the action: a monitor has no banner to
+  tell you it worked, so the panel changing to `WPT` in front of you is how you
+  know. It is **not** on a 1×1 — eight cells of button is half that screen —
+  and needs about thirty cells of width before it appears.
+
+Typed-in coordinates are still under **Settings → Flight → Waypoint XYZ**;
+`[ MARK ]` is the version that works on a monitor, which has no keyboard.
 
 A press that does either of those does **not** also move a monitor to the next
 page: the page gets first refusal on a tap, and only what it does not claim
@@ -802,8 +811,9 @@ Monitors have no keyboard, so the screen is the control:
   move it to the next page. Turn this off under
   **Settings → Displays → Tap to change**.
 - **A page gets first refusal on a tap.** Pressing a name on CONTACTS makes
-  them the flight destination; pressing the destination on FLIGHT puts it back
-  to `HOME`. Neither also moves the monitor along. Everything else falls
+  them the flight destination; pressing the destination on FLIGHT swaps
+  between `HOME` and the waypoint, and `[ MARK ]` drops the waypoint where you
+  are. None of those also move the monitor along. Everything else falls
   through to the page change above.
 - Monitors big enough for a tab strip can be pressed on a tab to jump straight
   to that page.
@@ -933,8 +943,9 @@ everything still renders, just flatter.
 power buffer that emptied overnight leaves a trace instead of vanishing. Unread
 entries put a `!` in **every screen's header** until they are dismissed, and
 anything that goes unread without ringing the alarm gets **one chime**. Pages
-take presses: a name on CONTACTS becomes the flight destination, and the
-destination on FLIGHT goes back to `HOME`. The weather page carries the base's
+take presses: a name on CONTACTS becomes the flight destination, the
+destination on FLIGHT **swaps between `HOME` and the waypoint**, and `[ MARK ]`
+drops the waypoint where you are standing. The weather page carries the base's
 **buffer percentage**.
 
 **v8.3.** A mobile now takes its **base coordinates from the main base** it is
