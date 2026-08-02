@@ -746,7 +746,7 @@ function view.settings(ctx)
     .. "it reports here. The modem has to be open, so this needs the MAIN "
     .. "BASE role.")
 
-  ctx.row("Relay to mobiles", function() return ctx.onOff(cfg.relay) end, function()
+  ctx.row("Relay power", function() return ctx.onOff(cfg.relay) end, function()
     cfg.relay = not cfg.relay
     app:saveConfig()
   end, ctx.onOffColor(function() return cfg.relay end))

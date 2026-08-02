@@ -24,6 +24,7 @@ over rednet — along with energy readings collected from any number of
 - [Hardware](#hardware)
 - [Profiles](#profiles) — base, pocket, airship
 - [Pages](#pages)
+- [Settings](#settings) — the index, and why it is two levels
 - [Modules](#modules) — the plugin system, and how to write one
 - [Flight](#flight) — speed, climb and course from the pilot's position
 - [Power](#power) — and the power clients that feed it
@@ -149,21 +150,78 @@ checking — afterwards every setting it touched is an ordinary setting you can
 change like any other, and **every one of them has its own row in Settings**:
 tracking mode, the scope, heading steps, heading rate, eased turns, animation,
 sweep rate, screen flash and the banner. Reapply or switch under
-**Settings → Profile**; doing so overwrites the settings it covers, which is the
+**Settings → Station → This station**; doing so overwrites the settings it covers, which is the
 point of it.
 
-### Settings on a small screen
+---
+
+## Settings
+
+The settings page is an **index of eight groups**, each showing its own current
+state — so it is a report on the station as much as it is a menu. Pressing one
+fills the page with that group.
+
+```
+ SETTINGS   v8.5                                    |  SETTINGS   v8.5
+ -------------------------------------------------  |  ---------------------
+ STATION       MAIN BASE "Hangar"                   |  STATION
+ TRACKING      FIXED   120, 64, -340                |  MAIN BASE
+ SCANNING      10k   every 1s   1 ignored           |  TRACKING
+ SCOPE         locked - 45 deg, NE up               |  FIXED 120, -340
+ ALERTS        ON   sound, flash, banner, redstone  |  SCANNING
+ DISPLAYS      terminal: status   1 monitor         |  10k   1s
+ PAGES         9 of 9 on                            |  SCOPE
+ KEYBOARD      shortcuts and monitor taps           |  locked
+                                                    |  ALERTS
+ Quit Radar Station                                 |  ON   4 channels
+```
+
+| Group | What is in it |
+|---|---|
+| **Station** | version, profile, role, modem, station name, pairing, broadcasting |
+| **Tracking** | your username, FIXED/SELF, the base coordinates, follow base |
+| **Scanning** | range, sweep rate, other worlds, the ignore list |
+| **Scope** | locked or unlocked, bearing up, heading steps and rate, eased turns, animation |
+| **Alerts** | master, alert range, flash, banner, chime, the sound, the redstone line |
+| **Displays** | this page's layout and hints, the terminal page, every monitor |
+| **Pages** | which modules are on — and each module's own settings, one press further |
+| **Keyboard** | the shortcut list and what a monitor tap does |
+
+### Why it is two levels
+
+It used to be one scrolling page. By v8.4 that was 17 sections, 85 controls and
+99 notes: **231 rows — fourteen screenfuls on a terminal and twenty-one on a
+pocket computer.** Worse than the length was the filing. A module's ON/OFF
+switch sat about a hundred rows above the settings it governed; `Alert within`
+lived under SCANNING while the alerts lived under ALERTS; and two sections were
+both called some variety of "alerts".
+
+Now the index is 12 rows and **thirteen of the eighteen screens fit without
+scrolling at all**. The longest, ALERTS, is 28 rows. Nothing was removed.
+
+**PAGES is the spine of the module system.** Each module is one row, and
+pressing it opens a screen holding its switch *and* its settings — so
+`Power ON` and the power thresholds are finally in the same place. A module
+that is switched off keeps its screen, so there is somewhere to turn it back
+on from.
+
+### Hints
+
+The 99 explanatory notes are **off by default** and switched on under
+**Settings → Displays → Hints**. Anything that stops a mistake being made — the
+warning that applying a profile overwrites your settings, the keyboard list —
+is shown either way, so turning hints off cannot cost you a warning.
+
+### On a small screen
 
 A pocket computer is 26 cells across, which is not enough for a label column
-and a value column side by side. Below 34 cells the settings page **stacks**:
-each label gets its own line with the value full-width underneath it, notes
-wrap instead of being clipped, and the three base-coordinate boxes sit on one
-line rather than running off the right-hand edge.
+and a value column side by side. Below 34 cells the page **stacks**: each label
+gets its own line with the value full-width underneath, notes wrap instead of
+being clipped, the three coordinate boxes sit on one line rather than running
+off the edge, and each group's index summary switches to a shorter form.
 
-That is automatic, and **Settings → Profile → Layout** overrides it either way
-— `Stacked` on a wide screen, `Side by side` on a narrow one. It is the second
-row on the page, so it is reachable even when the rest of the page is the thing
-that is hard to read.
+That is automatic, and **Settings → Displays → Layout** overrides it either way
+— `Stacked` on a wide screen, `Side by side` on a narrow one.
 
 ---
 
@@ -178,7 +236,7 @@ that is hard to read.
 | `5` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
 | `6` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
 | `7` | **Alerts** | Arrivals and alarms, newest first, plus a visitor tally on wide screens |
-| `8` | **Settings** | Everything configurable, on one scrolling page — starting with the version and the profile |
+| `8` | **Settings** | An index of eight groups, each opening onto one screen — see [Settings](#settings) |
 
 The number keys follow the tab strip rather than a fixed table, so switching a
 module off does not leave a hole in the numbering. Monitors can show any page
@@ -839,7 +897,7 @@ radar/
     weather.lua        live sky, scenery, and the backdrop cycle
     power.lua          rates, buffer and the rolling graph
     alerts.lua         arrivals and alarms, and the unread marker
-    settings.lua       the settings page, and the module switchboard  (core)
+    settings.lua       the settings index and its groups              (core)
 
   app.lua              shared state, background loops, actions
   ui.lua               Basalt roots, header, tab strip, page router, keys
@@ -938,6 +996,15 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.5 - the settings page, reorganised.** One scrolling page of 17 sections,
+85 controls and 99 notes -- 231 rows, fourteen screenfuls -- became an **index
+of eight groups**, each opening onto one screen and each showing its current
+state on the index. Thirteen of the eighteen screens now fit without scrolling.
+A module's ON/OFF switch and its settings are **on the same screen** instead of
+a hundred rows apart; `Alert within` moved from SCANNING to ALERTS where it
+belongs; and the notes are **off by default**, with warnings shown either way.
+Nothing was removed.
 
 **v8.4.** LOG became **ALERTS** and now takes alarms as well as arrivals, so a
 power buffer that emptied overnight leaves a trace instead of vanishing. Unread

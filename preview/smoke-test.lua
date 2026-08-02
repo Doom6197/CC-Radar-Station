@@ -2344,23 +2344,60 @@ check("settings rows all resolve", function()
   view.refresh()
 end)
 
-check("every settings button handler runs", function()
+--- Every screen the settings page can show: the index, each group, and each
+--- module's own screen.
+---
+--- The page is two levels from v8.5 on, so a check that looked only at what is
+--- currently on screen would never see anything but the index -- and every
+--- control lives one press deeper.
+---@param fn function(view, screenId)
+local function eachSettingsScreen(fn)
+  local settingsModule = modules.byId("settings")
   terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+
+  local screens = { false }                      -- false is the index
+  for _, group in ipairs(settingsModule.GROUPS) do
+    screens[#screens + 1] = group.id
+  end
+  for _, entry in ipairs(modules.all()) do
+    screens[#screens + 1] = settingsModule.MODULE_PREFIX .. entry.id
+  end
+
+  for _, id in ipairs(screens) do
+    view.openGroup(id or nil)
+    fn(view, id or "index")
+  end
+  view.openGroup(nil)
+end
+
+check("every settings button handler runs", function()
   -- Pressing every button mutates a lot of settings; snapshot and restore.
   local before = textutils.serialize(app.cfg)
   local pressed = 0
-  local function walk(element)
-    local handler = rawget(element, "_handlers").onClick
-    if handler and element.__kind == "Button" then
-      pressed = pressed + 1
-      local ok, err = pcall(handler, element)
-      -- Quit and test-pulse use schedules, which the harness stubs out.
-      if not ok then error(("button %q: %s"):format(tostring(element.text), tostring(err)), 0) end
+
+  eachSettingsScreen(function(view)
+    -- Collected first, then pressed: a handler that rebuilds the body would
+    -- otherwise be destroying the tree being walked.
+    local buttons = {}
+    local function collect(element)
+      if element.__kind == "Button" and rawget(element, "_handlers").onClick then
+        buttons[#buttons + 1] = element
+      end
+      for _, child in ipairs(rawget(element, "_children") or {}) do collect(child) end
     end
-    for _, child in ipairs(rawget(element, "_children") or {}) do walk(child) end
-  end
-  walk(terminalRoot.views.settings.container)
-  assert(pressed > 15, "plenty of buttons exercised, got " .. pressed)
+    collect(view.container)
+
+    for _, button in ipairs(buttons) do
+      pressed = pressed + 1
+      local ok, err = pcall(rawget(button, "_handlers").onClick, button)
+      -- Quit and test-pulse use schedules, which the harness stubs out.
+      if not ok then
+        error(("button %q: %s"):format(tostring(button.text), tostring(err)), 0)
+      end
+    end
+  end)
+  assert(pressed > 60, "plenty of buttons exercised, got " .. pressed)
 
   local restored = textutils.unserialize(before)
   for k in pairs(app.cfg) do app.cfg[k] = nil end
@@ -3150,7 +3187,9 @@ check("the settings page drives the backdrop", function()
   terminalRoot:setPage("settings", false)
   local view = terminalRoot.views.settings
   app.backdrop:set("live")
-  view.refresh()
+  -- The weather module's settings live on the weather module's own screen,
+  -- reached from PAGES.
+  view.openGroup(modules.byId("settings").MODULE_PREFIX .. "weather")
 
   local function findButton(element, text)
     if element.__kind == "Button" and tostring(element.text) == text then return element end
@@ -3185,7 +3224,7 @@ check("the settings page drives the backdrop", function()
   assert(picked, "and offers the cycle")
 
   app.backdrop:set("live")
-  view.refresh()
+  view.openGroup(nil)
 end)
 
 check("every page draws with a backdrop up", function()
@@ -3234,43 +3273,90 @@ local function captionsOf(element, out)
   return out
 end
 
-check("the dropped-in module was built, drawn and given a settings section", function()
-  assert(addonState.drew > 0, "its page was drawn, got " .. addonState.drew)
-  assert(addonState.settingsBuilt > 0,
-    "and its settings section was built, got " .. addonState.settingsBuilt)
-
+check("the settings index lists every group, and nothing else", function()
+  local settingsModule = modules.byId("settings")
   terminalRoot:setPage("settings", false)
-  local captions = captionsOf(terminalRoot.views.settings.container)
+  local view = terminalRoot.views.settings
+  view.openGroup(nil)
 
-  --- First caption matching `needle` at or after `from`. A module's TITLE also
-  --- appears as a row label in the MODULES switchboard, so a search for its
-  --- section heading has to start below that.
-  local function indexOf(needle, from)
-    for i = from or 1, #captions do
-      if captions[i] == needle then return i end
+  local captions = captionsOf(view.container)
+  local function has(needle)
+    for _, text in ipairs(captions) do
+      if text == needle then return true end
     end
-    return nil
+    return false
   end
 
-  local profile = assert(indexOf("RADAR STATION"), "the station section is on the page")
-  local switchboard = assert(indexOf("MODULES"), "and the module switchboard")
-  local tracking = assert(indexOf("TRACKING"), "and the station-wide sections")
-  local redstone = assert(indexOf("REDSTONE OUTPUT"), "down to the redstone line")
+  -- One row per group, and the version on the heading.
+  for _, group in ipairs(settingsModule.GROUPS) do
+    assert(has(group.title), "the index lists " .. group.title)
+  end
+  assert(has(("SETTINGS   v%s"):format(config.VERSION)),
+    "with the version on the heading")
+  assert(has("Quit Radar Station"), "and quit at the bottom")
 
-  -- Every module's section sits below the station-wide ones, in module order.
-  local backdrop = assert(indexOf("BACKDROP", redstone), "the weather module's section")
-  local power = assert(indexOf("POWER", backdrop), "then the power module's")
-  local addon = assert(indexOf("ADDON", power), "then the addon's")
-  local displays = assert(indexOf("DISPLAYS", addon), "and displays after all of them")
+  -- What it must NOT be is the old single page: nothing below the group names
+  -- is on the index, or splitting it up bought nothing.
+  for _, deep in ipairs({ "Heading steps", "Volume", "Trigger range",
+                          "Tap to change", "Base X Y Z" }) do
+    assert(not has(deep), deep .. " is one press deeper, not on the index")
+  end
 
-  assert(profile < switchboard, "profile first")
-  assert(switchboard < tracking, "then the switchboard, then the station settings")
-  assert(redstone < backdrop, "which all come before the modules' own")
-  assert(backdrop < power and power < addon and addon < displays, "in module order")
+  -- Every summary resolves to a string, since the index is a report on the
+  -- station as much as it is a menu.
+  for _, group in ipairs(settingsModule.GROUPS) do
+    local ok, text = pcall(group.summary, app)
+    assert(ok and type(text) == "string",
+      group.id .. " summarises itself, got " .. tostring(text))
+  end
+end)
 
-  -- The addon's own row reads its own setting.
-  assert(indexOf("Threshold"), "its row is there")
-  assert(indexOf(tostring(app.cfg.addonThreshold), addon), "showing its value")
+check("a module's switch and its settings are finally on one screen", function()
+  local settingsModule = modules.byId("settings")
+  assert(addonState.drew > 0, "its page was drawn, got " .. addonState.drew)
+
+  terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+
+  -- PAGES lists every module, and nothing but.
+  view.openGroup("pages")
+  local listed = captionsOf(view.container)
+  local function has(list, needle)
+    for _, text in ipairs(list) do
+      if text == needle then return true end
+    end
+    return false
+  end
+  for _, entry in ipairs(modules.all()) do
+    assert(has(listed, util.shorten(entry.title, 13)),
+      "PAGES lists " .. entry.title)
+  end
+  assert(not has(listed, "Threshold"), "without any module's own settings on it")
+
+  -- Opening one is where its settings finally are -- next to the switch that
+  -- governs them, rather than a hundred rows below it.
+  local built = addonState.settingsBuilt
+  view.openGroup(settingsModule.MODULE_PREFIX .. "addon")
+  assert(addonState.settingsBuilt == built + 1,
+    "its settings were built on its own screen, got " .. addonState.settingsBuilt)
+
+  local own = captionsOf(view.container)
+  assert(has(own, "Module"), "with its ON/OFF switch at the top")
+  assert(has(own, "Threshold"), "and its own row")
+  assert(has(own, tostring(app.cfg.addonThreshold)), "showing its value")
+  assert(has(own, "<  ADDON"), "and a way back")
+
+  -- A module switched off is not asked for settings at all.
+  built = addonState.settingsBuilt
+  app:toggleModule("addon")
+  view.openGroup(settingsModule.MODULE_PREFIX .. "addon")
+  assert(addonState.settingsBuilt == built,
+    "a disabled module is not asked for settings")
+  assert(has(captionsOf(view.container), "Module"),
+    "but its switch is still there to turn it back on")
+
+  app:toggleModule("addon")
+  view.openGroup(nil)
 end)
 
 check("switching a module off takes its page with it", function()
@@ -3289,9 +3375,11 @@ check("switching a module off takes its page with it", function()
   -- The settings page rebuilt on the event, without the addon's section.
   local buffer = newBuffer(82, 40, "settings without addon")
   terminalRoot:setPage("settings", false)
+  terminalRoot.views.settings.openGroup("pages")
   drawTree(terminalRoot.root, buffer)
   assert(addonState.settingsBuilt == builtBefore,
     "a disabled module is not asked for settings")
+  terminalRoot.views.settings.openGroup(nil)
 
   -- And a monitor's rotation no longer offers it.
   local entry = app:displayConfig("monitor_0")
@@ -4108,13 +4196,30 @@ local function settingsElements()
   return out
 end
 
+--- Every element on every settings screen at a given width, concatenated in
+--- screen order.
+---
+--- One screen at a time is what the page shows now, so a check that built it
+--- once would only ever measure the index -- and the rows that actually
+--- overflow a pocket screen are all one press deeper. Screens are appended in
+--- order, so a check looking for "the button after this label" still finds the
+--- right one: the pairing is within a screen, never across two.
 local function buildSettingsAt(width, layout)
   rawget(terminalRoot.root, "_p").width = width
   rawget(terminalRoot.root, "_p").height = 20
   terminalRoot:setPage("settings", false)
   app.cfg.settingsLayout = layout or "auto"
+  -- Hints ON, whatever the default is. They are the longest text on the page
+  -- and the only thing that has to WRAP, so measuring a page without them
+  -- would be measuring the easy case.
+  app.cfg.settingsHints = true
   app:emit("modules")                        -- what a real rebuild fires
-  return settingsElements()
+
+  local all = {}
+  eachSettingsScreen(function()
+    for _, el in ipairs(settingsElements()) do all[#all + 1] = el end
+  end)
+  return all
 end
 
 check("nothing on the settings page runs off a pocket screen", function()
@@ -4227,6 +4332,53 @@ check("a wide screen keeps the two-column layout", function()
   assert(forcedButton.y == forcedLabel.y + 1, "forcing stacked works on any screen")
 
   buildSettingsAt(51, "auto")
+end)
+
+check("hints hide the helpful lines and keep the warnings", function()
+  local function labelsAt(hints)
+    app.cfg.settingsHints = hints
+    terminalRoot:setPage("settings", false)
+    rawget(terminalRoot.root, "_p").width = 51
+    rawget(terminalRoot.root, "_p").height = 20
+
+    local rows, notes = 0, {}
+    eachSettingsScreen(function()
+      for _, el in ipairs(settingsElements()) do
+        if el.kind == "Button" or el.kind == "Input" then rows = rows + 1
+        elseif el.kind == "Label" and el.text then notes[#notes + 1] = el.text end
+      end
+    end)
+    return rows, notes
+  end
+
+  local onRows, onNotes = labelsAt(true)
+  local offRows, offNotes = labelsAt(false)
+
+  assert(onRows == offRows, "the controls are untouched either way, got "
+    .. onRows .. " vs " .. offRows)
+  assert(#offNotes < #onNotes, "and the hints go, got " .. #offNotes
+    .. " of " .. #onNotes)
+  assert(#onNotes - #offNotes > 30, "most of them, got "
+    .. (#onNotes - #offNotes) .. " removed")
+
+  local function has(list, needle)
+    for _, text in ipairs(list) do
+      if text:find(needle, 1, true) then return true end
+    end
+    return false
+  end
+
+  -- A warning is not a hint. Turning the hints off must not be able to hide
+  -- the line that says applying a profile overwrites your settings.
+  assert(has(offNotes, "OVERWRITES"),
+    "the profile warning survives the hints going off")
+  -- Nor the row that turns them back on.
+  assert(has(offNotes, "Warnings"), "and so does the Hints row's own line")
+  -- Nor the keyboard list, which is the content of its group rather than
+  -- commentary on it.
+  assert(has(offNotes, "clear the alert log"), "and the keyboard list stays")
+
+  app.cfg.settingsHints = false
 end)
 
 check("the settings the pocket profile changes are all reachable", function()
