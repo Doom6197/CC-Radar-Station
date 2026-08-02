@@ -8,8 +8,11 @@ Every page is a **module** — one file in `radar/modules/` that owns its page,
 its settings, its hardware and its background polling. Drop a file into that
 folder and the station has a new page. Nothing else needs editing.
 
-It runs in three places, and asks which on first boot: a **fixed base** with
-monitors, a **pocket computer** in your hand, or an **airship** in the air.
+It runs in three places, and asks which on first boot: the **main base** with
+the detectors and monitors, a **pocket computer** in your hand, or an
+**airship** in the air. The main base does all the scanning and feeds the rest
+over rednet — along with energy readings collected from any number of
+**power clients** dotted around your build.
 
 ![Radar scope with range rings, sweep and colour-coded contacts](preview/radar-scope.png)
 
@@ -22,10 +25,10 @@ monitors, a **pocket computer** in your hand, or an **airship** in the air.
 - [Profiles](#profiles) — base, pocket, airship
 - [Pages](#pages)
 - [Modules](#modules) — the plugin system, and how to write one
-- [Power](#power)
+- [Power](#power) � and the power clients that feed it
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
-- [Flying: base and ship](#flying-base-and-ship)
+- [The network: main base, mobiles and power clients](#the-network-main-base-mobiles-and-power-clients)
 - [Keyboard and monitors](#keyboard-and-monitors)
 - [Project layout](#project-layout)
 - [Development](#development)
@@ -41,7 +44,7 @@ On the computer in game:
 wget run https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/install.lua
 ```
 
-That pulls down all 29 files and offers to install Basalt 2.5 for you. Then:
+That pulls down all 30 files and offers to install Basalt 2.5 for you. Then:
 
 ```
 radar
@@ -98,7 +101,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 - Advanced Computer (advanced, for colour)
 - **Player Detector** (Advanced Peripherals) — adjacent, or on a wired modem
   network shared with the computer.
-  **Not needed in the SHIP role**, which carries no detector at all.
+  **Not needed by a MOBILE**, which carries no detector at all.
 
 **Optional — each unlocks a module**
 
@@ -107,7 +110,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 | **Environment Detector** | the Weather page: live sky, biome scenery, moon phase, light levels |
 | **Energy Detector**, inline in a cable | the Power page: transfer rate, and a settable limit |
 | Any wrappable battery — induction matrix, energy cell, flux point | stored and capacity on the Power page |
-| **Wireless or ender modem** | the BASE and SHIP roles. Use an **ender** modem: no range limit, works across dimensions |
+| **Wireless or ender modem** | the MAIN BASE and MOBILE roles, and power clients. Use an **ender** modem: no range limit, works across dimensions |
 | **Advanced Monitor(s)** | any size; each monitor gets its own page |
 | **Speaker(s)** | every speaker on the network plays the alert |
 | Any redstone contraption on a side of the computer | the redstone output |
@@ -127,13 +130,17 @@ defaults rather than different code. On first boot it asks which:
 
 | Profile | What it sets up |
 |---|---|
-| **BASE STATION** | a fixed installation. Monitors get their own pages, the scope holds a fixed bearing, every module on. |
+| **MAIN BASE** | the master. A fixed, chunk-loaded installation: monitors get their own pages, the scope holds a fixed bearing, every module on, and it feeds everything else over the network. |
 | **POCKET** | carried in hand. Sweeps and polls slow down, the animation stops, the scope turns with you in 45° steps, the Power page is off. |
-| **AIRSHIP / VEHICLE** | aboard something that moves. The scope follows the pilot's heading and eases into turns. With no Player Detector aboard, it also sets the SHIP role. |
+| **AIRSHIP / VEHICLE** | aboard something that moves. The scope follows the pilot's heading and eases into turns. |
 
 The choice is **offered, not guessed**. Hardware is a poor proxy for intent: a
-pocket computer is unmistakable, but a base and a ship carry identical
-peripherals and differ only in what they are attached to.
+pocket computer is unmistakable, but a main base and a vehicle carry
+identical peripherals and differ only in what they are attached to.
+
+The **role** is not part of the profile: it follows from whether there is a
+modem. With one, the base profile becomes the **MAIN BASE** and the other two
+become **MOBILE**; without one, all three are **STANDALONE**.
 
 A profile is applied **once**. It is not a mode the rest of the program keeps
 checking — afterwards every setting it touched is an ordinary setting you can
@@ -168,7 +175,7 @@ that is hard to read.
 | `4` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
 | `5` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
 | `6` | **Log** | Detection history, plus a visitor tally on wide screens |
-| `7` | **Settings** | Everything configurable, on one scrolling page |
+| `7` | **Settings** | Everything configurable, on one scrolling page � starting with the version and the profile |
 
 The number keys follow the tab strip rather than a fixed table, so switching a
 module off does not leave a hole in the numbering. Monitors can show any page
@@ -270,7 +277,7 @@ ever appearing in the tab strip. A module whose id matches a shipped one
 Views never touch a peripheral. They read `app` and subscribe to events —
 `scan`, `env`, `anim`, `heading`, `config`, `backdrop`, `modules`, plus
 whatever a module emits — which keeps rendering independent of how often the
-hardware is polled. It is also why the SHIP role needed no view changes at
+hardware is polled. It is also why the MOBILE role needed no view changes at
 all: `radar/link.lua` fills the same tables and fires the same events from the
 network that `radar/scan.lua` fills them from a detector, and nothing
 downstream can tell which it is looking at.
@@ -322,6 +329,43 @@ drives a fuel gate or starts a backup generator off the one output line the
 computer has. An unreadable buffer holds the last level rather than dropping —
 a fuel gate that opens the moment a chunk unloads is worse than one that does
 not move.
+
+### Power clients
+
+A **power client** is a computer wired to energy hardware somewhere that is not
+the main base — a reactor room, a battery bank, a furnace hall. It reads its
+meters and batteries and broadcasts the readings; the main base merges every
+client with its own hardware, graphs the total, and relays it to the mobiles.
+
+```
+powerclient                     -- named after the computer id
+powerclient "Reactor room"      -- or give it a name the base will show
+```
+
+Install one with `--client`, which sets it to launch on boot and skips Basalt —
+a client is a sensor, not a screen:
+
+```
+wget run https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/install.lua --client
+```
+
+It needs a modem and at least one Energy Detector or battery. **No** Player
+Detector, no monitor, no Basalt. It draws a plain status readout so you can see
+at a glance that it is being heard.
+
+Run as many as you like. They are merged by computer id, so:
+
+- a client that stops reporting **drops out on its own** after about fifteen
+  seconds — a reactor whose chunk has unloaded stops being counted as supply
+  rather than being reported as power that is not being generated;
+- two clients with a peripheral of the same name do not collide, because a
+  device's role is stored against the computer that reported it;
+- **only raw readings travel.** Which meter counts as supply and which as demand
+  is decided on the main base, under *Settings → Power → Devices*, so it is one
+  decision in one place rather than one per client.
+
+The main base needs the **MAIN BASE** role for this: the modem has to be open,
+and a STANDALONE station deliberately never opens one.
 
 ### Which mods work
 
@@ -444,65 +488,79 @@ Only the picture turns.
 
 ---
 
-## Flying: base and ship
+## The network: main base, mobiles and power clients
 
-### Why a radar on a ship cannot scan
+Three kinds of computer, one modem network:
+
+| Role | What it is |
+|---|---|
+| **MAIN BASE** | the master. It holds the Player Detector, the Environment Detector and the monitors, does all the scanning, and feeds everything else. Keep it **chunk loaded**, or it goes quiet the moment you walk away. |
+| **MOBILE** | a pocket computer or a vehicle: a modem and a screen, drawing what the main base sends it. No detector, no GPS. |
+| **STANDALONE** | one computer, no network. The fallback when there is no modem; it opens nothing and sends nothing. |
+
+Plus **power clients** — see [below](#power-clients) — which are not radar
+installs at all, just computers reporting what their energy hardware reads.
+
+```
+   power clients                 MAIN BASE                    mobiles
+  ┌───────────────┐           ┌──────────────────┐        ┌──────────────────┐
+  │ Energy Detect │  readings │ Player Detector  │ sweep  │ pocket computer  │
+  │ batteries     │ ────────► │ Environment Det. │ ─────► │ airship          │
+  │ modem         │           │ monitors, modem  │ power  │ modem, no sensors│
+  └───────────────┘           │ CHUNK LOADED     │ weather└──────────────────┘
+       (many)                 └──────────────────┘
+```
+
+### Why a mobile cannot scan for itself
 
 Create: Aeronautics assembles a structure into a **contraption**. While it is
 assembled its blocks live in a proxy level rather than in the world, so anything
 that asks a question about a real block position gets nothing back. The computer
 keeps running, `peripheral.getNames()` still lists the detector, and
-`getPlayersInRange()` returns an **empty list** the whole time you are flying.
+`getPlayersInRange()` returns an **empty list** the whole time you are flying. A
+pocket computer has the same problem for a simpler reason: there is nowhere to
+bolt a detector to it.
 
 `getPlayerPos(name)` is different: it looks up an **entity by name**. A Player
-Detector bolted to the ground can therefore read the pilot wherever they have
-got to — including three thousand blocks up, aboard a ship.
+Detector on the ground can therefore read you wherever you have got to —
+including three thousand blocks up, aboard a ship.
 
-So the detecting is done on the ground and the picture is flown:
-
-```
-   ground                                    in the air
-   ┌────────────────────┐                    ┌────────────────────┐
-   │ BASE               │   contacts, your   │ SHIP               │
-   │ Player Detector    │   position, yaw    │ ender modem        │
-   │ ender modem        │ ─────────────────► │ monitor            │
-   │ SELF mode          │      rednet        │ no detector, no GPS│
-   └────────────────────┘                    └────────────────────┘
-```
-
-Because the base runs in **SELF** mode — centred on you rather than on a fixed
-point — every distance and bearing it computes is already relative to the pilot.
-Nothing is recalculated for being airborne.
+So the detecting is done on the ground and the picture is sent. Because the main
+base runs in **SELF** mode — centred on you rather than on a fixed point — every
+distance and bearing it computes is already relative to you. Nothing is
+recalculated for being airborne.
 
 ### Setting it up
 
-**On the ground station**
+**On the main base**
 
-1. *Settings → Link → Role* → **BASE**.
-2. Give it a name under *Station name* — this is what ships see.
+1. Pick the **MAIN BASE** profile on first boot, or *Settings → Link → Role* →
+   **MAIN BASE**.
+2. Give it a name under *Station name* — this is what mobiles see.
 3. Set *Tracking → Mode* to **SELF** and your *Username*.
-4. Attach a wireless or ender modem.
+4. Attach a wireless or ender modem, and chunk-load the computer.
 
-**On the ship**
+**On each mobile**
 
-1. Put a computer, an **ender modem** and a monitor on the contraption. Pick the
-   **AIRSHIP / VEHICLE** profile on first boot and it sets the SHIP role for you.
+1. A computer, an **ender modem** and a screen. Pick the **POCKET** or
+   **AIRSHIP / VEHICLE** profile on first boot and it takes the MOBILE role.
 2. Press **Scan for base stations**, and pick yours.
 
-The ship accepts traffic **only** from the computer id it was paired with, so
-several base/ship pairs can share one world. The base never needs to know who is
+A mobile accepts traffic **only** from the computer id it was paired with, so
+several crews can share one world. The main base never needs to know who is
 listening, and announces itself whether or not anyone is.
 
-### Weather on the ship
+### What travels
 
-*Settings → Link → Relay weather*, on the **base**, also sends the environment
-readings. Only the raw readings travel — the sky, palette and scenery are
-rebuilt on the ship from the same code that builds them on the base, so the page
-is identical without a single pixel crossing the network. Off by default.
+| | |
+|---|---|
+| **Contacts** | always. Only positions — distance, bearing, altitude band and colour are rebuilt at the far end by the same code that computes them locally. |
+| **Weather** | *Settings → Link → Relay weather*. Only the raw detector readings; the sky, palette and scenery are rebuilt on the mobile from the same code, so the page is identical without a pixel crossing the network. Off by default. |
+| **Power** | *Settings → Power → Relay to mobiles*. The merged totals from the main base and every power client. On by default. |
 
 ### When the link drops
 
-If nothing arrives for roughly two of the base's sweep intervals, the ship
+If nothing arrives for roughly two of the main base's sweep intervals, a mobile
 treats the link as lost. It **clears the scope** and says so — a stale picture
 drawn as though it were live is worse than an empty one.
 
@@ -510,20 +568,20 @@ drawn as though it were live is worse than an empty one.
 |---|---|
 | `Waiting for <name>` | paired, but that base has not spoken yet |
 | `Link lost - nothing from <name>` | it has gone quiet, or you have flown out of range |
-| `No base station paired` | pick one with *Scan for base stations* |
-| `No modem - the ship link needs one` | attach a modem and press *Modem* to rescan |
+| `No main base paired` | pick one with *Scan for base stations* |
+| `No modem - a MOBILE needs one` | attach a modem and press *Modem* to rescan |
 
 ### Notes
 
-- **STATION is the default and is untouched.** It opens no modem and sends
-  nothing.
-- A **BASE is a fully working radar in its own right** — its own screens,
-  alerts, log and redstone, whether or not a ship is ever paired to it.
-- **The ship carries no position source.** Everything it draws is the pilot's
-  position as read by the base. Leave the ship on autopilot and walk away, and
-  the status page follows **you**. There is deliberately no GPS fallback.
-- Only positions travel. Distance, bearing, altitude band and colour are rebuilt
-  at the far end by the same code that computes them locally.
+- **STANDALONE opens no modem and sends nothing.** A computer with no interest
+  in the network never touches it. That is also why collecting power clients
+  means being a MAIN BASE rather than a standalone with a flag set.
+- A **MAIN BASE is a fully working radar in its own right** — its own screens,
+  alerts, log and redstone, whether or not anything is ever paired to it.
+- **A mobile carries no position source.** Everything it draws is *your*
+  position as read by the main base. Leave a ship on autopilot and walk away and
+  the status page follows **you**, not the ship. There is deliberately no GPS
+  fallback.
 
 ---
 
@@ -546,8 +604,9 @@ Q          quit
 
 Monitors have no keyboard, so the screen is the control:
 
-- **Right-click a monitor** (a *use*, which arrives as a touch) to move it to
-  the next page. Turn this off under **Settings → Displays → Tap to change**.
+- **Right-click a monitor** (a *use*, which arrives as a `monitor_touch`) to
+  move it to the next page. Turn this off under
+  **Settings → Displays → Tap to change**.
 - Monitors big enough for a tab strip can be pressed on a tab to jump straight
   to that page.
 - **Auto-cycle** walks a monitor through its pages on a timer — per monitor,
@@ -582,7 +641,7 @@ radar/
   hardware.lua         peripheral discovery by capability
 
   scan.lua             Player Detector -> contact list
-  link.lua             base <-> ship over rednet: pairing, relay, staleness
+  link.lua             the network: pairing, relay, staleness, module protocols
   environment.lua      Environment Detector -> snapshot + scene description
   power.lua            energy peripherals -> rates, buffer, history, alarms
   biomes.lua           biome id -> ground profile, and its colours by mood
@@ -597,6 +656,7 @@ radar/
   sky.lua              procedural sky, weather, terrain and flora painter
   util.lua             maths, bearings, headings, formatting
 
+powerclient.lua        the power client: reads energy hardware, reports it
 install.lua            in-game installer
 manifest.txt           the file list it downloads
 IDEAS.md               where this could go next
@@ -612,8 +672,8 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 109 checks
-lua preview/install-test.lua .      # 15 checks
+lua preview/smoke-test.lua .        # 120 checks
+lua preview/install-test.lua .      # 16 checks
 lua preview/render-preview.lua . preview
 ```
 
@@ -624,10 +684,14 @@ every weather and every hour, and reads the pixel grid back afterwards to prove
 no painter leaves a hole in the ground — `blitTo` silently substitutes a palette
 entry for an unpainted sub-pixel, so a gap would otherwise only show up in game.
 
-rednet is stubbed as a loopback, so the whole base/ship link is exercised: a
-base broadcasting after a sweep, a ship rebuilding that sweep and comparing it
+rednet is stubbed as a loopback, so the whole network is exercised: a main base
+broadcasting after a sweep, a mobile rebuilding that sweep and comparing it
 **field for field** against the one the base drew, pairing, refusing an unpaired
 sender, a silent base being called lost, and the weather relay.
+
+`powerclient.lua` is run as a real program against the same mocks, and what it
+puts on the wire is fed straight into the main base's handler -- so the client
+and the base cannot drift apart on the payload format without failing here.
 
 The module system is tested by **registering a synthetic module before the app
 is built** — so it goes through the whole machine exactly as a dropped-in file
@@ -660,12 +724,20 @@ everything still renders, just flatter.
 - **`getPlayerPos` may be disabled** by the server's `playerSpy` option, and
   some servers add random error at long range. The radar reports what it is
   given.
-- **Aboard a contraption nothing block-based answers.** That is what the BASE
-  and SHIP roles are for, and why backdrops exist.
+- **Aboard a contraption nothing block-based answers.** That is what the MAIN
+  BASE and MOBILE roles are for, and why backdrops exist.
 
 ---
 
 ## Version history
+
+**v8 — networked edition.** Roles renamed to what they are actually used for:
+**MAIN BASE** (the chunk-loaded master that holds the detectors), **MOBILE**
+(pocket computers and vehicles) and **STANDALONE**. A new `powerclient`
+program, so any number of computers can report energy readings the main base
+merges, graphs and relays onward. Right-clicking a monitor to change its page
+works again. The settings page shows the version, and stacks readably on a
+pocket screen.
 
 **v7 — modular edition.** Every page is a module in `radar/modules/`, with its
 own settings, hardware and loops; drop a file in and it is a page. Device
@@ -679,9 +751,9 @@ preview renderer writes PNGs directly.
 and set the sky to live, and the airships fly through the real dusk and the real
 rain.
 
-**v5 — base and ship.** A **role** under *Settings → Link*, so a ground station
-can relay its sweep over rednet to a screen aboard a Create: Aeronautics
-contraption that cannot scan for itself.
+**v5 — base and ship.** The first **role** under *Settings → Link*, so a ground
+station could relay its sweep over rednet to a screen aboard a Create:
+Aeronautics contraption that cannot scan for itself. Renamed in v8.
 
 **v4 — Basalt edition.** Rebuilt on Basalt 2.5: tabbed pages, non-blocking
 settings, 2×3 sub-pixel drawing for round range rings and a real sweep, the live

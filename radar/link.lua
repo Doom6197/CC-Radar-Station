@@ -1,11 +1,18 @@
--- The base/ship link: one station's sweep, relayed over rednet to another.
+-- The network: the MAIN BASE's sweep, relayed over rednet to every MOBILE.
 --
 -- Create: Aeronautics assembles a ship into a contraption, and the blocks
 -- riding on it stop answering anything that depends on a real world block
--- position: getPlayersInRange() comes back empty while the ship is flying.
--- getPlayerPos(name) is an ENTITY lookup, so a station bolted to the ground
--- can still read the pilot's position wherever they have got to. A BASE
--- therefore does all the detecting, and a SHIP only draws.
+-- position: getPlayersInRange() comes back empty while the ship is flying. A
+-- pocket computer has the same problem for a different reason -- there is
+-- nowhere to bolt a detector to it. getPlayerPos(name) is an ENTITY lookup,
+-- so a computer on the ground can still read a player's position wherever
+-- they have got to. The MAIN BASE therefore does all the detecting, and every
+-- MOBILE only draws.
+--
+-- Two extension points let a module use the same modem without this file
+-- knowing what the traffic means: onProtocol() claims a rednet protocol of its
+-- own (power clients broadcasting readings), and onRelay() adds a payload type
+-- to what the main base already sends its mobiles (those readings, merged).
 --
 -- Nothing derived travels. A contact goes over the wire as a bare position,
 -- and radar.scan rebuilds the distance, bearing and band at the far end -- so
@@ -18,10 +25,23 @@ local scan        = require("radar.scan")
 local link = {}
 link.__index = link
 
--- Payloads and announcements ride on separate protocols so a ship hunting for
--- stations can listen for beacons without wading through contact traffic.
+-- Payloads and announcements ride on separate protocols so a mobile hunting
+-- for stations can listen for beacons without wading through contact traffic.
 link.PROTOCOL = "radar_link"
 link.HELLO    = "radar_link_hello"
+
+-- Protocols a module has claimed: protocol -> handler(link, app, id, message).
+-- This is what lets the power module put a second kind of traffic on the same
+-- modem without link.lua knowing anything about energy -- see
+-- radar/modules/power.lua and powerclient.lua.
+link.handlers = {}
+
+--- Claims a rednet protocol for a module.
+---@param protocol string
+---@param handler function(link, app, id, message) -> boolean accepted
+function link.onProtocol(protocol, handler)
+  link.handlers[protocol] = handler
+end
 
 link.ANNOUNCE_SECONDS = 5
 link.RECEIVE_TIMEOUT  = 1
@@ -207,6 +227,16 @@ end
 function link:handle(app, id, message, protocol)
   if type(id) ~= "number" or type(message) ~= "table" then return false end
 
+  -- A module's own protocol is entirely its business: who it accepts traffic
+  -- from, and what it does with it, is decided in the module rather than here.
+  -- Power clients broadcast to whoever is listening, which is a different
+  -- trust model from the paired base/mobile link below.
+  local handler = link.handlers[protocol]
+  if handler then
+    local ok, accepted = pcall(handler, self, app, id, message)
+    return ok and accepted == true
+  end
+
   -- Beacons are collected whatever this station's role is: that list is what
   -- the "scan for base stations" picker offers.
   if message.t == "h" then
@@ -219,14 +249,43 @@ function link:handle(app, id, message, protocol)
     return true
   end
 
-  -- Everything else is only of interest to a ship, and only from the one base
-  -- it was paired with -- so two crews on one world never cross wires.
-  if not app or not config.isShip(app.cfg) then return false end
+  -- Everything else is only of interest to a MOBILE, and only from the one
+  -- main base it was paired with -- so two crews on one world never cross
+  -- wires.
+  if not app or not config.isMobile(app.cfg) then return false end
   if not app.cfg.pairedBaseId or id ~= app.cfg.pairedBaseId then return false end
 
   if message.t == "s" then return self:applyScan(app, message) end
   if message.t == "e" then return self:applyEnv(app, message) end
+
+  -- A relayed payload a module owns. Same pairing rule as the sweep: it came
+  -- from the main base this mobile is listening to.
+  local relay = link.relays[message.t]
+  if relay then
+    local ok, accepted = pcall(relay, self, app, message)
+    return ok and accepted == true
+  end
   return false
+end
+
+-- What a MAIN BASE relays onward to its mobiles, beyond the sweep and the
+-- weather: payload type -> handler(link, app, message). Registered by the
+-- module that owns the payload, so a mobile draws a page it has no hardware
+-- for at all.
+link.relays = {}
+
+---@param kind string A one or two letter payload type
+---@param handler function(link, app, message) -> boolean accepted
+function link.onRelay(kind, handler)
+  link.relays[kind] = handler
+end
+
+--- Broadcasts a module's payload to the mobiles, on the main link protocol.
+---@return boolean sent
+function link:relay(kind, payload)
+  if not self.open then return false end
+  payload.t = kind
+  return (pcall(rednet.broadcast, payload, link.PROTOCOL))
 end
 
 --- Waits briefly for one message and applies it. Blocking, so it belongs in a
@@ -235,7 +294,10 @@ function link:pump(app, timeout)
   if not self.open then return false end
   local id, message, protocol = rednet.receive(nil, timeout or link.RECEIVE_TIMEOUT)
   if not id then return false end
-  if protocol ~= link.PROTOCOL and protocol ~= link.HELLO then return false end
+  if protocol ~= link.PROTOCOL and protocol ~= link.HELLO
+     and not link.handlers[protocol] then
+    return false
+  end
   return self:handle(app, id, message, protocol)
 end
 
@@ -265,14 +327,14 @@ function link:staleAfter(cfg)
   return math.max(3, 2 * (self.interval or config.scanInterval(cfg)))
 end
 
---- Why a ship has nothing to draw, or nil when the link is healthy. Reported
+--- Why a MOBILE has nothing to draw, or nil when the link is healthy. Reported
 --- through app.scanError, so every page says "link lost" in the same place it
 --- already says "detector fault".
 ---@return string|nil problem
 function link:status(cfg)
-  if not config.isShip(cfg) then return nil end
-  if not self.open then return (self.error or "No modem") .. " - the ship link needs one" end
-  if not cfg.pairedBaseId then return "No base station paired - Settings / Link" end
+  if not config.isMobile(cfg) then return nil end
+  if not self.open then return (self.error or "No modem") .. " - a MOBILE needs one" end
+  if not cfg.pairedBaseId then return "No main base paired - Settings / Link" end
 
   local label = config.pairedLabel(cfg)
   if not self.lastAt then return "Waiting for " .. label end
@@ -283,7 +345,7 @@ function link:status(cfg)
 end
 
 --- Whether a relayed environment snapshot is recent enough to keep drawing,
---- which is what tells a ship not to bother with a local detector.
+--- which is what tells a mobile not to bother with a local detector.
 function link:envFresh(cfg)
   if not self.envAt then return false end
   local limit = math.max(6, 2 * (self.envInterval or cfg.envSeconds) + 2)
@@ -294,18 +356,18 @@ end
 ---@return string text
 ---@return boolean healthy
 function link:summary(cfg)
-  if config.isBase(cfg) then
+  if config.isMain(cfg) then
     if not self.open then
       return (self.error or "no modem") .. " - not broadcasting", false
     end
-    return ("BASE \"%s\"%s"):format(cfg.stationName,
+    return ("MAIN BASE \"%s\"%s"):format(cfg.stationName,
       cfg.relayWeather and "  +weather" or ""), true
   end
 
-  if config.isShip(cfg) then
+  if config.isMobile(cfg) then
     local problem = self:status(cfg)
     if problem then return problem, false end
-    return "SHIP - linked to " .. config.pairedLabel(cfg), true
+    return "MOBILE - linked to " .. config.pairedLabel(cfg), true
   end
 
   return "stand-alone", true

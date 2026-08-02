@@ -197,7 +197,7 @@ end
 function app:readHeading()
   -- A ship has no detector to ask; the pilot's yaw arrives with every relayed
   -- sweep, which is exactly what "heading up" on a moving scope needs.
-  if config.isShip(self.cfg) then
+  if config.isMobile(self.cfg) then
     return self:applyHeading(self.link.headingRaw)
   end
   local pos = scan.myPosition(self.kit, self.cfg)
@@ -270,7 +270,7 @@ function app:checkLink()
 end
 
 function app:sweep()
-  if config.isShip(self.cfg) then return self:checkLink() end
+  if config.isMobile(self.cfg) then return self:checkLink() end
 
   local myPos, contacts, centre, err = scan.run(self.kit, self.cfg, self.ignore)
   self:applyScan(myPos, contacts, centre, err)
@@ -278,18 +278,18 @@ function app:sweep()
   -- The pilot's yaw comes free with their position, so a base can relay a
   -- heading even while its own scope sits locked to a fixed bearing.
   if myPos then self.headingRaw = util.headingOf(myPos.yaw) end
-  if config.isBase(self.cfg) then self.link:sendScan(self) end
+  if config.isMain(self.cfg) then self.link:sendScan(self) end
 end
 
 function app:pollEnvironment(force)
   -- A ship being fed the weather leaves its own detector alone -- it probably
   -- has none, and aboard a contraption it would not answer anyway.
-  if config.isShip(self.cfg) and self.link:envFresh(self.cfg) then
+  if config.isMobile(self.cfg) and self.link:envFresh(self.cfg) then
     self:emit("env")
     return
   end
   self.env:poll(self.kit, self.cfg, force)
-  if config.isBase(self.cfg) then self.link:sendEnv(self) end
+  if config.isMain(self.cfg) then self.link:sendEnv(self) end
   self:emit("env")
 end
 
@@ -362,7 +362,7 @@ function app:start()
   -- listening, so pairing needs no handshake state at this end.
   basalt.schedule(function()
     while self.running do
-      if config.isBase(self.cfg) and self.link.open then
+      if config.isMain(self.cfg) and self.link.open then
         pcall(self.link.announce, self.link, self.cfg)
       end
       sleep(linkLib.ANNOUNCE_SECONDS)

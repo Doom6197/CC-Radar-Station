@@ -261,21 +261,17 @@ local function buildRoot(app, rootFrame, opts)
     end,
     background = theme.bg,
   })
-  -- Monitors have no keyboard, so the screen itself is the control: using a
-  -- monitor in game (a right-click) arrives as a touch anywhere on the
-  -- content, and moves it to the next page. The tab strip sits in its own
-  -- canvas and still jumps straight to whichever tab was pressed.
-  --
   -- On the terminal the mouse has real work to do -- the settings page is
   -- nothing but buttons -- so a click only cycles when the window is too small
   -- to show a tab strip at all.
+  --
+  -- A MONITOR touch is not handled here. The content frame is covered edge to
+  -- edge by the page's own canvas, which does not itself take clicks, so the
+  -- touch never reached this handler and right-clicking a monitor did nothing.
+  -- ui.registerTouch below reads monitor_touch off the event queue instead,
+  -- which is the same thing the keyboard shortcuts already do successfully.
   self.content:onClick(function()
-    if self.monitor then
-      if self.app.cfg.tapCycle then
-        self:cyclePage(1)
-        self:holdCycle()
-      end
-    elseif not self:hasTabs() then
+    if not self.monitor and not self:hasTabs() then
       self:cyclePage(1)
     end
   end)
@@ -395,6 +391,52 @@ function ui.registerKeys(app, roots, terminalRoot)
           if not ok then terminalRoot:toast("Key error: " .. tostring(err), "error") end
         end
       end
+    end
+  end)
+end
+
+-- ------------------------------------------------------------------ touch ---
+
+--- Turns one monitor touch into a page change.
+---
+--- Split out from the loop so the whole decision can be driven without a real
+--- monitor: which root the touch belongs to, whether it landed on the tab
+--- strip, and whether tap-to-change is even on.
+---@param side string The monitor's peripheral name, as monitor_touch reports it
+---@return string|nil page The page it moved to, or nil if it did nothing
+function ui.handleTouch(roots, app, side, x, y)
+  for _, root in ipairs(roots) do
+    if root.monitor and root.monitor.name == side then
+      -- A touch on the tab strip is a jump to that tab, whatever
+      -- tap-to-change is set to: it is an explicit choice of page rather than
+      -- "move me along", and turning the setting off should not disable the
+      -- tabs a big monitor is showing.
+      if root:hasTabs() and y == root.root.height then
+        for _, span in ipairs(root.tabSpans or {}) do
+          if x >= span.x1 and x <= span.x2 then
+            root:setPage(span.id)
+            root:holdCycle()
+            return span.id
+          end
+        end
+        return nil
+      end
+
+      if not app.cfg.tapCycle then return nil end
+      root:cyclePage(1)
+      root:holdCycle()
+      return root.page
+    end
+  end
+  return nil
+end
+
+--- Listens for monitor touches for the life of the station.
+function ui.registerTouch(app, roots)
+  basalt.schedule(function()
+    while app.running do
+      local _, side, x, y = os.pullEvent("monitor_touch")
+      pcall(ui.handleTouch, roots, app, side, x, y)
     end
   end)
 end
@@ -525,6 +567,7 @@ function ui.build(app)
   end)
 
   ui.registerKeys(app, roots, terminalRoot)
+  ui.registerTouch(app, roots)
   refreshAll()
   return roots, terminalRoot
 end

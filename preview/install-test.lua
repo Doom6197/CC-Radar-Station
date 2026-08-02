@@ -256,6 +256,35 @@ check("--startup points into the target directory", function()
     "startup points at the install dir, got " .. tostring(DISK["startup.lua"]))
 end)
 
+check("--client sets a power client up as a sensor", function()
+  reset()
+  local ok, err = runInstaller("--client")
+  assert(ok, "installer ran: " .. tostring(err))
+
+  -- The whole point of a client computer: it boots into the sensor, not the
+  -- radar, and it never asks about a UI framework it has no use for.
+  assert(DISK["startup.lua"], "a startup file was written without asking for one")
+  assert(DISK["startup.lua"]:find("powerclient", 1, true),
+    "which launches the client, got " .. tostring(DISK["startup.lua"]))
+  assert(not DISK["startup.lua"]:find('"/radar"', 1, true), "and not the radar")
+  assert(#SHELL_RUNS == 0, "Basalt was not offered")
+
+  -- It still gets the whole install: the client reads radar/power.lua and
+  -- radar/hardware.lua, and a half install would be a puzzle to debug.
+  assert(DISK["powerclient.lua"], "the client program was written")
+  assert(DISK["radar/power.lua"], "and the module it reads energy through")
+  assert(DISK["radar/hardware.lua"], "and the one it finds peripherals with")
+
+  local text = table.concat(OUTPUT, "\n")
+  assert(text:find("powerclient", 1, true), "and it says what to run")
+
+  -- Without --client the startup is the radar, as it always was.
+  reset()
+  runInstaller("--startup", "--no-basalt")
+  assert(DISK["startup.lua"]:find("radar", 1, true), "the default is unchanged")
+  assert(not DISK["startup.lua"]:find("powerclient", 1, true), "and is not the client")
+end)
+
 check("basalt is offered when missing and accepted", function()
   reset()
   READ_ANSWERS = { "y" }

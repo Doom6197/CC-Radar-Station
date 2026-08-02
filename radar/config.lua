@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "7.0"
+config.VERSION = "8.0"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -98,9 +98,21 @@ config.HEADING_INTERVALS = { 0.25, 0.5, 1, 2 }
 -- pilot wherever they fly. BASE detects and relays; SHIP only draws.
 
 config.ROLES = {
-  { id = "station", label = "STATION", hint = "stands alone, no network" },
-  { id = "base",    label = "BASE",    hint = "scans, and relays to a ship" },
-  { id = "ship",    label = "SHIP",    hint = "draws what a base relays" },
+  { id = "standalone", label = "STANDALONE",
+    hint = "one computer, no network" },
+  { id = "main",       label = "MAIN BASE",
+    hint = "the master: detectors, and feeds the network" },
+  { id = "mobile",     label = "MOBILE",
+    hint = "pocket or vehicle: draws what the main base sends" },
+}
+
+-- What the roles were called before v8. A settings file naming an old one is
+-- migrated rather than reset, so an existing pair keeps working across the
+-- upgrade without being re-paired by hand.
+config.LEGACY_ROLES = {
+  station = "standalone",
+  base    = "main",
+  ship    = "mobile",
 }
 
 -- How long a monitor rests on a page before the rotation moves it along.
@@ -224,7 +236,7 @@ function config.defaults()
     -- later version turns up rather than silently staying dark.
     modulesOff = {},
 
-    role          = "station",         -- see config.ROLES
+    role          = "standalone",      -- see config.ROLES
     stationName   = nil,               -- filled in by sanitise
     relayWeather  = false,             -- a base also relays the environment
     pairedBaseId  = nil,               -- the one base a ship listens to
@@ -386,9 +398,11 @@ function config.sanitise(cfg)
   if cfg.mode ~= "self" and cfg.mode ~= "fixed" then cfg.mode = "fixed" end
   if type(cfg.myName) ~= "string" or #cfg.myName == 0 then cfg.myName = nil end
 
-  -- A settings file written before v5 has no role at all, and must come out of
-  -- here as a plain stand-alone station with nothing networked turned on.
-  if not indexOfId(config.ROLES, cfg.role) then cfg.role = "station" end
+  -- A settings file written before v8 names a role by its old id; one written
+  -- before v5 has no role at all and must come out of here standing alone with
+  -- nothing networked turned on.
+  if config.LEGACY_ROLES[cfg.role] then cfg.role = config.LEGACY_ROLES[cfg.role] end
+  if not indexOfId(config.ROLES, cfg.role) then cfg.role = "standalone" end
   if type(cfg.stationName) ~= "string" or #cfg.stationName == 0 then
     cfg.stationName = config.defaultStationName()
   end
@@ -557,13 +571,21 @@ end
 
 -- ------------------------------------------------------------------ roles ---
 
-function config.isBase(cfg) return cfg.role == "base" end
-function config.isShip(cfg) return cfg.role == "ship" end
+--- The master computer: it owns the detectors, and everything else is fed
+--- from it. Chunk-loaded, in practice, or the network goes quiet when nobody
+--- is standing near it.
+function config.isMain(cfg) return cfg.role == "main" end
 
---- Whether this role needs a modem open at all. A STATION never touches the
---- network, so nothing here can break an install that does not want one.
+--- A pocket computer or a vehicle: a modem and a screen, drawing what the
+--- main base sends it.
+function config.isMobile(cfg) return cfg.role == "mobile" end
+
+--- Whether the modem needs opening at all. A STANDALONE station never touches
+--- the network, so nothing networked can break an install that does not want
+--- one -- which is also why collecting readings from power clients means
+--- being a MAIN BASE rather than a standalone with a flag set.
 function config.usesNetwork(cfg)
-  return cfg.role == "base" or cfg.role == "ship"
+  return cfg.role == "main" or cfg.role == "mobile"
 end
 
 function config.role(cfg)

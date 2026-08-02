@@ -101,6 +101,7 @@ function power.describe(name, p, ptype)
 
   return {
     name = name,
+    key  = name,          -- what a role is stored against; see roleOf
     dev  = p,
     ptype = ptype,
     meter = rate ~= nil,
@@ -192,13 +193,20 @@ power.newHistory = newHistory
 
 -- ------------------------------------------------------------------ model ---
 
+-- How long a power client may go quiet before its readings are dropped. Long
+-- enough to ride out a slow tick, short enough that a client whose chunk has
+-- unloaded stops being counted as supply that is not actually there.
+power.CLIENT_STALE = 15
+
 function power.new()
   return setmetatable({
-    sources = {},          -- every energy peripheral found
+    sources = {},          -- energy peripherals wired to THIS computer
+    clients = {},          -- computer id -> { id, name, at, interval, sources }
 
-    available = false,     -- anything at all attached
+    available = false,     -- anything at all attached or reporting
     hasRate = false,       -- a real rate, rather than one inferred from storage
     hasStore = false,
+    relayed = false,       -- these totals arrived whole from the main base
 
     input = 0, output = 0, net = 0,
     stored = nil, capacity = nil, percent = nil,
@@ -213,16 +221,111 @@ function power.new()
   }, power)
 end
 
---- Rebuilds the source list from the hardware kit.
+--- Rebuilds the local source list from the hardware kit. Clients are left
+--- alone: they are not this computer's hardware, and a rescan here says
+--- nothing about whether they are still broadcasting.
 function power:attach(kit, cfg)
   local sources = {}
   for _, entry in ipairs(kit.energy or {}) do
     sources[#sources + 1] = entry
   end
   self.sources = sources
-  self.available = #sources > 0
+  self.available = #sources > 0 or next(self.clients) ~= nil
   if cfg then self:applyWindow(cfg) end
   return self
+end
+
+-- ---------------------------------------------------------------- clients ---
+-- A power client is a computer wired to meters or batteries somewhere else,
+-- broadcasting what it reads. Several can report at once; they are merged by
+-- computer id, so one going quiet drops out on its own.
+
+--- Takes one broadcast from a client and files its readings.
+---
+--- Nothing is trusted beyond its shape: a client is another computer on an
+--- open network, and a malformed payload must not be able to put a nil into
+--- the middle of a total.
+---@return boolean accepted
+function power:applyClient(id, message, now)
+  if type(id) ~= "number" or type(message) ~= "table" then return false end
+  if type(message.s) ~= "table" then return false end
+
+  local name = type(message.n) == "string" and message.n:sub(1, 24)
+    or ("Computer " .. id)
+
+  local sources = {}
+  for _, entry in ipairs(message.s) do
+    if type(entry) == "table" and type(entry.n) == "string" then
+      local stored = tonumber(entry.s)
+      local capacity = tonumber(entry.c)
+      local isStore = stored ~= nil and capacity ~= nil and capacity > 0
+      sources[#sources + 1] = {
+        name   = entry.n,
+        -- Keyed by the computer that reported it, so two clients with a
+        -- peripheral of the same name keep their own roles.
+        key    = id .. ":" .. entry.n,
+        remote = true,
+        client = name,
+        clientId = id,
+        meter  = entry.m == 1 or tonumber(entry.r) ~= nil,
+        store  = isStore,
+        rate   = tonumber(entry.r),
+        stored = isStore and stored or nil,
+        capacity = isStore and capacity or nil,
+        input  = tonumber(entry.i),
+        output = tonumber(entry.o),
+        limit  = tonumber(entry.l),
+      }
+    end
+  end
+
+  self.clients[id] = {
+    id = id,
+    name = name,
+    at = now or os.clock(),
+    interval = tonumber(message.i),
+    sources = sources,
+  }
+  self.available = true
+  return true
+end
+
+--- Forgets clients that have stopped reporting.
+---@return boolean dropped Whether anything went
+function power:forgetStale(now)
+  now = now or os.clock()
+  local dropped = false
+  for id, client in pairs(self.clients) do
+    local limit = math.max(power.CLIENT_STALE, 3 * (client.interval or 2))
+    if (now - client.at) > limit then
+      self.clients[id] = nil
+      dropped = true
+    end
+  end
+  return dropped
+end
+
+--- Every client currently reporting, newest name order, for the settings page.
+function power:clientList()
+  local list = {}
+  for _, client in pairs(self.clients) do list[#list + 1] = client end
+  table.sort(list, function(a, b)
+    if a.name == b.name then return a.id < b.id end
+    return a.name < b.name
+  end)
+  return list
+end
+
+--- Local sources and every client's, as one list. This is what the totals,
+--- the settings page and the device picker all walk, so a meter three rooms
+--- away is treated exactly like one on the side of this computer.
+function power:allSources()
+  local out = {}
+  for _, source in ipairs(self.sources) do out[#out + 1] = source end
+  for _, client in ipairs(self:clientList()) do
+    for _, source in ipairs(client.sources) do out[#out + 1] = source end
+  end
+  return out
 end
 
 --- Resizes the history to match the configured window and sample rate.
@@ -238,7 +341,7 @@ end
 --- the main bus is measuring supply, which is the common case.
 function power.roleOf(cfg, source)
   local roles = (cfg.power or {}).roles or {}
-  local role = roles[source.name]
+  local role = roles[source.key or source.name]
   if role == "in" or role == "out" or role == "off" then return role end
   return source.meter and "in" or "off"
 end
@@ -257,47 +360,55 @@ function power:poll(cfg, now)
   local sawRate, sawStore = false, false
   local faults = 0
 
+  -- A client that has stopped reporting must stop counting first, or a
+  -- reactor whose chunk has unloaded goes on being counted as supply.
+  self:forgetStale(now)
+
+  -- Local peripherals are read now; a client's were read on the client and
+  -- arrived over the network. From here down the two are the same thing.
   for _, source in ipairs(self.sources) do
     source.fault = nil
 
     if source.meter then
-      local rate = readNumber(source._rate)
-      source.rate = rate
-      if rate then
-        sawRate = true
-        local role = power.roleOf(cfg, source)
-        if role == "in" then input = input + abs(rate)
-        elseif role == "out" then output = output + abs(rate) end
-      else
-        source.fault = "no rate"
-        faults = faults + 1
-      end
+      source.rate = readNumber(source._rate)
+      if not source.rate then source.fault = "no rate" end
       source.limit = readNumber(source._limitGet)
     end
 
     if source.store then
-      local held = readNumber(source._stored)
-      local total = readNumber(source._capacity)
-      source.stored, source.capacity = held, total
-      if held and total and total > 0 then
-        sawStore = true
-        stored = (stored or 0) + held
-        capacity = (capacity or 0) + total
-      elseif not source.fault then
+      source.stored = readNumber(source._stored)
+      source.capacity = readNumber(source._capacity)
+      if not (source.stored and source.capacity and source.capacity > 0)
+         and not source.fault then
         source.fault = "no reading"
-        faults = faults + 1
       end
+      source.input = readNumber(source._input)
+      source.output = readNumber(source._output)
+    end
+  end
 
-      -- A battery that reports its own throughput is better than anything
-      -- inferred, so it contributes whatever role the meters did not.
-      local ownIn  = readNumber(source._input)
-      local ownOut = readNumber(source._output)
-      source.input, source.output = ownIn, ownOut
-      if ownIn or ownOut then
-        sawRate = true
-        input = input + abs(ownIn or 0)
-        output = output + abs(ownOut or 0)
-      end
+  for _, source in ipairs(self:allSources()) do
+    if source.fault then faults = faults + 1 end
+
+    if source.meter and source.rate then
+      sawRate = true
+      local role = power.roleOf(cfg, source)
+      if role == "in" then input = input + abs(source.rate)
+      elseif role == "out" then output = output + abs(source.rate) end
+    end
+
+    if source.store and source.stored and source.capacity and source.capacity > 0 then
+      sawStore = true
+      stored = (stored or 0) + source.stored
+      capacity = (capacity or 0) + source.capacity
+    end
+
+    -- A battery that reports its own throughput is better than anything
+    -- inferred, so it contributes whatever role the meters did not.
+    if source.input or source.output then
+      sawRate = true
+      input = input + abs(source.input or 0)
+      output = output + abs(source.output or 0)
     end
   end
 
@@ -324,16 +435,72 @@ function power:poll(cfg, now)
   self.input, self.output = input, output
   self.net = input - output
   self.lastAt, self.lastStored = now, stored
+  self.relayed = false
+
+  self.available = #self.sources > 0 or next(self.clients) ~= nil
 
   self.error = nil
   if not self.available then
-    self.error = "No energy peripheral attached"
+    self.error = "No energy peripheral and no power client"
   elseif faults > 0 and not sawRate and not sawStore then
     self.error = "Energy peripherals are not answering"
   end
 
   self:sample(settings)
   return self
+end
+
+-- ----------------------------------------------------------------- relayed ---
+-- A MOBILE has nothing to read and no client of its own; the main base sends
+-- it the finished totals. They land in exactly the fields a local poll would
+-- have filled, so the page cannot tell which it is drawing.
+
+--- Applies totals relayed by the main base.
+---@return boolean accepted
+function power:applyRelay(message, now)
+  if type(message) ~= "table" then return false end
+  local input = tonumber(message.i)
+  local output = tonumber(message.o)
+  if not input or not output then return false end
+
+  self.input, self.output = input, output
+  self.net = input - output
+  self.stored = tonumber(message.s)
+  self.capacity = tonumber(message.c)
+  self.percent = (self.stored and self.capacity and self.capacity > 0)
+    and util.clamp(self.stored / self.capacity * 100, 0, 100) or nil
+
+  self.hasRate = message.r == 1
+  self.hasStore = self.percent ~= nil
+  self.deviceCount = tonumber(message.d) or 0
+  self.available = true
+  self.relayed = true
+  self.relayAt = now or os.clock()
+  self.relayInterval = tonumber(message.n)
+  self.error = nil
+
+  self:sample()
+  return true
+end
+
+--- What a main base puts on the wire. Only the totals: a mobile has no use
+--- for which of forty peripherals contributed what, and the whole point of
+--- the client mesh is that the main base has already done that work.
+function power:relayPayload()
+  return {
+    i = self.input, o = self.output,
+    s = self.stored, c = self.capacity,
+    r = self.hasRate and 1 or nil,
+    d = #self:allSources(),
+  }
+end
+
+--- Whether relayed totals are recent enough to keep drawing, which is what
+--- tells a mobile not to bother polling hardware it does not have.
+function power:relayFresh(now)
+  if not self.relayAt then return false end
+  local limit = math.max(8, 3 * (self.relayInterval or 2))
+  return ((now or os.clock()) - self.relayAt) <= limit
 end
 
 --- Pushes the current reading into the rolling history.
@@ -404,6 +571,14 @@ end
 function power:sourceByName(name)
   for _, source in ipairs(self.sources) do
     if source.name == name then return source end
+  end
+  return nil
+end
+
+--- Any source, local or on a client, by the key its role is stored against.
+function power:sourceByKey(key)
+  for _, source in ipairs(self:allSources()) do
+    if source.key == key then return source end
   end
   return nil
 end

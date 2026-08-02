@@ -22,6 +22,8 @@
 
 local config   = require("radar.config")
 local chart    = require("radar.chart")
+local linkLib  = require("radar.link")
+local modules  = require("radar.modules")
 local pixel    = require("radar.pixel")
 local powerLib = require("radar.power")
 local theme    = require("radar.theme")
@@ -67,6 +69,11 @@ view.ROLES = {
   { id = "off", label = "ignore", hint = "read, but left out of the totals" },
 }
 
+-- Power clients broadcast on their own protocol; the merged totals go out to
+-- the mobiles as one more payload type on the main link.
+view.PROTOCOL = "radar_power"
+view.RELAY_KIND = "pw"
+
 view.defaults = {
   power = {
     enabled       = true,
@@ -75,7 +82,16 @@ view.defaults = {
     sampleSeconds = 1,
     alarm         = true,
     lowPercent    = 20,
-    roles         = {},       -- peripheral name -> "in" | "out" | "off"
+    roles         = {},       -- source key -> "in" | "out" | "off"
+
+    -- Accept readings from power clients. The modem still has to be open for
+    -- its own reasons -- a STANDALONE station never opens one -- so in
+    -- practice this is a MAIN BASE deciding whether to trust the mesh.
+    clients       = true,
+
+    -- A MAIN BASE sends the merged totals on to every mobile, so a pocket
+    -- computer with no energy hardware anywhere near it still has the page.
+    relay         = true,
   },
 }
 
@@ -101,6 +117,8 @@ function view.sanitise(cfg)
 
   p.enabled = p.enabled ~= false
   p.alarm   = p.alarm ~= false
+  p.clients = p.clients ~= false
+  p.relay   = p.relay ~= false
   p.windowSeconds = snapTo(view.WINDOWS, p.windowSeconds, 300)
   p.sampleSeconds = snapTo(view.SAMPLES, p.sampleSeconds, 1)
   p.lowPercent = util.clamp(floor(tonumber(p.lowPercent) or 20), 1, 90)
@@ -153,33 +171,75 @@ function view.attach(app)
   -- The buffer redstone mode reads through here, so the one output line the
   -- computer has can be driven by the power page instead of the contact list.
   app.alerts:provideLevel("buffer", function() return app.power:fraction() end)
+
+  -- Readings arriving from a power client. Broadcast rather than paired: a
+  -- client has nothing worth protecting and no idea who is listening, so it
+  -- reports to whoever is, and the base decides what to do with it.
+  linkLib.onProtocol(view.PROTOCOL, function(_, target, id, message)
+    if not target or not target.cfg.power.clients then return false end
+    if message.t ~= "pw" then return false end
+    local accepted = target.power:applyClient(id, message)
+    if accepted then target:emit("power") end
+    return accepted
+  end)
+
+  -- Merged totals arriving from the main base, for a mobile with no energy
+  -- hardware of its own.
+  linkLib.onRelay(view.RELAY_KIND, function(_, target, message)
+    if not target then return false end
+    local accepted = target.power:applyRelay(message)
+    if accepted then target:emit("power") end
+    return accepted
+  end)
+end
+
+--- One cycle of the poll loop. Split out so the whole decision -- poll, or
+--- sit on what the main base relayed -- can be driven without a scheduler.
+function view.tick(app, now)
+  local model = app.power
+
+  -- A mobile being fed the totals leaves its own hardware alone; it probably
+  -- has none, and the merged figure from the base is the whole grid rather
+  -- than whatever happens to be plugged into a pocket computer.
+  if config.isMobile(app.cfg) and model:relayFresh(now) then
+    app:emit("power")
+    return false
+  end
+
+  model:poll(app.cfg, now)
+
+  if model:checkAlarm(app.cfg, now) then
+    app.alerts:fire(("Power low - buffer at %d%%"):format(
+      util.round(model.percent or 0)))
+  end
+
+  -- The contact sweep already refreshes the line on its own cadence, but a
+  -- buffer draining between sweeps has to move it too.
+  if app.cfg.rs.enabled and app.cfg.rs.mode == "buffer" then
+    app.alerts:updateRedstone()
+  end
+
+  -- Onward to the mobiles. Only the main base does this: it is the one that
+  -- has collected every client, so it is the only one with a whole answer.
+  if config.isMain(app.cfg) and app.cfg.power.relay and model.available then
+    local payload = model:relayPayload()
+    payload.n = app.cfg.power.sampleSeconds
+    app.link:relay(view.RELAY_KIND, payload)
+  end
+
+  app:emit("power")
+  return true
 end
 
 function view.start(app)
   local basalt = require("basalt")
-  local modules = require("radar.modules")
   basalt.schedule(function()
     while app.running do
       -- The loop outlives the module being switched off, so it checks rather
       -- than assuming: there is no way to cancel a Basalt schedule, and a
       -- disabled page must stop costing server-thread calls.
       if app.cfg.power.enabled and modules.isEnabled(app.cfg, "power") then
-        local ok, err = pcall(function()
-          app.power:poll(app.cfg)
-
-          if app.power:checkAlarm(app.cfg) then
-            app.alerts:fire(("Power low - buffer at %d%%"):format(
-              util.round(app.power.percent or 0)))
-          end
-
-          -- The contact sweep already refreshes the line on its own cadence,
-          -- but a buffer draining between sweeps has to move it too.
-          if app.cfg.rs.enabled and app.cfg.rs.mode == "buffer" then
-            app.alerts:updateRedstone()
-          end
-
-          app:emit("power")
-        end)
+        local ok, err = pcall(view.tick, app)
         if not ok then app.power.error = tostring(err) end
       end
       sleep(app.cfg.power.sampleSeconds)
@@ -381,8 +441,22 @@ function view.build(container, app)
         end
       end
 
-      local count = #model.sources
-      parts[#parts + 1] = ("%d device%s"):format(count, count == 1 and "" or "s")
+      -- Where the figures came from. On a mobile that is the whole answer:
+      -- the totals were computed on the main base and arrived finished.
+      if model.relayed then
+        parts[#parts + 1] = ("relayed   %d device%s"):format(
+          model.deviceCount or 0, (model.deviceCount == 1) and "" or "s")
+      else
+        local count = #model:allSources()
+        parts[#parts + 1] = ("%d device%s"):format(count, count == 1 and "" or "s")
+
+        local clients = 0
+        for _ in pairs(model.clients) do clients = clients + 1 end
+        if clients > 0 then
+          parts[#parts + 1] = ("%d client%s"):format(clients, clients == 1 and "" or "s")
+        end
+      end
+
       if not model.hasRate and model.hasStore then
         parts[#parts + 1] = "rate from storage"
       end
@@ -412,9 +486,9 @@ function view.settings(ctx)
 
   ctx.row("Devices", function()
     local model = app.power
-    if not model or #model.sources == 0 then return "none found" end
+    if not model or #model:allSources() == 0 then return "none found" end
     local meters, stores = 0, 0
-    for _, source in ipairs(model.sources) do
+    for _, source in ipairs(model:allSources()) do
       if source.meter then meters = meters + 1 end
       if source.store then stores = stores + 1 end
     end
@@ -422,7 +496,7 @@ function view.settings(ctx)
       meters, meters == 1 and "" or "s", stores, stores == 1 and "y" or "ies")
   end, function()
     local model = app.power
-    if not model or #model.sources == 0 then
+    if not model or #model:allSources() == 0 then
       root:toast("No energy peripheral found - press Rescan", "warning")
       return
     end
@@ -447,7 +521,7 @@ function view.settings(ctx)
           local ok, message = app.power:setLimit(source, 2147483647)
           root:toast(ok and "Transfer limit cleared" or message, ok and "success" or "error")
         else
-          cfg.roles[source.name] = value
+          cfg.roles[source.key or source.name] = value
           app:saveConfig()
         end
         ctx.refreshRows()
@@ -455,7 +529,7 @@ function view.settings(ctx)
     end
 
     local entries = {}
-    for _, source in ipairs(model.sources) do
+    for _, source in ipairs(model:allSources()) do
       local bits = {}
       if source.meter then
         bits[#bits + 1] = powerLib.roleOf(app.cfg, source):upper()
@@ -466,15 +540,21 @@ function view.settings(ctx)
           util.round(source.stored / max(1, source.capacity) * 100))
       end
       if source.fault then bits[#bits + 1] = source.fault end
+
+      -- A device on a client is named for the client as well as for itself:
+      -- "energyDetector_0" on its own says nothing about which room it is in.
+      local name = source.remote
+        and (util.shorten(source.client, 10) .. "/" .. util.shorten(source.name, 12))
+        or util.shorten(source.name, 20)
+
       entries[#entries + 1] = {
-        label = ("%s   %s"):format(
-          util.shorten(source.name, 20), table.concat(bits, "  ")),
-        value = source.name,
+        label = ("%s   %s"):format(name, table.concat(bits, "  ")),
+        value = source.key,
       }
     end
 
-    ctx.openPicker("ENERGY DEVICES", entries, nil, function(name)
-      local source = app.power:sourceByName(name)
+    ctx.openPicker("ENERGY DEVICES", entries, nil, function(key)
+      local source = app.power:sourceByKey(key)
       if source then editDevice(source) end
     end)
   end, function()
@@ -483,6 +563,54 @@ function view.settings(ctx)
 
   ctx.note("Press a device to say whether it measures supply or demand. "
     .. "A battery is read for stored and capacity.")
+
+  -- power clients ------------------------------------------------------------
+  ctx.row("Clients", function()
+    local list = app.power and app.power:clientList() or {}
+    if #list == 0 then
+      if not app.link.open then return "off - the modem is shut" end
+      return cfg.clients and "listening - none heard yet" or "off"
+    end
+    local devices = 0
+    for _, client in ipairs(list) do devices = devices + #client.sources end
+    return ("%d client%s   %d device%s"):format(
+      #list, #list == 1 and "" or "s", devices, devices == 1 and "" or "s")
+  end, function()
+    local list = app.power and app.power:clientList() or {}
+    if #list == 0 then
+      cfg.clients = not cfg.clients
+      app:saveConfig()
+      root:toast(cfg.clients and "Listening for power clients"
+        or "Ignoring power clients", "info")
+      return
+    end
+    local entries = {}
+    for _, client in ipairs(list) do
+      local devices = #client.sources
+      entries[#entries + 1] = {
+        label = ("%s   id %d   %d device%s"):format(
+          util.shorten(client.name, 18), client.id, devices,
+          devices == 1 and "" or "s"),
+        value = client.id,
+      }
+    end
+    ctx.openPicker("POWER CLIENTS REPORTING", entries, nil, function() end)
+  end, function()
+    if not cfg.clients then return theme.dim end
+    return (app.power and next(app.power.clients)) and theme.good or theme.warn
+  end)
+
+  ctx.note("Run powerclient on any computer wired to meters or batteries and "
+    .. "it reports here. The modem has to be open, so this needs the MAIN "
+    .. "BASE role.")
+
+  ctx.row("Relay to mobiles", function() return ctx.onOff(cfg.relay) end, function()
+    cfg.relay = not cfg.relay
+    app:saveConfig()
+  end, ctx.onOffColor(function() return cfg.relay end))
+
+  ctx.note("A MAIN BASE sends the merged totals on, so a pocket computer has "
+    .. "the page with no energy hardware anywhere near it.")
 
   ctx.row("Units", function() return cfg.unit end, function()
     ctx.openPicker("ENERGY UNITS",
@@ -549,7 +677,7 @@ function view.settings(ctx)
 
   ctx.action("Rescan for energy devices", function()
     app:rescan()
-    local count = app.power and #app.power.sources or 0
+    local count = app.power and #app.power:allSources() or 0
     root:toast(("%d energy device%s found"):format(count, count == 1 and "" or "s"),
       count > 0 and "success" or "warning")
   end)

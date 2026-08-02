@@ -71,7 +71,7 @@ function setup.chooseProfile(suggested)
     local wide = width >= 34
     local y = 1
 
-    at(1, y, "RADAR STATION v7", colors.yellow); y = y + 1
+    at(1, y, "RADAR STATION v8", colors.yellow); y = y + 1
     at(1, y, ("-"):rep(math.min(width, 40)), colors.gray); y = y + 2
 
     at(1, y, "Where is this computer?", colors.white); y = y + 2
@@ -158,7 +158,7 @@ function setup.askName(profileId)
   term.clear()
 
   local y = 1
-  at(1, y, "RADAR STATION v7", colors.yellow); y = y + 1
+  at(1, y, "RADAR STATION v8", colors.yellow); y = y + 1
   at(1, y, ("-"):rep(math.min(width, 40)), colors.gray); y = y + 2
 
   at(1, y, "Your Minecraft username?", colors.white); y = y + 2

@@ -1,4 +1,4 @@
-# Radar Station v7 - files the in-game installer downloads.
+# Radar Station v8 - files the in-game installer downloads.
 # One path per line, relative to the repository root.
 # Blank lines and lines starting with # are ignored.
 #
@@ -6,6 +6,7 @@
 # not fetch it and the page simply will not exist on the computer.
 # preview/install-test.lua checks this file against what is on disk.
 
+powerclient.lua
 radar.lua
 radar/alerts.lua
 radar/app.lua

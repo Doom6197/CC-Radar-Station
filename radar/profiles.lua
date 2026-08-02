@@ -3,11 +3,16 @@
 -- The same station runs in three very different places, and each wants
 -- different defaults rather than different code:
 --
---   BASE     a fixed installation with monitors, a detector and mains power
+--   BASE     the MAIN BASE: a fixed, chunk-loaded installation with the
+--            detectors, the monitors and mains power
 --   POCKET   carried in hand: a 26x20 screen, no monitors, no monitors' worth
 --            of server budget either
 --   VEHICLE  aboard an airship or a train, where "up" is wherever the pilot is
 --            looking and the ground answers nothing
+--
+-- The last two are MOBILE: a modem and a screen, drawing what the main base
+-- sends them. Which role a profile lands on depends on whether there is a
+-- modem to talk over -- see apply() at the bottom.
 --
 -- A profile is a set of settings and a set of modules, applied once when the
 -- operator picks it. It is NOT a mode the rest of the program checks: after it
@@ -25,16 +30,17 @@ local profiles = {}
 profiles.LIST = {
   {
     id = "base",
-    label = "BASE STATION",
-    hint = "a fixed installation with monitors",
+    label = "MAIN BASE",
+    hint = "the master: detectors, monitors, chunk loaded",
     blurb = {
-      "A radar bolted to a wall, watching one place.",
+      "The master computer. It holds the detectors, the",
+      "monitors and the power meters, and feeds everything",
+      "else over the network.",
       "",
-      "Monitors get their own pages, the scope holds a",
-      "fixed bearing, and every module is switched on.",
+      "Keep it chunk loaded, or it goes quiet the moment",
+      "you walk away from it.",
     },
     cfg = {
-      role         = "station",
       mode         = "fixed",
       orientation  = "fixed",
       headingStep  = 0,
@@ -58,10 +64,12 @@ profiles.LIST = {
       "",
       "Sweeps and polls slow down, the animation stops,",
       "and the scope turns with you in 45 degree steps.",
-      "The power page is off -- nothing to wire it to.",
+      "",
+      "With a modem it runs as MOBILE and draws what the",
+      "main base sends it -- including the power page,",
+      "which it has nothing of its own to wire to.",
     },
     cfg = {
-      role           = "station",
       mode           = "self",
       orientation    = "heading",
       headingStep    = 45,
@@ -86,9 +94,9 @@ profiles.LIST = {
       "of the picture is always the way you are going.",
       "",
       "A ship assembled by Create: Aeronautics cannot",
-      "scan for itself. With no Player Detector aboard,",
-      "this also sets the SHIP role, ready to pair with",
-      "a base on the ground.",
+      "scan for itself, so with a modem this runs as",
+      "MOBILE, ready to pair with the main base on the",
+      "ground.",
     },
     cfg = {
       mode           = "self",
@@ -136,8 +144,8 @@ function profiles.summary(cfg, short)
 end
 
 --- Which profile the hardware suggests. Only ever used to preselect an entry
---- in the chooser: the operator still picks, because a base and a ship look
---- identical from here.
+--- in the chooser: the operator still picks, because a main base and a vehicle
+--- carry identical peripherals and look identical from here.
 ---@return string id
 function profiles.suggest(kit)
   kit = kit or {}
@@ -156,9 +164,9 @@ end
 
 --- Applies a profile's settings and module set to a config table.
 ---
---- `kit` is optional and only consulted where the right answer genuinely
---- depends on what is attached -- a vehicle with no Player Detector has to be
---- a SHIP, because there is nothing aboard for it to be anything else with.
+--- The ROLE is not listed in a profile's own settings: it is decided here,
+--- from whether there is a modem to talk over. A profile describes where the
+--- computer is, and the role describes what it can therefore do about it.
 ---@return table cfg
 function profiles.apply(cfg, id, kit)
   local entry = profiles.byId(id)
@@ -177,9 +185,17 @@ function profiles.apply(cfg, id, kit)
   if cfg.mode == "self" and not cfg.myName then cfg.mode = "fixed" end
   if cfg.orientation == "heading" and not cfg.myName then cfg.orientation = "fixed" end
 
-  if id == "vehicle" then
-    local hasDetector = kit and kit.detector ~= nil
-    cfg.role = hasDetector and "station" or "ship"
+  -- The role is the one thing a profile cannot decide on its own, because it
+  -- depends on whether there is a modem to talk over. Without one, every
+  -- profile is a station that stands alone -- there is no network for it to
+  -- be part of, and a role claiming otherwise would just report a fault.
+  local hasModem = kit and kit.modem ~= nil
+  if not hasModem then
+    cfg.role = "standalone"
+  elseif id == "base" then
+    cfg.role = "main"
+  else
+    cfg.role = "mobile"
   end
 
   cfg.profile = id

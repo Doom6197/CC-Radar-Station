@@ -1,5 +1,5 @@
 --[[
-  RADAR STATION v7  --  installer
+  RADAR STATION v8  --  installer
 
   Run this on a CC: Tweaked computer:
 
@@ -17,6 +17,8 @@
     --dir <path>     install somewhere other than the current directory
     --no-basalt      skip the Basalt check
     --startup        also write a startup file that launches the radar
+    --client         make --startup launch the POWER CLIENT instead, for a
+                     computer that only reports energy readings
 
   Examples:
 
@@ -38,6 +40,7 @@ local options = {
   dir = shell and shell.dir() or "",
   basalt = true,
   startup = false,
+  client = false,
 }
 
 do
@@ -52,6 +55,13 @@ do
       options.basalt = false
     elseif arg == "--startup" then
       options.startup = true
+    elseif arg == "--client" then
+      -- A power client computer wants Basalt no more than it wants a radar
+      -- page: it is a sensor, not a screen. Implying --startup and skipping
+      -- Basalt saves the one flag combination anybody actually types.
+      options.client = true
+      options.startup = true
+      options.basalt = false
     elseif arg:find("/", 1, true) then
       options.repo = arg
     elseif not arg:match("^%-%-") then
@@ -114,7 +124,7 @@ local function fetch(path)
   return body
 end
 
-say("Radar Station v7 installer", colors.yellow)
+say("Radar Station v8 installer", colors.yellow)
 say("  from " .. options.repo .. " (" .. options.branch .. ")", colors.lightGray)
 say("  into " .. (options.dir == "" and "/" or "/" .. options.dir), colors.lightGray)
 say("")
@@ -195,14 +205,16 @@ end
 
 -- ---------------------------------------------------------------- startup ---
 
+local program = options.client and "powerclient" or "radar"
+
 if options.startup then
-  local launcher = "/" .. fs.combine(options.dir, "radar")
+  local launcher = "/" .. fs.combine(options.dir, program)
   local handle = fs.open("/startup.lua", "w")
   if handle then
     handle.write(('shell.run("%s")\n'):format(launcher))
     handle.close()
     say("")
-    say("startup.lua will launch the radar on boot.", colors.lime)
+    say("startup.lua will launch " .. program .. " on boot.", colors.lime)
   else
     say("Could not write /startup.lua.", colors.red)
   end
@@ -213,10 +225,15 @@ end
 say("")
 say("Done. Start it with:", colors.yellow)
 if options.dir == "" then
-  say("  radar", colors.white)
+  say("  " .. program, colors.white)
 else
-  say("  " .. fs.combine(options.dir, "radar"), colors.white)
+  say("  " .. fs.combine(options.dir, program), colors.white)
 end
 say("")
-say("Or pass your base coordinates straight in:", colors.lightGray)
-say("  radar 120 64 -340", colors.lightGray)
+if options.client then
+  say("Give it a name the main base will show:", colors.lightGray)
+  say('  powerclient "Reactor room"', colors.lightGray)
+else
+  say("Or pass your base coordinates straight in:", colors.lightGray)
+  say("  radar 120 64 -340", colors.lightGray)
+end

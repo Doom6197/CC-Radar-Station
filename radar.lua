@@ -1,5 +1,5 @@
 --[[
-  RADAR STATION v7  --  modular edition
+  RADAR STATION v8  --  networked edition
   CC: Tweaked + Advanced Peripherals, Minecraft 1.21.1
 
   A player radar with a live weather and sky display and a power monitor,
@@ -9,9 +9,13 @@
 
   It runs in three places, and asks which on first boot:
 
-    BASE STATION    a fixed installation with monitors
+    MAIN BASE       the master: detectors, monitors, chunk loaded
     POCKET          carried in hand, on the move
     AIRSHIP/VEHICLE aboard something that moves
+
+  The last two are MOBILE: a modem and a screen, drawing what the main base
+  sends them. See powerclient.lua for the third program in the set -- a
+  computer that only reads energy hardware and reports it.
 
   ---------------------------------------------------------------------------
   HARDWARE
@@ -20,8 +24,8 @@
       Advanced Computer  (advanced, for colour)
       Player Detector    (Advanced Peripherals) adjacent, or on a wired modem
                          network shared with the computer.
-                         NOT needed in the SHIP role -- a ship is fed by its
-                         base and carries no detector at all.
+                         NOT needed by a MOBILE -- it is fed by the main base
+                         and carries no detector at all.
 
     OPTIONAL
       Environment Detector (Advanced Peripherals)
@@ -30,8 +34,9 @@
       Energy Detector    (Advanced Peripherals) inline in a cable, plus any
                          directly wrappable battery -- unlocks the POWER page
       Wireless or ender modem
-                         needed by the BASE and SHIP roles. Ender is the one
-                         to use: no range limit, and it crosses dimensions.
+                         needed by the MAIN BASE and MOBILE roles. Ender is
+                         the one to use: no range limit, and it crosses
+                         dimensions.
       Advanced Monitor(s)
                          any size; each monitor shows its own page
       Speaker(s)         every speaker on the network plays the alert
@@ -114,12 +119,18 @@
 
     ROLES. A ship assembled by Create: Aeronautics is a contraption rather
     than world blocks, so getPlayersInRange() aboard one returns nothing while
-    it flies. getPlayerPos(name) is an entity lookup and keeps working, so a
-    BASE on the ground -- in SELF mode, centred on the pilot -- sees everyone
-    around them wherever they are, and relays that over rednet to a SHIP.
-    A SHIP needs only a modem: no Player Detector, no GPS. Pick the role and
-    pair the two under Settings / Link. STATION is the default and never
-    touches the network.
+    it flies, and there is nowhere to bolt a detector to a pocket computer at
+    all. getPlayerPos(name) is an entity lookup and keeps working, so the MAIN
+    BASE on the ground -- in SELF mode, centred on you -- sees everyone around
+    you wherever you are, and relays that over rednet to every MOBILE. A
+    MOBILE needs only a modem: no Player Detector, no GPS. Pick the role and
+    pair the two under Settings / Link. STANDALONE is the fallback for a
+    computer with no modem, and never touches the network.
+
+    POWER CLIENTS. Run powerclient on any computer wired to Energy Detectors
+    or batteries and it broadcasts what it reads. The MAIN BASE merges every
+    client with its own hardware, graphs the total, and relays it onward, so a
+    pocket computer has the power page with nothing plugged into it.
 
     MAX RANGE is capped by the server's "playerDetMaxRange" setting in
     advancedperipherals-server.toml. Set it to -1 for no limit.
@@ -145,7 +156,7 @@ if not ok then
   term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
-  print("Radar Station v7 needs Basalt 2.5.")
+  print("Radar Station v8 needs Basalt 2.5.")
   print("")
   print("Install it next to this program with:")
   print("  wget run https://basalt.madefor.cc/2.5/install.lua minified")
@@ -190,9 +201,9 @@ if argv[1] and tonumber(argv[1]) then
   config.saveConfig(app.cfg)
 end
 
--- A SHIP draws what its base relays and needs no detector of its own, so the
--- hard stop below only applies to a station that has to do its own scanning.
-if not app.kit.detector and not config.isShip(app.cfg) then
+-- A MOBILE draws what the main base relays and needs no detector of its own,
+-- so the hard stop below only applies to a station that scans for itself.
+if not app.kit.detector and not config.isMobile(app.cfg) then
   term.setBackgroundColor(colors.black)
   term.setTextColor(colors.white)
   term.clear()
@@ -203,8 +214,8 @@ if not app.kit.detector and not config.isShip(app.cfg) then
   print("next to this computer, or connect one with a")
   print("wired modem, then run radar again.")
   print("")
-  print("A radar aboard a Create: Aeronautics ship wants")
-  print("the SHIP role instead - see Settings / Link.")
+  print("A radar on a ship or a pocket computer wants")
+  print("the MOBILE role instead - see Settings / Link.")
   return
 end
 
@@ -238,7 +249,7 @@ for _, failure in ipairs(modules.failures or {}) do
   terminalRoot:toast("Module " .. failure.id .. " failed to load", "error")
 end
 
-if not app.kit.env and not config.isShip(app.cfg) then
+if not app.kit.env and not config.isMobile(app.cfg) then
   terminalRoot:toast("No Environment Detector - weather page is idle", "warning")
 end
 if config.usesNetwork(app.cfg) then

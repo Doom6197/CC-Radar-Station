@@ -346,7 +346,16 @@ function view.build(container, app, root)
     -- profile ---------------------------------------------------------------
     -- Applying one is destructive on purpose, so the only way in is the picker
     -- rather than a toggle that could be hit by accident.
-    heading("PROFILE")
+    heading("RADAR STATION")
+
+    row("Version", function()
+      local count = #modules.enabled(cfg)
+      if narrow then return "v" .. config.VERSION end
+      return ("v%s   %d modules   computer %d"):format(config.VERSION, count,
+        (os.getComputerID and os.getComputerID()) or 0)
+    end, function()
+      root:toast(("Radar Station v%s"):format(config.VERSION), "info")
+    end, function() return theme.accent end)
 
     row("This station", function() return profiles.summary(cfg, narrow) end, function()
       local entries = {}
@@ -644,9 +653,9 @@ function view.build(container, app, root)
           -- rather than left showing rows that no longer apply.
           build()
         end)
-    end, function() return cfg.role == "station" and theme.text or theme.accent end)
+    end, function() return cfg.role == "standalone" and theme.text or theme.accent end)
 
-    if cfg.role == "station" then
+    if cfg.role == "standalone" then
       note("STATION is the stand-alone radar, exactly as before.")
       note("A ship assembled by Create: Aeronautics cannot scan for itself, "
         .. "so pair a BASE on the ground with a SHIP aboard.")
@@ -662,7 +671,7 @@ function view.build(container, app, root)
       note("An ender modem has no range limit and crosses dimensions.")
     end
 
-    if cfg.role == "base" then
+    if cfg.role == "main" then
       local stationInput = input("Station name", {
         text = cfg.stationName,
         placeholder = "how ships see this base",
@@ -691,7 +700,7 @@ function view.build(container, app, root)
       end, function() return app.link.open and theme.good or theme.warn end)
     end
 
-    if cfg.role == "ship" then
+    if cfg.role == "mobile" then
       row("Paired base", function()
         return config.pairedLabel(cfg) or "not paired - scan below"
       end, function()

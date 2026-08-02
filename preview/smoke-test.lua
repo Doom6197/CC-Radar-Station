@@ -904,21 +904,43 @@ check("a profile will not switch on what it has no username for", function()
   assert(cfg.orientation == "heading", "and the scope follows you")
 end)
 
-check("the vehicle profile picks a role from what is aboard", function()
+check("a profile picks its role from whether there is a modem", function()
   local cfg = config.sanitise({ myName = "Steve" })
 
-  profiles.apply(cfg, "vehicle", { detector = {} })
-  assert(cfg.role == "station", "a detector aboard means it can scan for itself")
-
-  profiles.apply(cfg, "vehicle", {})
-  assert(cfg.role == "ship", "nothing to scan with means it is fed by a base")
-  assert(cfg.orientation == "heading", "and either way the scope follows the pilot")
+  -- A modem is the whole question: without one there is no network to be part
+  -- of, whatever the computer is bolted to.
+  profiles.apply(cfg, "vehicle", { modem = { name = "modem_0" } })
+  assert(cfg.role == "mobile", "a vehicle with a modem is MOBILE, got " .. cfg.role)
+  assert(cfg.orientation == "heading", "and the scope follows the pilot")
   assert(cfg.headingSmooth == true, "easing into turns")
 
-  -- The other two profiles never touch the role.
-  local station = config.sanitise({ role = "base" })
-  profiles.apply(station, "pocket", {})
-  assert(station.role == "station", "a pocket is a plain station")
+  profiles.apply(cfg, "vehicle", {})
+  assert(cfg.role == "standalone", "without one it stands alone, got " .. cfg.role)
+
+  profiles.apply(cfg, "pocket", { modem = { name = "modem_0" } })
+  assert(cfg.role == "mobile", "a pocket with a modem is MOBILE too, got " .. cfg.role)
+  profiles.apply(cfg, "pocket", {})
+  assert(cfg.role == "standalone", "and stands alone without one")
+
+  profiles.apply(cfg, "base", { modem = { name = "modem_0" } })
+  assert(cfg.role == "main", "a base with a modem is the MAIN BASE, got " .. cfg.role)
+  profiles.apply(cfg, "base", {})
+  assert(cfg.role == "standalone", "and stands alone without one")
+end)
+
+check("the roles a settings file names from before v8 are migrated", function()
+  -- An existing pair has to keep working across the upgrade rather than being
+  -- reset to standalone and needing to be paired again by hand.
+  assert(config.sanitise({ role = "station" }).role == "standalone", "station")
+  assert(config.sanitise({ role = "base" }).role == "main", "base")
+
+  local mobile = config.sanitise({ role = "ship", pairedBaseId = 12,
+                                   pairedBaseName = "Hangar" })
+  assert(mobile.role == "mobile", "ship becomes mobile, got " .. mobile.role)
+  assert(mobile.pairedBaseId == 12, "and stays paired to the same computer")
+  assert(mobile.pairedBaseName == "Hangar", "under the same name")
+
+  assert(config.sanitise({ role = "wat" }).role == "standalone", "junk still falls back")
 end)
 
 check("suggest reads the hardware without deciding anything", function()
@@ -1518,7 +1540,7 @@ check("app boots", function()
   assert(#app.kit.speakers == 1, "speaker found")
   assert(#app.kit.modems == 2, "both modems found, got " .. #app.kit.modems)
   assert(app.kit.modem.name == "modem_1", "the wireless one wins, got " .. app.kit.modem.name)
-  assert(app.cfg.role == "station", "a fresh install stands alone")
+  assert(app.cfg.role == "standalone", "a fresh install stands alone")
   assert(not app.link.open, "and never opens the modem")
   app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
   app.cfg.baseDim = "minecraft:overworld"
@@ -1911,39 +1933,95 @@ check("a monitor rotates through its pages on the timer", function()
   assert(terminalRoot.page == before, "the terminal is left alone")
 end)
 
-check("tapping a monitor moves it to the next page", function()
+check("right-clicking a monitor moves it to the next page", function()
   local monitorRoot
   for _, root in ipairs(roots) do
     if root.monitor then monitorRoot = root end
   end
-  local tap = rawget(monitorRoot.content, "_handlers").onClick
-  assert(tap, "the content area has a touch handler")
+  local name = monitorRoot.monitor.name
+
+  -- A monitor_touch off the event queue, which is what a right-click in game
+  -- actually produces. It is NOT delivered as a click to the content frame:
+  -- the page's canvas covers that frame edge to edge and does not take
+  -- clicks, so a handler there never fires. That was the v7 bug.
+  local contentHandler = rawget(monitorRoot.content, "_handlers").onClick
+  monitorRoot:setPage("radar", false)
+  contentHandler(monitorRoot)
+  assert(monitorRoot.page == "radar",
+    "the content handler no longer drives a monitor")
 
   app.cfg.tapCycle = true
-  monitorRoot:setPage("radar", false)
   local order = monitorRoot.pages
-  local start = nil
+  local start
   for i, page in ipairs(order) do if page == "radar" then start = i end end
 
-  tap(monitorRoot)
-  assert(monitorRoot.page == order[(start % #order) + 1],
-    "one tap, one page, landed on " .. monitorRoot.page)
+  local landed = ui.handleTouch(roots, app, name, 3, 4)
+  assert(landed == order[(start % #order) + 1],
+    "one touch, one page, landed on " .. tostring(landed))
+  assert(monitorRoot.page == landed, "and the root agrees")
 
-  -- A tap also restarts the dwell timer, so the rotation cannot yank the page
-  -- away the instant the operator has chosen one.
-  local entry = app:displayConfig(monitorRoot.monitor.name)
+  -- A touch also restarts the dwell timer, so the rotation cannot yank the
+  -- page away the instant the operator has chosen one.
+  local entry = app:displayConfig(name)
   entry.cycle, entry.cycleSeconds = true, 30
   local held = monitorRoot.page
   monitorRoot:tickCycle(monitorRoot.cycleAt + 5)
-  assert(monitorRoot.page == held, "the tap bought a full interval")
+  assert(monitorRoot.page == held, "the touch bought a full interval")
   entry.cycle = false
+
+  -- A touch meant for another monitor, or for the terminal, is not this
+  -- root's business.
+  local before = monitorRoot.page
+  assert(ui.handleTouch(roots, app, "monitor_99", 3, 4) == nil,
+    "a touch on an unknown monitor is ignored")
+  assert(monitorRoot.page == before, "and changes nothing")
 
   -- Turning the setting off makes the screen inert again.
   app.cfg.tapCycle = false
-  local stuck = monitorRoot.page
-  tap(monitorRoot)
-  assert(monitorRoot.page == stuck, "tap-to-cycle honours the setting")
+  assert(ui.handleTouch(roots, app, name, 3, 4) == nil,
+    "tap-to-change honours the setting")
+  assert(monitorRoot.page == before, "so the page stays put")
   app.cfg.tapCycle = true
+end)
+
+check("touching a monitor's tab strip jumps straight to that tab", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local name = monitorRoot.monitor.name
+
+  rawget(monitorRoot.root, "_p").width = 57
+  rawget(monitorRoot.root, "_p").height = 24
+  monitorRoot:setPage(monitorRoot.pages[1], false)
+
+  -- Lay the strip out the way the canvas does, then touch the middle of a tab.
+  local spans = ui.tabLayout(monitorRoot.pages, 57)
+  monitorRoot.tabSpans = spans
+  local target = spans[3]
+  assert(target, "there are at least three tabs")
+
+  local stripRow = monitorRoot.root.height
+  local landed = ui.handleTouch(roots, app, name,
+    math.floor((target.x1 + target.x2) / 2), stripRow)
+  assert(landed == target.id, "landed on the tab pressed, got " .. tostring(landed))
+
+  -- A tab is an explicit choice of page, so it works even with tap-to-change
+  -- off -- that setting is about "move me along", not about the tabs.
+  app.cfg.tapCycle = false
+  monitorRoot:setPage(monitorRoot.pages[1], false)
+  local second = spans[2]
+  assert(ui.handleTouch(roots, app, name,
+    math.floor((second.x1 + second.x2) / 2), stripRow) == second.id,
+    "tabs work with tap-to-change off")
+  app.cfg.tapCycle = true
+
+  -- A touch on the strip but past the last tab does nothing rather than
+  -- falling through to a page change.
+  local page = monitorRoot.page
+  assert(ui.handleTouch(roots, app, name, 57, stripRow) == nil,
+    "empty space on the strip is not a page change")
+  assert(monitorRoot.page == page, "so the page stays put")
 end)
 
 check("settings rows all resolve", function()
@@ -2034,7 +2112,7 @@ local LOCAL_CONTACTS = nil      -- what the base itself drew from it
 
 check("v4 settings sanitise to a stand-alone station", function()
   local cfg = config.sanitise({ rangeIndex = 4, mode = "self" })
-  assert(cfg.role == "station", "role defaults to station, got " .. tostring(cfg.role))
+  assert(cfg.role == "standalone", "role defaults to standalone, got " .. tostring(cfg.role))
   assert(cfg.relayWeather == false, "the weather relay stays off")
   assert(cfg.pairedBaseId == nil, "nothing is paired")
   assert(cfg.stationName == "Base 3", "named from the computer id, got " .. cfg.stationName)
@@ -2042,7 +2120,7 @@ check("v4 settings sanitise to a stand-alone station", function()
 
   local junk = config.sanitise({ role = "wat", stationName = 42,
     relayWeather = "yes", pairedBaseId = "17.8" })
-  assert(junk.role == "station", "an unknown role falls back")
+  assert(junk.role == "standalone", "an unknown role falls back")
   assert(junk.stationName == "Base 3", "a non-string name is replaced")
   assert(junk.relayWeather == false, "only a real boolean turns the relay on")
   assert(junk.pairedBaseId == 17, "a paired id is forced to a whole number")
@@ -2053,7 +2131,7 @@ end)
 
 check("a station never touches the network", function()
   local before = #REDNET.sent
-  app.cfg.role = "station"
+  app.cfg.role = "standalone"
   app.link:attach(app.kit, app.cfg)
   app:sweep()
   app:pollEnvironment(true)
@@ -2065,7 +2143,7 @@ end)
 check("a base broadcasts every sweep", function()
   app.ignore = {}
   app.cfg.myName = "Steve"          -- the pilot, so a position and yaw travel
-  app:setRole("base")
+  app:setRole("main")
   assert(app.link.open, "the modem opened: " .. tostring(app.link.error))
   assert(REDNET.open.modem_1, "on the wireless modem")
 
@@ -2100,7 +2178,7 @@ check("a base broadcasts every sweep", function()
 end)
 
 check("a ship renders a relayed sweep exactly as the base did", function()
-  app:setRole("ship")
+  app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
   app.contacts, app.myPos, app.heading = {}, nil, nil
 
@@ -2237,7 +2315,7 @@ check("silence from the paired base is reported as a lost link", function()
   -- Unpaired and modem-less ships say so just as plainly.
   app:pairWithBase(nil, nil)
   app:sweep()
-  assert(app.scanError:find("No base station paired", 1, true),
+  assert(app.scanError:find("No main base paired", 1, true),
     "an unpaired ship says so, got " .. app.scanError)
   app:pairWithBase(BASE_ID, "Hangar")
   app.link:close()
@@ -2248,7 +2326,7 @@ check("silence from the paired base is reported as a lost link", function()
 end)
 
 check("the weather relay rebuilds an identical snapshot", function()
-  app:setRole("base")
+  app:setRole("main")
   app.cfg.relayWeather = false
   app:pollEnvironment(true)
   local baseSnap = app:snapshot()
@@ -2265,7 +2343,7 @@ check("the weather relay rebuilds an identical snapshot", function()
 
   local payload = textutils.unserialize(textutils.serialize(entry.message))
 
-  app:setRole("ship")
+  app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
   app.env.snapshot = { available = false }
   assert(app.link:handle(app, BASE_ID, payload, linkLib.PROTOCOL), "accepted")
@@ -2304,9 +2382,9 @@ end)
 check("every page draws in the base and ship roles", function()
   local sizes = { { 15, 10 }, { 51, 19 }, { 82, 40 } }
   local scenarios = {
-    { name = "ship-live",  role = "ship", feed = true },
-    { name = "ship-lost",  role = "ship", feed = false },
-    { name = "base",       role = "base", feed = false },
+    { name = "ship-live",  role = "mobile", feed = true },
+    { name = "ship-lost",  role = "mobile", feed = false },
+    { name = "base",       role = "main", feed = false },
   }
   for _, scenario in ipairs(scenarios) do
     app:setRole(scenario.role)
@@ -2332,7 +2410,7 @@ check("every page draws in the base and ship roles", function()
       end
     end
   end
-  app:setRole("station")
+  app:setRole("standalone")
 end)
 
 ------------------------------------------------------------------ backdrops --
@@ -2861,7 +2939,7 @@ check("the dropped-in module was built, drawn and given a settings section", fun
     return nil
   end
 
-  local profile = assert(indexOf("PROFILE"), "the profile section is on the page")
+  local profile = assert(indexOf("RADAR STATION"), "the station section is on the page")
   local switchboard = assert(indexOf("MODULES"), "and the module switchboard")
   local tracking = assert(indexOf("TRACKING"), "and the station-wide sections")
   local redstone = assert(indexOf("REDSTONE OUTPUT"), "down to the redstone line")
@@ -3197,6 +3275,334 @@ check("the settings the pocket profile changes are all reachable", function()
   app.cfg.modulesOff = {}
   config.sanitise(app.cfg)
   buildSettingsAt(51)
+end)
+
+-------------------------------------------------------------- power clients --
+-- A power client is a separate computer wired to meters or batteries, reading
+-- them and broadcasting what it sees. The main base merges every client with
+-- its own hardware, and relays the total to the mobiles.
+
+local powerModule = modules.byId("power")
+
+--- What powerclient.lua puts on the wire.
+local function clientPayload(name, sources, interval)
+  return { t = "pw", n = name, i = interval or 2, s = sources }
+end
+
+check("a client's readings are merged with the local hardware", function()
+  local model = powerLib.new()
+  model:attach({ energy = {
+    powerLib.describe("local_meter", fakeMeter(1000), "energy_detector"),
+  } }, config.sanitise({}))
+
+  local cfg = config.sanitise({})
+  cfg.power.roles = { local_meter = "in" }
+
+  model:poll(cfg, 100)
+  assert(model.input == 1000, "just the local meter to start with")
+  assert(model.percent == nil, "and no buffer anywhere")
+
+  -- A reactor room reports in.
+  assert(model:applyClient(7, clientPayload("Reactor", {
+    { n = "energyDetector_0", m = 1, r = 4000 },
+    { n = "matrix", s = 3e9, c = 1e10 },
+  }), 101), "the client was accepted")
+
+  cfg.power.roles["7:energyDetector_0"] = "in"
+  model:poll(cfg, 101)
+
+  assert(model.input == 5000, "its meter joins the total, got " .. model.input)
+  assert(model.stored == 3e9, "and its battery, got " .. tostring(model.stored))
+  assert(math.abs(model.percent - 30) < 0.001, "with a real percentage")
+  assert(#model:allSources() == 3, "three devices in all, got " .. #model:allSources())
+
+  -- A second client, with a peripheral of the SAME name as the first. Roles
+  -- are keyed by the computer that reported it, so they do not collide.
+  assert(model:applyClient(9, clientPayload("Furnaces", {
+    { n = "energyDetector_0", m = 1, r = 2500 },
+  }), 102), "a second client was accepted")
+  cfg.power.roles["9:energyDetector_0"] = "out"
+  model:poll(cfg, 102)
+
+  assert(model.input == 5000, "the first client is still supply, got " .. model.input)
+  assert(model.output == 2500, "and the second is demand, got " .. model.output)
+  assert(model.net == 2500, "so the net is the difference")
+  assert(#model:clientList() == 2, "both clients reporting")
+  assert(model:clientList()[1].name == "Furnaces", "listed by name")
+end)
+
+check("a client that goes quiet stops being counted", function()
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {} }, cfg)
+
+  model:applyClient(7, clientPayload("Reactor", {
+    { n = "meter", m = 1, r = 8000 },
+  }, 2), 100)
+  cfg.power.roles = { ["7:meter"] = "in" }
+
+  model:poll(cfg, 100)
+  assert(model.input == 8000, "counted while it is talking")
+  assert(model.available, "and the page has something to draw")
+
+  -- One missed broadcast is not a lost client.
+  model:poll(cfg, 104)
+  assert(model.input == 8000, "a late client is tolerated, got " .. model.input)
+
+  -- A reactor whose chunk has unloaded must stop counting as supply, or the
+  -- page reports power that is not being generated.
+  model:poll(cfg, 130)
+  assert(model.input == 0, "a silent client drops out, got " .. model.input)
+  assert(#model:clientList() == 0, "and off the list")
+  assert(model.error and model.error:find("client", 1, true),
+    "the page says why it is empty, got " .. tostring(model.error))
+
+  -- It comes straight back when it starts talking again.
+  model:applyClient(7, clientPayload("Reactor", {
+    { n = "meter", m = 1, r = 8000 },
+  }, 2), 131)
+  model:poll(cfg, 131)
+  assert(model.input == 8000, "and returns when it does")
+end)
+
+check("a malformed client payload cannot poison the totals", function()
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {} }, cfg)
+
+  assert(model:applyClient(7, "not a table") == false, "junk is refused")
+  assert(model:applyClient(7, { t = "pw" }) == false, "so is a payload with no sources")
+  assert(model:applyClient(nil, clientPayload("x", {})) == false, "and one with no id")
+
+  -- Entries that are not readings are dropped rather than summed.
+  assert(model:applyClient(7, clientPayload("Mixed", {
+    { n = "good", m = 1, r = 500 },
+    { n = "bad", m = 1, r = "lots" },
+    { nonsense = true },
+    "not a table",
+    { n = "halfBattery", s = 5 },              -- stored with no capacity
+  }), 100), "the payload as a whole is still accepted")
+
+  cfg.power.roles = { ["7:good"] = "in", ["7:bad"] = "in" }
+  model:poll(cfg, 100)
+  assert(model.input == 500, "only the readable one counts, got " .. model.input)
+  assert(model.percent == nil, "and a half a battery is not a buffer")
+
+  local client = model.clients[7]
+  assert(#client.sources == 3, "three named entries survived, got " .. #client.sources)
+end)
+
+check("a client with no name is still identifiable", function()
+  local model = powerLib.new()
+  model:attach({ energy = {} }, config.sanitise({}))
+  model:applyClient(42, { t = "pw", s = { { n = "meter", m = 1, r = 1 } } }, 1)
+  assert(model:clientList()[1].name == "Computer 42",
+    "falls back to the computer id, got " .. model:clientList()[1].name)
+
+  -- And a name long enough to be a nuisance is cut down.
+  model:applyClient(43, clientPayload(("x"):rep(90), {}), 1)
+  assert(#model.clients[43].name <= 24, "long names are capped")
+end)
+
+check("the main base relays the merged total to a mobile", function()
+  local cfg = config.sanitise({})
+  local base = powerLib.new()
+  base:attach({ energy = {
+    powerLib.describe("meter", fakeMeter(1200), "energy_detector"),
+    powerLib.describe("matrix", fakeBattery(4e9, 1e10), "inductionMatrix"),
+  } }, cfg)
+  base:applyClient(7, clientPayload("Reactor", {
+    { n = "meter", m = 1, r = 800 },
+  }), 100)
+  cfg.power.roles = { meter = "in", ["7:meter"] = "in" }
+  base:poll(cfg, 100)
+
+  local payload = base:relayPayload()
+  payload.n = 1
+  -- Only totals travel: a mobile has no use for forty peripheral names, and
+  -- the base has already done the work of adding them up.
+  assert(payload.i == base.input and payload.o == base.output, "the rates travel")
+  assert(payload.s == base.stored and payload.c == base.capacity, "and the buffer")
+  assert(payload.d == 3, "with a device count, got " .. tostring(payload.d))
+  assert(payload.s ~= nil, "there is a buffer to send")
+
+  local mobile = powerLib.new()
+  mobile:attach({ energy = {} }, cfg)
+  assert(mobile:applyRelay(payload, 200), "the mobile accepted it")
+
+  assert(mobile.input == base.input, "same supply")
+  assert(mobile.output == base.output, "same demand")
+  assert(mobile.net == base.net, "same net")
+  assert(math.abs(mobile.percent - base.percent) < 0.001, "same buffer")
+  assert(mobile.relayed, "and it says the figures were relayed")
+  assert(mobile.deviceCount == 3, "including how many devices are behind them")
+  assert(mobile.available, "so the page draws")
+  assert(#mobile.history:series() > 0, "and the graph is fed")
+
+  -- Freshness works the same way the weather relay's does.
+  assert(mobile:relayFresh(200), "fresh when it has just arrived")
+  assert(mobile:relayFresh(205), "and a moment later")
+  assert(not mobile:relayFresh(400), "but not for ever")
+
+  assert(mobile:applyRelay({ o = 1 }) == false, "a payload with no rates is refused")
+  assert(mobile:applyRelay("nonsense") == false, "and so is junk")
+end)
+
+check("a mobile draws relayed power without polling its own hardware", function()
+  local savedRole = app.cfg.role
+  app.cfg.role = "mobile"
+  app.cfg.power.roles = { energyDetector_0 = "in", energyDetector_1 = "out" }
+  GRID.supply, GRID.demand = 4800, 3100
+
+  -- Relayed figures nothing attached to this computer could produce, so
+  -- "did it poll?" is answerable from the totals alone.
+  app.power:applyRelay({ i = 9000, o = 4000, s = 5e9, c = 1e10, r = 1, d = 6, n = 1 }, CLOCK)
+
+  assert(powerModule.tick(app, CLOCK) == false, "the mobile sat on the relay")
+  assert(app.power.input == 9000, "drawing the figures it was sent, got "
+    .. app.power.input)
+  assert(app.power.relayed, "and saying so")
+  assert(app.power.deviceCount == 6, "including how many devices are behind them")
+
+  -- When the relay goes stale it falls back to whatever is actually attached,
+  -- exactly as the weather page does.
+  assert(powerModule.tick(app, CLOCK + 100), "a stale relay polls locally again")
+  assert(not app.power.relayed, "and stops claiming the figures were relayed")
+  assert(app.power.input == 4800, "reading its own hardware, got " .. app.power.input)
+
+  app.cfg.role = savedRole
+  app.power:poll(app.cfg, CLOCK)
+end)
+
+check("client traffic rides the same modem as the sweep", function()
+  local saved = app.cfg.role
+  app:setRole("main")
+  assert(app.link.open, "the main base has its modem open")
+
+  -- What the link pump would hand over, arriving on the client protocol.
+  local before = #app.power:clientList()
+  local accepted = app.link:handle(app, 77,
+    clientPayload("Reactor room", { { n = "meter", m = 1, r = 6000 } }),
+    powerModule.PROTOCOL)
+  assert(accepted, "the power protocol was routed to the power module")
+  assert(#app.power:clientList() == before + 1, "and the client was filed")
+
+  -- The pairing rule that guards the sweep does not apply: a client
+  -- broadcasts to whoever is listening.
+  assert(app.cfg.pairedBaseId ~= 77, "that computer is not the paired base")
+
+  -- Turning the setting off refuses it.
+  app.cfg.power.clients = false
+  assert(app.link:handle(app, 78,
+    clientPayload("Another", { { n = "meter", m = 1, r = 1 } }),
+    powerModule.PROTOCOL) == false, "refused when clients are switched off")
+  app.cfg.power.clients = true
+
+  -- An unknown protocol is still nobody's business.
+  assert(app.link:handle(app, 77, { t = "pw" }, "some_other_mod") == false,
+    "traffic on an unclaimed protocol is ignored")
+
+  app.power.clients = {}
+  app:setRole(saved)
+end)
+
+check("powerclient.lua runs, reads its hardware and broadcasts", function()
+  -- The client is a separate PROGRAM, not a module, so this drives the real
+  -- file the way install-test drives the real installer. It closes the loop
+  -- that matters: what the client puts on the wire is fed straight into the
+  -- main base's handler, so the two cannot drift apart without failing here.
+  local posted = {}
+  local realBroadcast = rednet.broadcast
+  local realSleep = sleep
+  local realParallel = parallel
+  local realOpen, realClose = rednet.open, rednet.close
+
+  rednet.broadcast = function(message, protocol)
+    posted[#posted + 1] = { message = message, protocol = protocol }
+  end
+  rednet.open = function() end
+  rednet.close = function() end
+
+  -- Two passes round the broadcast loop, then out. The client has no exit
+  -- condition of its own beyond a keypress, so the sleep is the seam.
+  local rounds = 0
+  _G.sleep = function()
+    rounds = rounds + 1
+    if rounds >= 2 then error("enough", 0) end
+  end
+  _G.write = function() end
+  parallel = { waitForAny = function(broadcast) pcall(broadcast) end }
+
+  -- The client draws a status readout on its terminal; swallow it so the test
+  -- run stays readable.
+  local realPrint = print
+  _G.print = function() end
+
+  local chunk = assert(loadfile(PROJ .. "/powerclient.lua"))
+  local ranOk, runError = pcall(chunk, "Reactor room")
+
+  _G.print = realPrint
+  rednet.broadcast, rednet.open, rednet.close = realBroadcast, realOpen, realClose
+  _G.sleep = realSleep
+  parallel = realParallel
+
+  assert(ranOk, "the client ran: " .. tostring(runError))
+  assert(#posted >= 1, "and broadcast something, got " .. #posted)
+
+  local entry = posted[1]
+  assert(entry.protocol == powerModule.PROTOCOL,
+    "on the power protocol, got " .. tostring(entry.protocol))
+  assert(entry.message.t == "pw", "with the payload type the base looks for")
+  assert(entry.message.n == "Reactor room", "under the name it was given")
+  assert(type(entry.message.i) == "number", "and its own interval")
+
+  -- It found the same energy hardware the main base finds locally.
+  local names = {}
+  for _, source in ipairs(entry.message.s) do names[source.n] = source end
+  assert(names.energyDetector_0, "it found the meters")
+  assert(names.inductionMatrix_0, "and the battery")
+  assert(names.energyDetector_0.r == GRID.supply,
+    "reading the meter, got " .. tostring(names.energyDetector_0.r))
+  assert(names.inductionMatrix_0.s == GRID.stored, "and the battery's charge")
+  assert(names.inductionMatrix_0.c == GRID.capacity, "and its capacity")
+  assert(names.energyDetector_0.dev == nil, "no peripheral handles on the wire")
+
+  -- And the main base accepts it, through the same handler the link uses.
+  local model = powerLib.new()
+  model:attach({ energy = {} }, config.sanitise({}))
+  assert(model:applyClient(31, entry.message, 1), "the base accepted the payload")
+
+  -- Roles are keyed by the reporting computer, so the base decides which of a
+  -- client's meters is supply and which is demand -- the client itself has no
+  -- opinion, which is why only raw readings travel.
+  local cfg = config.sanitise({})
+  cfg.power.roles = {
+    ["31:energyDetector_0"] = "in",
+    ["31:energyDetector_1"] = "out",
+  }
+  model:poll(cfg, 1)
+  assert(model.input == GRID.supply,
+    "the base totalled its supply meter, got " .. model.input)
+  assert(model.output == GRID.demand,
+    "and its demand meter, got " .. model.output)
+  assert(model.stored == GRID.stored, "and its battery")
+  assert(model:clientList()[1].name == "Reactor room", "under its name")
+
+  -- The payload has to survive being serialised, which is what rednet does
+  -- to it in game.
+  local wire = textutils.unserialize(textutils.serialize(entry.message))
+  assert(model:applyClient(32, wire, 1), "a round-tripped payload still works")
+end)
+
+check("a standalone station still never opens the modem", function()
+  -- Collecting clients means being a MAIN BASE. That keeps the promise that a
+  -- station with no interest in the network never touches it.
+  local cfg = config.sanitise({ role = "standalone" })
+  assert(cfg.power.clients == true, "it would accept clients if it could hear them")
+  assert(config.usesNetwork(cfg) == false, "but it opens no modem")
+
+  assert(config.usesNetwork(config.sanitise({ role = "main" })), "a main base does")
+  assert(config.usesNetwork(config.sanitise({ role = "mobile" })), "and so does a mobile")
 end)
 
 --------------------------------------------------------------------- power --
