@@ -5,11 +5,12 @@
 -- anything else is not working, which makes it a poor candidate for being
 -- turned off by accident.
 
-local config = require("radar.config")
-local sky    = require("radar.sky")
-local theme  = require("radar.theme")
-local ui     = require("radar.ui")
-local util   = require("radar.util")
+local config  = require("radar.config")
+local logbook = require("radar.logbook")
+local sky     = require("radar.sky")
+local theme   = require("radar.theme")
+local ui      = require("radar.ui")
+local util    = require("radar.util")
 
 local view = {
   id = "status",
@@ -51,6 +52,11 @@ local function vitals(app)
 
   local count = #app.contacts
   push("CONTACT", tostring(count), count > 0 and theme.warn or theme.dim)
+
+  -- Only when there is something waiting. A row reading "UNREAD 0" would be
+  -- one of nine spending itself on the absence of news.
+  local unread = app.log:unread()
+  if unread > 0 then push("UNREAD", tostring(unread), theme.accent) end
 
   -- Speed only where the flight page is on. On a fixed base it would report
   -- the operator walking around, which is noise dressed as an instrument.
@@ -253,15 +259,27 @@ function view.build(container, app)
     local logX = leftX
     local logY = twoColumn and (ly + 1) or (ry + 1)
     if logY <= h - 1 then
-      logY = heading(logX, logY, ("RECENT (%d)"):format(app.log:count()))
+      local unread = app.log:unread()
+      logY = heading(logX, logY, unread > 0
+        and ("RECENT (%d)   %d new"):format(app.log:count(), unread)
+        or ("RECENT (%d)"):format(app.log:count()))
       if app.log:count() == 0 then
         buf:blit(logX, logY, "(empty)", theme.dim, theme.bg)
       else
         for _, entry in ipairs(app.log.entries) do
           if logY > h then break end
-          buf:blit(logX, logY, util.fit(entry.time or "", 10), theme.line, theme.bg)
-          buf:blit(logX + 11, logY, util.shorten(entry.name, 12), theme.dim, theme.bg)
-          buf:blit(logX + 24, logY, (entry.dist or 0) .. "m", theme.line, theme.bg)
+          buf:blit(logX, logY, util.fit(entry.time or "", 10),
+            entry.seen and theme.line or theme.accent, theme.bg)
+          if logbook.isContact(entry) then
+            buf:blit(logX + 11, logY, util.shorten(entry.name or "?", 12),
+              theme.dim, theme.bg)
+            buf:blit(logX + 24, logY, (entry.dist or 0) .. "m", theme.line, theme.bg)
+          else
+            -- An alarm -- the power buffer running low -- has no distance and
+            -- no bearing, so it takes the rest of the line.
+            buf:blit(logX + 11, logY, util.shorten(entry.text or "alarm",
+              max(1, colW - 12)), theme.alarm, theme.bg)
+          end
           logY = logY + 1
         end
       end

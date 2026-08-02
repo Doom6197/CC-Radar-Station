@@ -30,9 +30,9 @@ radar/sky.lua
 radar/theme.lua
 radar/ui.lua
 radar/util.lua
+radar/modules/alerts.lua
 radar/modules/contacts.lua
 radar/modules/flight.lua
-radar/modules/log.lua
 radar/modules/power.lua
 radar/modules/radar.lua
 radar/modules/settings.lua

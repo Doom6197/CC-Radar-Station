@@ -3,9 +3,10 @@
 -- Columns are added as the display gets wider rather than truncated, so the
 -- same page is readable on a 15-cell pocket screen and on a 5x5 monitor.
 
-local theme = require("radar.theme")
-local ui    = require("radar.ui")
-local util  = require("radar.util")
+local modules = require("radar.modules")
+local theme   = require("radar.theme")
+local ui      = require("radar.ui")
+local util    = require("radar.util")
 
 local view = {
   id = "contacts",
@@ -40,7 +41,13 @@ local function healthBar(buf, x, y, health, maxHealth)
   if filled < 5 then buf:fill(x + filled, y, 5 - filled, 1, " ", theme.bg, theme.line) end
 end
 
-function view.build(container, app)
+function view.build(container, app, root)
+  -- Which screen row is which contact, rebuilt on every draw. The list scrolls
+  -- nothing and sorts by distance, so the row a name is on changes constantly
+  -- -- recording it as it is drawn is the only way a tap can name the right
+  -- player rather than the one who was there a sweep ago.
+  local hits = {}
+
   local canvas = container:addCanvas({
     x = 1, y = 1,
     width = function(s) return s.parent.width end,
@@ -51,6 +58,7 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+    hits = {}
 
     -- A 1x1 monitor gets names and distances and nothing else. The column
     -- headers alone came to "CONTACTDIST" at this width, and the empty-state
@@ -88,6 +96,7 @@ function view.build(container, app)
         buf:blit(1, index, util.shorten(contact.name, max(1, w - #distance - 1)),
           theme.text, theme.bg)
         buf:blit(max(1, w - #distance), index, distance, contact.zoneColor, theme.bg)
+        hits[index] = contact.name
       end
       return
     end
@@ -168,6 +177,7 @@ function view.build(container, app)
         healthBar(buf, x.health, row, contact.health, contact.maxHealth)
       end
 
+      hits[row] = contact.name
       row = row + 1
     end
 
@@ -183,7 +193,29 @@ function view.build(container, app)
     end
   end
 
-  return { refresh = function() canvas:markRenderDirty() end }
+  return {
+    refresh = function() canvas:markRenderDirty() end,
+
+    --- Pressing a name aims the flight panel at that player, and keeps aiming
+    --- at them as they move -- picking a chase target off a list you are
+    --- already reading beats typing their name into a picker.
+    ---
+    --- With no flight page installed there is nothing a tap could mean, so it
+    --- is left alone and the screen moves on to the next page as usual.
+    touch = function(_, y)
+      local name = hits[y]
+      if not name then return false end
+      if not app.setFlightTarget or not modules.isEnabled(app.cfg, "flight") then
+        return false
+      end
+      if app.setFlightTarget("contact:" .. name) then
+        if root then root:toast("Following " .. util.shorten(name, 14), "success") end
+      elseif root then
+        root:toast("Already following " .. util.shorten(name, 14), "info")
+      end
+      return true
+    end,
+  }
 end
 
 return view

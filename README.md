@@ -30,6 +30,7 @@ over rednet — along with energy readings collected from any number of
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
 - [The network: main base, mobiles and power clients](#the-network-main-base-mobiles-and-power-clients)
+- [Alerts and the alert log](#alerts-and-the-alert-log) — and the unread marker
 - [Keyboard and monitors](#keyboard-and-monitors)
 - [Project layout](#project-layout)
 - [Development](#development)
@@ -170,13 +171,13 @@ that is hard to read.
 
 | Key | Page | What it shows |
 |---|---|---|
-| `1` | **Status** | Everything at a glance: profile, base, your position, ranges, alerts, sound, redstone, power, hardware, environment, contacts, recent log |
+| `1` | **Status** | Everything at a glance: profile, base, your position, ranges, alerts, sound, redstone, power, hardware, environment, contacts, recent alerts |
 | `2` | **Radar** | Polar scope with range rings, a rotating sweep, and colour-coded blips |
 | `3` | **Flight** | Speed, climb rate, heading, course, altitude and the way home |
 | `4` | **Contacts** | Table of every contact — distance, bearing, altitude, band, position, health |
 | `5` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
 | `6` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
-| `7` | **Log** | Detection history, plus a visitor tally on wide screens |
+| `7` | **Alerts** | Arrivals and alarms, newest first, plus a visitor tally on wide screens |
 | `8` | **Settings** | Everything configurable, on one scrolling page — starting with the version and the profile |
 
 The number keys follow the tab strip rather than a fixed table, so switching a
@@ -197,21 +198,24 @@ a glance.
 | **Status** | link, contacts, speed, altitude, power, time, alerts — the things that change on their own. The range, tracking mode and bearing-up are settings, and settings do not surprise you |
 | **Flight** | all eight instruments; it is designed for this size first |
 | **Contacts** | names and distances, hard against both edges |
-| **Weather** | six rows of sky, then clock, conditions and biome |
+| **Weather** | six rows of sky, then clock, conditions, biome — and the buffer percentage hard right, when there is a power reading to have |
 | **Power** | percentage, gauge, net rate, and the rest given to the graph |
-| **Log** | clock and name, nine arrivals deep |
+| **Alerts** | clock and what happened, nine entries deep |
 
 ```
-      SYS          2        FLT          2
-      LINK    Hangar        SPD       15.2
-      CONTACT      2        VS        +3.0
-      SPD       15.2        HDG        210
-      ALT       3204        CRS        067
-      PWR        30%        ALT       3204
-      TIME     11:12        HOME      142m
-      ALERTS      on        BRG         SW
-                            ETA         9s
+      SYS        ! 2        FLT          2        WX      11:12  *
+      LINK    Hangar        SPD       15.2        Clear
+      CONTACT      2        VS        +3.0        Snowy Taiga 30%
+      UNREAD       1        HDG     210 SW
+      SPD       15.2        CRS     067 NE
+      ALT       3204        ALT       3204
+      PWR        30%        HOME      142m
+      TIME     11:12        BRG         SW
+      ALERTS      on        ETA         9s
 ```
+
+The `!` in the header is the unread-alert marker, and it is on **every** screen
+until the alerts are dismissed — see [Alerts](#alerts-and-the-alert-log).
 
 ---
 
@@ -356,6 +360,21 @@ relabelled to match:
 On a MOBILE the base coordinates **come from the main base itself** — see
 below — so `HOME` points at somewhere real without anything being kept in step
 by hand.
+
+There are two ways in that need no keyboard at all, which is what a monitor on
+an airship has:
+
+- **Press a name on the CONTACTS page** and they become the destination. It is
+  a list you are already reading, so choosing a chase target is a matter of
+  recognising the name rather than typing it into a picker.
+- **Press the destination on the FLIGHT page** and it goes back to `HOME`. On a
+  screen with room for it the button is drawn on the bottom row as `[ HOME ]`;
+  on a 1×1 the destination row itself is the button, because fifteen cells has
+  no room for both.
+
+A press that does either of those does **not** also move a monitor to the next
+page: the page gets first refusal on a tap, and only what it does not claim
+falls through to *Tap to change*.
 
 ### What it cannot know
 
@@ -705,11 +724,58 @@ drawn as though it were live is worse than an empty one.
   in the network never touches it. That is also why collecting power clients
   means being a MAIN BASE rather than a standalone with a flag set.
 - A **MAIN BASE is a fully working radar in its own right** — its own screens,
-  alerts, log and redstone, whether or not anything is ever paired to it.
+  alerts, alert log and redstone, whether or not anything is ever paired to it.
 - **A mobile carries no position source.** Everything it draws is *your*
   position as read by the main base. Leave a ship on autopilot and walk away and
   the status page follows **you**, not the ship. There is deliberately no GPS
   fallback.
+
+---
+
+## Alerts and the alert log
+
+The **ALERTS** page is the record of everything the station has had to tell
+you, newest first. Two kinds of entry go in it:
+
+| Kind | Written when |
+|---|---|
+| **arrival** | a contact appears that was not on the previous sweep |
+| **alarm** | a module raises one — at present, the power buffer crossing the low threshold |
+
+Both also appear in **RECENT** on the status page, which is the other place
+anyone looks to find out what happened while they were away. Before v8.4 the
+page was called LOG and took arrivals only, so a buffer that emptied overnight
+left no trace anywhere.
+
+### The unread marker
+
+Every entry is **unread** until it has been looked at, and while anything is
+unread every screen carries a `!` in its header — the radar, the weather, a
+monitor on the far wall, all of them. That is the whole point of it: the marker
+has to be visible from whatever you happened to be looking at.
+
+It goes **first** in the header, so truncating a narrow header can never be
+what takes it off.
+
+**Opening the ALERTS page on the terminal dismisses them.** A monitor showing
+the page does not — a monitor walking its rotation would otherwise clear the
+marker with nobody in the room. *Settings → Alert log → Dismiss unread alerts*
+does it explicitly, and `C` clears the whole log.
+
+Unread state is stored on the entry rather than as a running total, so a
+restart cannot lose track of which ones had been seen.
+
+### The chime
+
+An arrival **outside the alert range** is logged but does not set the alarm
+off, and without a sound the first anyone knows of it is the next time they
+happen to look at a screen. So anything that goes unread **without** ringing
+the alarm gets one note, once, at half volume — *Settings → Alerts → Unread
+chime*.
+
+It never doubles up: if the alarm fired for that same event, the chime does
+not. A muted station is silent either way — muting silences the alarm, it does
+not mean the entry is not written down.
 
 ---
 
@@ -726,7 +792,7 @@ A          mute or unmute alerts
 P          test the alert sound
 N          ignore the nearest contact
 B          set the base to your current position
-C          clear the log
+C          clear the alert log
 Q          quit
 ```
 
@@ -735,6 +801,10 @@ Monitors have no keyboard, so the screen is the control:
 - **Right-click a monitor** (a *use*, which arrives as a `monitor_touch`) to
   move it to the next page. Turn this off under
   **Settings → Displays → Tap to change**.
+- **A page gets first refusal on a tap.** Pressing a name on CONTACTS makes
+  them the flight destination; pressing the destination on FLIGHT puts it back
+  to `HOME`. Neither also moves the monitor along. Everything else falls
+  through to the page change above.
 - Monitors big enough for a tab strip can be pressed on a tab to jump straight
   to that page.
 - **Auto-cycle** walks a monitor through its pages on a timer — per monitor,
@@ -758,7 +828,7 @@ radar/
     contacts.lua       the contact table
     weather.lua        live sky, scenery, and the backdrop cycle
     power.lua          rates, buffer and the rolling graph
-    log.lua            detection history
+    alerts.lua         arrivals and alarms, and the unread marker
     settings.lua       the settings page, and the module switchboard  (core)
 
   app.lua              shared state, background loops, actions
@@ -859,6 +929,14 @@ everything still renders, just flatter.
 
 ## Version history
 
+**v8.4.** LOG became **ALERTS** and now takes alarms as well as arrivals, so a
+power buffer that emptied overnight leaves a trace instead of vanishing. Unread
+entries put a `!` in **every screen's header** until they are dismissed, and
+anything that goes unread without ringing the alarm gets **one chime**. Pages
+take presses: a name on CONTACTS becomes the flight destination, and the
+destination on FLIGHT goes back to `HOME`. The weather page carries the base's
+**buffer percentage**.
+
 **v8.3.** A mobile now takes its **base coordinates from the main base** it is
 paired with, instead of being left pointing *home* at `0, 64, 0`. The flight
 page can be aimed at **home, any contact, or a typed-in waypoint** — a contact
@@ -906,5 +984,5 @@ settings, 2×3 sub-pixel drawing for round range rings and a real sweep, the liv
 procedural weather page, biome scenery, unlockable orientation, and per-monitor
 pages with a timed rotation.
 
-Scanning, alerts, ranges, rotation, the ignore list, the log and the redstone
+Scanning, alerts, ranges, rotation, the ignore list, the alert log and the redstone
 modes have behaved the same way throughout.

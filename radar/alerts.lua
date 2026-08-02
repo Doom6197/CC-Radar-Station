@@ -50,6 +50,26 @@ function alerts:queue()
   self.sound.nextAt = 0            -- fire on the next tick
 end
 
+--- One note, once, at half volume: "there is something unread", as opposed to
+--- the alarm's repeated burst of "something is happening now".
+---
+--- This is what an arrival OUTSIDE the alert range gets. It goes in the log
+--- and puts the marker in every header, and without a chime the first anyone
+--- would know of it is the next time they happened to look at a screen.
+---@return boolean played
+function alerts:chime()
+  if not self.cfg.alert or not self.cfg.chime then return false end
+  if not self.cfg.sound.enabled or #self.kit.speakers == 0 then return false end
+  local s = config.sound(self.cfg)
+  local played = false
+  for _, speaker in ipairs(self.kit.speakers) do
+    local ok = pcall(speaker.playSound, s.id, self.cfg.sound.volume * 0.5,
+      self.cfg.sound.pitch)
+    played = played or ok
+  end
+  return played
+end
+
 -- --------------------------------------------------------------- redstone ---
 
 function alerts.sides()

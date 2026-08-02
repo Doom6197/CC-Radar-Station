@@ -355,6 +355,17 @@ function view.build(container, app)
       or (sceneData.weather ~= "clear" and theme.warn)
       or theme.accent
 
+    -- What the grid is doing, when the power module is installed and reading
+    -- something. On a mobile that is the base's buffer, relayed -- which is
+    -- the number you want in the air, and the one this page had no reason not
+    -- to carry: it is already the page a monitor is most often left on.
+    local powerText, powerColour = nil, theme.accent
+    if app.power and app.power.available and app.power.percent then
+      powerText = ("%d%%"):format(util.round(app.power.percent))
+      powerColour = app.power.low and theme.alarm
+        or (app.power.net < 0 and theme.warn or theme.good)
+    end
+
     -- A 1x1 monitor gets the clock, the weather and what is underneath, hard
     -- against both edges. The day number and the separator rule are the first
     -- things to go: three rows of readout is all there is.
@@ -366,8 +377,15 @@ function view.build(container, app)
         buf:blit(1, 2, util.shorten(sceneData.title or "-", w), theme.text, theme.bg)
       end
       if h >= 3 then
-        buf:blit(1, 3, util.shorten(snap.biomeName or sceneData.groundLabel or "-", w),
+        -- The buffer shares the biome's row, hard right, with a cell of gap
+        -- kept clear so the two never read as one word: "Snowy Taiga64%" is
+        -- one number too many and no biome anybody recognises.
+        local room = powerText and max(1, w - #powerText - 2) or w
+        buf:blit(1, 3, util.shorten(snap.biomeName or sceneData.groundLabel or "-", room),
           theme.dim, theme.bg)
+        if powerText then
+          buf:blit(max(1, w - #powerText), 3, powerText, powerColour, theme.bg)
+        end
       end
       return
     end
@@ -408,6 +426,12 @@ function view.build(container, app)
     push(right, "SUN ", (snap.dayLight or 0) .. "/15", theme.text)
     push(right, "SLIM", snap.slimeChunk and "slime chunk" or "no",
       snap.slimeChunk and theme.good or theme.dim)
+
+    if powerText then
+      local net = app.power.formatSigned and app.power.formatSigned(app.power.net)
+      push(right, "PWR ", net and ("%s   %s/t"):format(powerText, net) or powerText,
+        powerColour)
+    end
 
     local rows = h - 2
     if twoColumn then

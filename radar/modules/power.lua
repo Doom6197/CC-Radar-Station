@@ -229,9 +229,13 @@ function view.tick(app, now)
 
   model:poll(app.cfg, now)
 
+  -- Raised through the app rather than straight at the alert channels, so it
+  -- lands in the alert log and the status page's RECENT list alongside the
+  -- arrivals. A buffer that emptied while nobody was watching is exactly the
+  -- kind of thing you want to find written down afterwards.
   if model:checkAlarm(app.cfg, now) then
-    app.alerts:fire(("Power low - buffer at %d%%"):format(
-      util.round(model.percent or 0)))
+    app:alarm(("Power low - buffer at %d%%"):format(
+      util.round(model.percent or 0)), "power")
   end
 
   -- The contact sweep already refreshes the line on its own cadence, but a

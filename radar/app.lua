@@ -237,9 +237,44 @@ function app:processDetections(contacts, hadError)
   if #arrivals == 0 then return end
 
   for _, contact in ipairs(arrivals) do self.log:add(contact) end
-  self.alerts:trigger(arrivals)
+  -- An arrival outside the alert range is logged but does not set the alarm
+  -- off. It still went unread, so it still gets the chime -- otherwise the
+  -- first anyone knows of it is the next time they happen to look at a screen.
+  local sounded = self.alerts:trigger(arrivals)
+  if not sounded then self.alerts:chime() end
+  self:emit("log")
   self:emit("contact", arrivals)
 end
+
+--- Raises an alarm about something that is not a contact: a power buffer
+--- running low, and whatever a dropped-in module decides is worth saying.
+---
+--- One call does all of it -- the sound, the flash, the redstone pulse, the
+--- banner, the log entry and the unread marker -- so a module never has to
+--- know which of those the operator has switched on.
+---@param text string One line, as it will appear on the page and the banner
+---@param source? string The module raising it
+---@return boolean fired Whether the alert channels went off (they are muteable)
+function app:alarm(text, source)
+  -- Logged whether or not the station is muted: muting silences the alarm,
+  -- it does not mean the thing did not happen.
+  self.log:alarm(text, source)
+  local fired = self.alerts:fire(text)
+  if not fired then self.alerts:chime() end
+  self:emit("log")
+  return fired
+end
+
+--- Dismisses every unread entry.
+---@return number cleared
+function app:markAlertsRead()
+  local cleared = self.log:markRead()
+  if cleared > 0 then self:emit("log") end
+  return cleared
+end
+
+--- How many entries have not been looked at. Read by every screen's header.
+function app:unreadAlerts() return self.log:unread() end
 
 --- Publishes a finished contact list, wherever it came from. A sweep run here
 --- and a sweep relayed by a base land in exactly the same state, which is why

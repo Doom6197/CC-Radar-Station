@@ -174,6 +174,11 @@ function Root:refreshChrome()
   local width = self.root.width
   local count = #app.contacts
 
+  -- Unread alerts are marked on EVERY screen, not only the one showing the
+  -- alerts page: the whole point of the marker is to be seen from whatever
+  -- you happened to be looking at.
+  local unread = app.log and app.log:unread() or 0
+
   -- On a tiny screen the header carries the PAGE NAME, because the page below
   -- it has given up its own heading to win back a row. "RADAR" plus a
   -- truncated "ALL CLE" told you nothing and cost the same space.
@@ -186,17 +191,24 @@ function Root:refreshChrome()
     elseif count > 0 then state = tostring(count)
     else state = "CLR" end
     if not app.cfg.alert then state = state .. " M" end
+    -- The bang goes first, so truncation can never be what takes it off.
+    if unread > 0 then state = "! " .. state end
 
     self.status.text = state
     self.status.x = math.max(#short + 2, width - #state)
     self.status.foreground = app.scanError and theme.alarm
-      or (count > 0 and theme.warn or theme.dim)
+      or (unread > 0 and theme.accent
+      or (count > 0 and theme.warn or theme.dim))
     return
   end
 
   self.title.text = width >= 24 and "RADAR STATION" or "RADAR"
 
   local parts = {}
+  -- First in the list, because the text is truncated from the right and the
+  -- one thing that must survive a narrow header is the fact that there is
+  -- something waiting to be read.
+  if unread > 0 then parts[#parts + 1] = ("! %d"):format(unread) end
   if app.scanError then
     parts[#parts + 1] = "DETECTOR FAULT"
   elseif count > 0 then
@@ -219,7 +231,8 @@ function Root:refreshChrome()
   self.status.text = text
   self.status.x = math.max(1, width - #text)
   self.status.foreground = app.scanError and theme.alarm
-    or (count > 0 and theme.warn or theme.dim)
+    or (unread > 0 and theme.accent
+    or (count > 0 and theme.warn or theme.dim))
 end
 
 function Root:flash(on)
@@ -379,7 +392,7 @@ function ui.registerKeys(app, roots, terminalRoot)
   end
   KEY_ACTIONS[keys.c]     = function()
     app:clearLog()
-    terminal():toast("Log cleared", "info")
+    terminal():toast("Alerts cleared", "info")
   end
   KEY_ACTIONS[keys.b]     = function()
     local ok, message = app:setBaseFromPosition()
@@ -429,11 +442,29 @@ end
 
 -- ------------------------------------------------------------------ touch ---
 
+--- Offers a tap to the page itself, before it is treated as a page change.
+---
+--- A page that wants taps returns a `touch(x, y)` from its build(), in
+--- CONTENT coordinates -- the header is row 1 of the screen and row 0 of the
+--- page, so the y is shifted here rather than in every page. Returning true
+--- means "that was mine": the screen stays where it is.
+---
+--- This is what lets the contact list pick a flight destination and the flight
+--- panel go back to HOME without either of them needing a button that would
+--- not fit on a fifteen-cell screen.
+---@return boolean claimed
+function ui.pageTouch(root, x, y)
+  local view = root.views[root.page]
+  if not view or type(view.touch) ~= "function" then return false end
+  local ok, claimed = pcall(view.touch, x, y - 1)
+  return ok and claimed == true
+end
+
 --- Turns one monitor touch into a page change.
 ---
 --- Split out from the loop so the whole decision can be driven without a real
 --- monitor: which root the touch belongs to, whether it landed on the tab
---- strip, and whether tap-to-change is even on.
+--- strip, whether the page wanted it, and whether tap-to-change is even on.
 ---@param side string The monitor's peripheral name, as monitor_touch reports it
 ---@return string|nil page The page it moved to, or nil if it did nothing
 function ui.handleTouch(roots, app, side, x, y)
@@ -454,6 +485,14 @@ function ui.handleTouch(roots, app, side, x, y)
         return nil
       end
 
+      -- The page gets first refusal. A tap that picked a contact off the list
+      -- must not also shunt the screen onto the next page.
+      if ui.pageTouch(root, x, y) then
+        root:holdCycle()
+        root:refreshView()
+        return nil
+      end
+
       if not app.cfg.tapCycle then return nil end
       root:cyclePage(1)
       root:holdCycle()
@@ -469,6 +508,24 @@ function ui.registerTouch(app, roots)
     while app.running do
       local _, side, x, y = os.pullEvent("monitor_touch")
       pcall(ui.handleTouch, roots, app, side, x, y)
+    end
+  end)
+end
+
+--- The same, for a mouse click on the terminal.
+---
+--- Read off the event queue rather than hung on the page's canvas, for the
+--- reason the monitor path is: a canvas covers the content frame edge to edge
+--- and does not take clicks. Basalt still sees the click, so the settings
+--- page's buttons keep working -- a page with no touch() simply ignores it.
+function ui.registerClicks(app, terminalRoot)
+  basalt.schedule(function()
+    while app.running do
+      local _, button, x, y = os.pullEvent("mouse_click")
+      if button == 1 then
+        local ok, claimed = pcall(ui.pageTouch, terminalRoot, x, y)
+        if ok and claimed then terminalRoot:refreshView() end
+      end
     end
   end)
 end
@@ -600,6 +657,7 @@ function ui.build(app)
 
   ui.registerKeys(app, roots, terminalRoot)
   ui.registerTouch(app, roots)
+  ui.registerClicks(app, terminalRoot)
   refreshAll()
   return roots, terminalRoot
 end

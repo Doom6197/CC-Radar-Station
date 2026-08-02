@@ -775,6 +775,14 @@ function view.build(container, app, root)
       app:saveConfig()
     end, onOffColor(function() return cfg.toast end))
 
+    row("Unread chime", function() return onOff(cfg.chime) end, function()
+      cfg.chime = not cfg.chime
+      app:saveConfig()
+    end, onOffColor(function() return cfg.chime end))
+
+    note("One note when something goes in the alert log without setting the "
+      .. "alarm off - an arrival outside the alert range, mostly.")
+
     row("Sound", function()
       if #app.kit.speakers == 0 then return "no speaker attached" end
       return onOff(cfg.sound.enabled)
@@ -1142,7 +1150,7 @@ function view.build(container, app, root)
       { "P",       "test the alert sound",          "test the sound" },
       { "N",       "ignore the nearest contact",    "ignore nearest" },
       { "B",       "set the base to your position", "base = your pos" },
-      { "C",       "clear the log",                 "clear the log" },
+      { "C",       "clear the alert log",           "clear the alerts" },
       { "Q",       "quit",                          "quit" },
     }
     for _, entry in ipairs(shortcuts) do

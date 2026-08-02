@@ -94,6 +94,19 @@ function view.destination(app)
   return { label = util.shorten(name, 7), lost = true }
 end
 
+--- Points the panel at something. The one way in, so the settings picker, the
+--- contact list and the tap-for-home button all take the same route and all
+--- persist.
+---@param target string "home", "custom", or "contact:<name>"
+---@return boolean changed
+function view.setTarget(app, target)
+  if type(target) ~= "string" or app.cfg.flightTarget == target then return false end
+  app.cfg.flightTarget = target
+  view.sanitise(app.cfg)
+  app:saveConfig()
+  return true
+end
+
 --- A label for the destination row, for the settings page.
 function view.destinationLabel(app)
   local target = app.cfg.flightTarget or "home"
@@ -110,6 +123,11 @@ end
 
 function view.attach(app)
   app.flight = app.flight or flightLib.new()
+
+  -- Hung off the app so another page can aim the panel without requiring this
+  -- module: the contact list checks for it and leaves its taps alone when the
+  -- flight page is not installed at all.
+  app.setFlightTarget = function(target) return view.setTarget(app, target) end
 
   -- attach() runs again on a rescan, and a second listener would sample every
   -- fix twice.
@@ -139,8 +157,11 @@ local function readings(app, wide)
   local cfg = app.cfg
   local out = {}
 
-  local function push(label, value, colour)
-    out[#out + 1] = { label = label, value = value, colour = colour or theme.text }
+  --- `key` names a row the operator can press. Only the destination row has
+  --- one: pressing it aims the panel back at HOME.
+  local function push(label, value, colour, key)
+    out[#out + 1] = { label = label, value = value,
+                      colour = colour or theme.text, key = key }
   end
 
   local speed = model.speed
@@ -175,21 +196,21 @@ local function readings(app, wide)
   if cfg.flightHome then
     local destination = view.destination(app)
     if not destination then
-      push("DEST", "not set", theme.dim)
+      push("DEST", "not set", theme.dim, "home")
     elseif destination.lost then
       -- A contact that has gone off the sweep. Its name stays on the panel so
       -- it is obvious what is being waited for.
-      push(destination.label, "lost", theme.warn)
+      push(destination.label, "lost", theme.warn, "home")
     else
       local distance, _, compass = model:vectorTo(destination.x, destination.z)
       if distance then
         push(destination.label, util.distanceLabel(distance),
-          destination.moving and theme.warn or theme.text)
+          destination.moving and theme.warn or theme.text, "home")
         push("BRG", compass or "--", theme.accent)
         local eta = model:eta(distance)
         push("ETA", flightLib.formatEta(eta), eta and theme.text or theme.dim)
       else
-        push(destination.label, "--", theme.dim)
+        push(destination.label, "--", theme.dim, "home")
       end
     end
   end
@@ -197,7 +218,13 @@ local function readings(app, wide)
   return out
 end
 
-function view.build(container, app)
+function view.build(container, app, root)
+  -- Where the pressable rows ended up, rebuilt on every draw. Recording them
+  -- as the page is laid out is the only honest way to know what a tap at a
+  -- given cell is pointing at: the rows move with the screen size, whether
+  -- there is a destination at all, and which column the layout put it in.
+  local hits = {}
+
   local canvas = container:addCanvas({
     x = 1, y = 1,
     width = function(s) return s.parent.width end,
@@ -208,6 +235,7 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+    hits = {}
 
     local tiny = ui.isTiny(w)
     local model = app.flight
@@ -254,6 +282,7 @@ function view.build(container, app)
         buf:blit(1, y, row.label, theme.dim, theme.bg)
         local value = util.shorten(row.value, max(1, w - 5))
         buf:blit(max(1, w - #value), y, value, row.colour, theme.bg)
+        if row.key then hits[#hits + 1] = { x1 = 1, x2 = w, y = y, key = row.key } end
         y = y + 1
       end
       return
@@ -271,6 +300,9 @@ function view.build(container, app)
         local x = 2 + column * (colW + 1)
         buf:blit(x, line, util.fit(row.label, 5), theme.dim, theme.bg)
         buf:blit(x + 5, line, util.shorten(row.value, colW - 6), row.colour, theme.bg)
+        if row.key then
+          hits[#hits + 1] = { x1 = x, x2 = x + colW - 1, y = line, key = row.key }
+        end
       end
     end
 
@@ -287,11 +319,42 @@ function view.build(container, app)
     if y <= h and h >= 6 then
       local note = model.moving and "under way" or "stopped"
       if config.isMobile(app.cfg) then note = note .. "   relayed" end
+
+      -- The way back. A screen with room for it gets the button said out loud
+      -- rather than left to be discovered; a fifteen-cell one has the
+      -- destination row itself, which is pressable either way.
+      local homeButton = (app.cfg.flightTarget or "home") ~= "home"
+      if homeButton and w >= 30 then
+        local label = "[ HOME ]"
+        buf:blit(max(1, w - #label), h, label, theme.accent, theme.bg)
+        hits[#hits + 1] = { x1 = w - #label, x2 = w, y = h, key = "home" }
+        note = util.shorten(note, max(1, w - #label - 3))
+      end
       buf:blit(2, h, util.shorten(note, w - 2), theme.line, theme.bg)
     end
   end
 
-  return { refresh = function() canvas:markRenderDirty() end }
+  return {
+    refresh = function() canvas:markRenderDirty() end,
+    --- Pressing the destination -- the row, or the button beside the footer --
+    --- puts the panel back on HOME. It is the one destination that is always
+    --- somewhere, so it is the one worth a single press.
+    touch = function(x, y)
+      for _, hit in ipairs(hits) do
+        if y == hit.y and x >= hit.x1 and x <= hit.x2 and hit.key == "home" then
+          if (app.cfg.flightTarget or "home") == "home" then
+            if root then root:toast("Already flying HOME", "info") end
+            return true
+          end
+          view.setTarget(app, "home")
+          if root then root:toast("Destination: HOME", "success") end
+          canvas:markRenderDirty()
+          return true
+        end
+      end
+      return false
+    end,
+  }
 end
 
 -- ---------------------------------------------------------------- settings ---

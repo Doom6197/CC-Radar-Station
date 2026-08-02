@@ -164,7 +164,7 @@ check("every project lua file is in the manifest", function()
     "radar/setup.lua",
     "radar/modules/status.lua", "radar/modules/radar.lua",
     "radar/modules/contacts.lua", "radar/modules/weather.lua",
-    "radar/modules/log.lua", "radar/modules/settings.lua",
+    "radar/modules/alerts.lua", "radar/modules/settings.lua",
     "radar/modules/power.lua",
   }
   for _, path in ipairs(expected) do
@@ -202,7 +202,8 @@ check("every module file on disk is in the manifest", function()
 
   -- No directory listing in plain Lua, so the shipped set is walked by name:
   -- anything present on disk but unlisted would never reach the computer.
-  local names = { "status", "radar", "contacts", "weather", "power", "log", "settings" }
+  local names = { "status", "radar", "contacts", "weather", "power", "alerts",
+                  "flight", "settings" }
   for _, name in ipairs(names) do
     local path = "radar/modules/" .. name .. ".lua"
     local file = io.open(PROJ .. "/" .. path, "r")

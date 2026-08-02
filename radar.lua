@@ -74,12 +74,14 @@
     P          test the alert sound
     N          ignore the nearest contact
     B          set the base to your current position
-    C          clear the log
+    C          clear the alert log
     Q          quit
 
-    Mouse and monitor taps work everywhere. Right-clicking a monitor moves it
-    to the next page, and a monitor can cycle its pages on a timer -- both are
-    set up under Settings / Displays.
+    Mouse and monitor taps work everywhere. Pressing a name on the CONTACTS
+    page makes them the flight destination, and pressing the destination on
+    the FLIGHT page puts it back to HOME. Anywhere else, a monitor tap moves
+    it to the next page, and a monitor can cycle its pages on a timer -- both
+    are set up under Settings / Displays.
 
   ---------------------------------------------------------------------------
   NOTES

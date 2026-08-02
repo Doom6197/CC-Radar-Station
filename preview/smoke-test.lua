@@ -477,7 +477,7 @@ check("config migrates a v3 file", function()
   })
   local cfg, _, _, imported = config.load()
   assert(cfg.terminalPage == "contacts", "v3 style 3 becomes contacts, got " .. tostring(cfg.terminalPage))
-  assert(cfg.displays.monitor_0.page == "log", "v3 monitor style 4 becomes log")
+  assert(cfg.displays.monitor_0.page == "alerts", "v3 monitor style 4 becomes alerts")
   assert(imported, "flagged as an upgrade")
   FILES["radar.cfg"] = nil
 end)
@@ -734,7 +734,7 @@ check("every built-in module registers a complete descriptor", function()
   end
 
   for _, id in ipairs({ "status", "radar", "contacts", "weather", "power",
-                        "log", "settings" }) do
+                        "alerts", "settings" }) do
     assert(modules.byId(id), "built-in module present: " .. id)
   end
   assert(modules.byId("no-such-module") == nil, "an unknown id is nil")
@@ -1766,8 +1766,8 @@ check("a dropped-in module registers in order", function()
   for _, entry in ipairs(modules.all()) do ids[#ids + 1] = entry.id end
   local text = table.concat(ids, " ")
   assert(text:find("addon", 1, true), "it is in the registry: " .. text)
-  assert(text:find("log addon settings", 1, true),
-    "and sorted by its order, between log and settings: " .. text)
+  assert(text:find("alerts addon settings", 1, true),
+    "and sorted by its order, between alerts and settings: " .. text)
   assert(modules.byId("addon").page, "it counts as a page, because it builds one")
 end)
 
@@ -1956,11 +1956,11 @@ check("display defaults and the page rotation", function()
   assert(entry.cycleSeconds == 15, "with a sane default interval")
   assert(#config.cyclePages(app.cfg, entry) == #all, "and every page in it")
 
-  entry.cycleSkip = { log = true, status = true }
+  entry.cycleSkip = { alerts = true, status = true }
   local pages = config.cyclePages(app.cfg, entry)
   assert(#pages == #all - 2, "skipped pages drop out, got " .. #pages)
   for _, page in ipairs(pages) do
-    assert(page ~= "log" and page ~= "status", "and stay out")
+    assert(page ~= "alerts" and page ~= "status", "and stay out")
   end
   entry.cycleSkip = {}
 
@@ -1978,9 +1978,9 @@ check("display defaults and the page rotation", function()
     .. cfg.displays.m.cycleSeconds)
 
   local partial = config.sanitise({
-    displays = { m = { page = "weather", cycleSkip = { log = true, bogus = true } } },
+    displays = { m = { page = "weather", cycleSkip = { alerts = true, bogus = true } } },
   })
-  assert(partial.displays.m.cycleSkip.log == true, "a real page stays skipped")
+  assert(partial.displays.m.cycleSkip.alerts == true, "a real page stays skipped")
   assert(partial.displays.m.cycleSkip.bogus == nil, "a made-up one does not")
   assert(partial.displays.m.cycle == false, "missing keys are filled in")
 end)
@@ -3658,6 +3658,347 @@ check("the tiny pages say something worth reading", function()
   assert(not power.text:find("FE/", 1, true),
     "without a unit clipped mid-word:\n" .. power.text)
 end)
+
+--------------------------------------------------- pressing what is drawn --
+-- A page can claim a tap before it becomes a page change. Both the pages that
+-- do are about the same thing: choosing where the flight panel points, without
+-- a keyboard and without a button that would not fit on fifteen cells.
+
+--- Draws one page into a throwaway buffer at a given size, so whatever the
+--- draw callback recorded about where things landed is up to date.
+local function drawPage(root, page, w, h)
+  rawget(root.root, "_p").width = w
+  rawget(root.root, "_p").height = h
+  root:setPage(page, false)
+  root:refreshChrome()
+  local buffer = newBuffer(w, h, "touch " .. page .. " " .. w .. "x" .. h)
+  drawTree(root.root, buffer)
+  return buffer
+end
+
+check("pressing a contact makes them the flight destination", function()
+  app.cfg.modulesOff.flight = nil
+  app:setRole("standalone")
+  app.ignore = {}
+  app.cfg.myName = "Steve"
+  app:sweep()
+  assert(#app.contacts >= 2, "there is a list to press, got " .. #app.contacts)
+
+  drawPage(terminalRoot, "contacts", 51, 19)
+  local view = terminalRoot.views.contacts
+  assert(type(view.touch) == "function", "the contact list takes presses")
+
+  -- The wide list starts at row 3 of the page, after the header and the rule.
+  local first = app.contacts[1]
+  assert(view.touch(4, 3), "the first row is somebody")
+  assert(app.cfg.flightTarget == "contact:" .. first.name,
+    "pressing them aimed the panel at them, got " .. tostring(app.cfg.flightTarget))
+
+  local second = app.contacts[2]
+  assert(view.touch(4, 4), "and so is the second")
+  assert(app.cfg.flightTarget == "contact:" .. second.name,
+    "which follows the row pressed, got " .. tostring(app.cfg.flightTarget))
+
+  -- The column headers and the footer are not contacts.
+  assert(not view.touch(4, 1), "the header row is not a contact")
+  assert(not view.touch(4, 19), "and neither is empty space below the list")
+
+  -- With the flight page switched off there is nothing a press could mean, so
+  -- it is left alone and the screen behaves as it always did.
+  app:toggleModule("flight")
+  drawPage(terminalRoot, "contacts", 51, 19)
+  assert(not terminalRoot.views.contacts.touch(4, 3),
+    "with no flight page a press on a name is not claimed")
+  app:toggleModule("flight")
+end)
+
+check("a press that picked a contact does not also flip the page", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local name = monitorRoot.monitor.name
+
+  app.cfg.tapCycle = true
+  app.cfg.flightTarget = "home"
+  drawPage(monitorRoot, "contacts", 15, 10)
+  local page = monitorRoot.page
+
+  -- On a 1x1 monitor the list starts at the first content row, which is the
+  -- second row of the screen: row one is the header.
+  local landed = ui.handleTouch(roots, app, name, 3, 2)
+  assert(landed == nil, "the page did not move, got " .. tostring(landed))
+  assert(monitorRoot.page == page, "and the root agrees")
+  assert(app.cfg.flightTarget == "contact:" .. app.contacts[1].name,
+    "while the press did what it was for, got " .. tostring(app.cfg.flightTarget))
+
+  -- A press on empty space below the list still moves the monitor along,
+  -- because nothing claimed it.
+  local moved = ui.handleTouch(roots, app, name, 3, 10)
+  assert(moved and moved ~= page, "empty space still cycles, got " .. tostring(moved))
+end)
+
+check("pressing the destination on the flight page goes back to HOME", function()
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 300 + i * 8, y = 120, z = -100,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
+  app.cfg.flightTarget = "contact:" .. app.contacts[1].name
+
+  -- Tiny first: fifteen cells has no room for a button, so the destination
+  -- row itself is the one that is pressable.
+  drawPage(terminalRoot, "flight", 15, 10)
+  local view = terminalRoot.views.flight
+  assert(type(view.touch) == "function", "the flight page takes presses")
+
+  local rows = modules.byId("flight").readings(app, false)
+  local destRow
+  for index, row in ipairs(rows) do
+    if row.key == "home" then destRow = index end
+  end
+  assert(destRow, "the panel has a destination row")
+
+  assert(view.touch(3, destRow), "pressing it was claimed")
+  assert(app.cfg.flightTarget == "home",
+    "and put the panel back on HOME, got " .. tostring(app.cfg.flightTarget))
+  assert(view.touch(3, destRow), "pressing it again is still claimed")
+  assert(app.cfg.flightTarget == "home", "and leaves it there")
+
+  -- A row that is not the destination is not a button.
+  assert(not view.touch(3, 1), "the speed row is not pressable")
+
+  -- Wide: the button is said out loud on the bottom row, and only while there
+  -- is somewhere else to come back from.
+  app.cfg.flightTarget = "contact:" .. app.contacts[1].name
+  local wide = drawPage(terminalRoot, "flight", 51, 19)
+  local drawn = table.concat(wide.texts, "|")
+  assert(drawn:find("[ HOME ]", 1, true),
+    "the button is drawn when the panel is pointed elsewhere:\n" .. drawn)
+
+  app.cfg.flightTarget = "home"
+  local homeward = drawPage(terminalRoot, "flight", 51, 19)
+  assert(not table.concat(homeward.texts, "|"):find("[ HOME ]", 1, true),
+    "and not while it is already pointed home")
+end)
+
+------------------------------------------------------------ the alert log --
+
+check("the alert log takes alarms as well as arrivals", function()
+  app:clearLog()
+  app:alarm("Power low - buffer at 12%", "power")
+
+  assert(app.log:count() == 1, "the alarm was written down, got " .. app.log:count())
+  local entry = app.log.entries[1]
+  assert(entry.kind == "alarm", "as an alarm, got " .. tostring(entry.kind))
+  assert(entry.text:find("Power low", 1, true), "carrying what it said")
+  assert(entry.source == "power", "and which module raised it")
+  assert(entry.time and #entry.time > 0, "stamped like any other entry")
+
+  -- An alarm is not a visitor, so it stays out of the tally.
+  for _, row in ipairs(app.log:stats()) do
+    assert(row.name ~= "Power low - buffer at 12%", "alarms are not counted as callers")
+  end
+
+  -- It reaches the ALERTS page ...
+  local page = drawPage(terminalRoot, "alerts", 51, 19)
+  assert(table.concat(page.texts, "|"):find("Power low", 1, true),
+    "the alerts page lists it:\n" .. table.concat(page.texts, "|"))
+
+  -- ... and the status page's RECENT list, which is the other place anyone
+  -- looks to find out what happened while they were away.
+  local status = drawPage(terminalRoot, "status", 82, 30)
+  assert(table.concat(status.texts, "|"):find("Power low", 1, true),
+    "and so does RECENT on the status page")
+
+  -- A muted station still writes it down: muting silences the alarm, it does
+  -- not mean the thing did not happen.
+  local wasAlert = app.cfg.alert
+  app.cfg.alert = false
+  app:alarm("Power low - buffer at 4%", "power")
+  assert(app.log:count() == 2, "logged while muted, got " .. app.log:count())
+  app.cfg.alert = wasAlert
+end)
+
+check("unread alerts are marked on every screen until they are dismissed", function()
+  app:clearLog()
+  assert(app:unreadAlerts() == 0, "nothing unread to begin with")
+
+  app:alarm("Power low - buffer at 12%", "power")
+  assert(app:unreadAlerts() == 1, "the alarm is unread, got " .. app:unreadAlerts())
+
+  -- Every screen, not only the one showing the alerts page: the point of the
+  -- marker is to be seen from whatever you happened to be looking at.
+  for _, root in ipairs(roots) do
+    rawget(root.root, "_p").width = 51
+    rawget(root.root, "_p").height = 19
+    root:setPage("radar", false)
+    root:refreshChrome()
+    assert(root.status.text:find("!", 1, true),
+      (root.monitor and root.monitor.name or "terminal")
+        .. " carries the marker, got " .. root.status.text)
+  end
+
+  -- And on a fifteen-cell one, where it goes first so truncation cannot be
+  -- what takes it off.
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local tiny = tinyScreen(monitorRoot, "radar")
+  assert(tiny.state:sub(1, 1) == "!", "first on a tiny header, got " .. tiny.state)
+  assert(#tiny.header + #tiny.state <= 15, "and still fits: " .. tiny.state)
+
+  -- A monitor showing the page does NOT dismiss: a rotation would otherwise
+  -- clear the marker with nobody in the room.
+  tinyScreen(monitorRoot, "alerts")
+  assert(app:unreadAlerts() == 1, "a monitor does not dismiss what nobody read")
+
+  -- Opening it on the terminal does.
+  terminalRoot:setPage("status", false)
+  drawPage(terminalRoot, "alerts", 51, 19)
+  assert(app:unreadAlerts() == 0, "the terminal dismissed them")
+
+  for _, root in ipairs(roots) do
+    root:refreshChrome()
+    assert(not root.status.text:find("!", 1, true),
+      "and the marker went with them, got " .. root.status.text)
+  end
+
+  -- Clearing the log clears the unread count with it.
+  app:alarm("Power low - buffer at 8%", "power")
+  assert(app:unreadAlerts() == 1, "unread again")
+  app:clearLog()
+  assert(app:unreadAlerts() == 0, "and gone with the entries")
+end)
+
+check("a speaker sounds once for something that went unread", function()
+  local played = 0
+  local previous = PERIPHERALS.speaker_0.playSound
+  PERIPHERALS.speaker_0.playSound = function(...) played = played + 1; return true end
+  app:rescan()
+
+  local saved = { alert = app.cfg.alert, chime = app.cfg.chime,
+                  sound = app.cfg.sound.enabled }
+  app.cfg.alert, app.cfg.chime, app.cfg.sound.enabled = true, true, true
+
+  -- An alarm rings the alarm, which is queued for the tick loop rather than
+  -- played here -- so it must not ALSO chime, or every alert would be two
+  -- sounds at once.
+  app.alerts.sound.left = 0
+  played = 0
+  app:alarm("Power low - buffer at 12%", "power")
+  assert(app.alerts.sound.left > 0, "the alarm was queued")
+  assert(played == 0, "and nothing was chimed over the top of it, got " .. played)
+
+  -- Muted, there is no alarm to double up with, but the entry still went
+  -- unread -- so nothing sounds at all, because muting means muted.
+  app.alerts.sound.left = 0
+  played = 0
+  app.cfg.alert = false
+  app:alarm("Power low - buffer at 4%", "power")
+  assert(played == 0, "a muted station is silent, got " .. played)
+  app.cfg.alert = true
+
+  -- An arrival outside the alert range is logged without setting the alarm
+  -- off, and that is exactly what the chime is for: one note, once.
+  local distant
+  for _, contact in ipairs(app.contacts) do
+    if contact.dist > 100 then distant = contact end
+  end
+  assert(distant, "somebody on the sweep is a long way off")
+
+  local wasRange = app.cfg.alertRangeIndex
+  app.cfg.alertRangeIndex = 1                 -- 25 blocks; they are further
+
+  app.alerts.sound.left = 0
+  played = 0
+  app.previous, app.firstScan = {}, false
+  app:processDetections({ distant }, false)
+  assert(app.alerts.sound.left == 0, "the alarm stayed quiet")
+  assert(played == 1, "one chime, once, got " .. played)
+
+  -- Switched off, it is silent.
+  app.cfg.chime = false
+  played = 0
+  app.previous, app.firstScan = {}, false
+  app:processDetections({ distant }, false)
+  assert(played == 0, "the chime honours its setting, got " .. played)
+
+  app.cfg.alertRangeIndex = wasRange
+  app.cfg.alert, app.cfg.chime = saved.alert, saved.chime
+  app.cfg.sound.enabled = saved.sound
+  PERIPHERALS.speaker_0.playSound = previous
+  app:rescan()
+  app:clearLog()
+  app.previous, app.firstScan = {}, true
+end)
+
+check("a settings file naming the old LOG page keeps its choice", function()
+  -- The page was renamed in v8.4. The sanitiser would repair a file naming
+  -- the old id, but only by throwing the operator's choice away -- so the
+  -- name is carried across instead.
+  FILES["radar.cfg"] = textutils.serialize({
+    version = "8.3", terminalPage = "log",
+    displays = { monitor_0 = { page = "log", scale = 0.5,
+                               cycleSkip = { log = true } } },
+  })
+  local cfg = config.load()
+  assert(cfg.terminalPage == "alerts",
+    "the terminal kept its page, got " .. tostring(cfg.terminalPage))
+
+  local entry = cfg.displays.monitor_0
+  assert(entry.page == "alerts", "the monitor kept its page, got " .. tostring(entry.page))
+  assert(entry.cycleSkip.alerts == true, "and its rotation kept the exclusion")
+  assert(entry.cycleSkip.log == nil, "under the new name only")
+  FILES["radar.cfg"] = nil
+
+  -- A page switched off stays off, rather than reappearing under a name the
+  -- operator never turned off.
+  FILES["radar.cfg"] = textutils.serialize({
+    version = "8.3", modulesOff = { log = true },
+  })
+  local off = config.load()
+  assert(off.modulesOff.alerts == true, "it stayed switched off")
+  assert(off.modulesOff.log == nil, "under the new name only")
+  assert(not modules.isEnabled(off, "alerts"), "and the registry agrees")
+  FILES["radar.cfg"] = nil
+end)
+
+check("the weather page carries the base power", function()
+  app.power:poll(app.cfg, CLOCK)
+  assert(app.power.available and app.power.percent, "there is a buffer to report")
+
+  local wide = drawPage(terminalRoot, "weather", 82, 30)
+  assert(table.concat(wide.texts, "|"):find("PWR", 1, true),
+    "the readout has a power field:\n" .. table.concat(wide.texts, "|"))
+
+  -- On a 1x1 monitor it shares the biome's row, hard right, without running
+  -- into it.
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local tiny = tinyScreen(monitorRoot, "weather")
+  assert(#tiny.overflow == 0, "and does not run off a fifteen-cell screen:\n  "
+    .. table.concat(tiny.overflow, "\n  "))
+  local percent = ("%d%%"):format(util.round(app.power.percent))
+  assert(tiny.text:find(percent, 1, true),
+    "the buffer percentage is on the tiny readout (" .. percent .. "):\n" .. tiny.text)
+
+  -- It shares a row with the biome, so there has to be a cell of gap between
+  -- them or "Snowy Taiga64%" reads as one word.
+  local row = nil
+  for _, line in ipairs(tiny.lines) do
+    if line:find(percent, 1, true) and line:find("%a") then row = line end
+  end
+  assert(row, "the percentage shares the biome row:\n" .. tiny.text)
+  assert(row:find("%s" .. percent:gsub("%%", "%%%%")),
+    "with a gap before it, got " .. ("%q"):format(row))
+end)
+
 
 ---------------------------------------------------------- a small screen --
 -- A pocket computer is 26 cells across. The old fixed two-column layout left

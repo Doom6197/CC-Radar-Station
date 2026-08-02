@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.3"
+config.VERSION = "8.4"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -264,6 +264,7 @@ function config.defaults()
     alert     = true,                    -- master alert switch
     flash     = true,                    -- flash every screen red
     toast     = true,                    -- pop a banner on the terminal
+    chime     = true,                    -- one note when something goes unread
     dimFilter = true,                    -- hide players in other dimensions
 
     env        = true,                   -- poll the environment detector
@@ -421,6 +422,7 @@ function config.sanitise(cfg)
   end
 
   cfg.tapCycle = cfg.tapCycle ~= false
+  cfg.chime    = cfg.chime ~= false
 
   -- A profile that no longer exists -- an install rolled back, or a file
   -- carried over from a fork -- is forgotten rather than obeyed. The station
@@ -481,9 +483,60 @@ end
 -- --------------------------------------------------------------- migration ---
 
 -- v3 stored a display style index into { radar, grid, list, log, status }.
-local V3_STYLE_TO_PAGE = { "radar", "radar", "contacts", "log", "status" }
+local V3_STYLE_TO_PAGE = { "radar", "radar", "contacts", "alerts", "status" }
+
+-- Pages renamed since. The sanitiser would repair a settings file naming an
+-- old one, but only by throwing the operator's choice away and falling back to
+-- the first page there is -- so the name is carried across instead.
+config.RENAMED_PAGES = { log = "alerts" }
+
+--- Follows a chain of renames to whatever a page is called now.
+local function pageNow(id)
+  local seen = {}
+  while config.RENAMED_PAGES[id] and not seen[id] do
+    seen[id] = true
+    id = config.RENAMED_PAGES[id]
+  end
+  return id
+end
+
+--- Rewrites every place a page id can be stored: the terminal's page, each
+--- monitor's page and rotation, and the set of modules switched off.
+local function migratePages(cfg)
+  if type(cfg.terminalPage) == "string" then
+    cfg.terminalPage = pageNow(cfg.terminalPage)
+  end
+
+  if type(cfg.modulesOff) == "table" then
+    for old, new in pairs(config.RENAMED_PAGES) do
+      if cfg.modulesOff[old] then
+        cfg.modulesOff[old] = nil
+        cfg.modulesOff[new] = true
+      end
+    end
+  end
+
+  if type(cfg.displays) == "table" then
+    for _, entry in pairs(cfg.displays) do
+      if type(entry) == "table" then
+        if type(entry.page) == "string" then entry.page = pageNow(entry.page) end
+        if type(entry.cycleSkip) == "table" then
+          for old, new in pairs(config.RENAMED_PAGES) do
+            if entry.cycleSkip[old] then
+              entry.cycleSkip[old] = nil
+              entry.cycleSkip[new] = true
+            end
+          end
+        end
+      end
+    end
+  end
+  return cfg
+end
 
 local function migrate(cfg)
+  migratePages(cfg)
+
   if cfg.termStyleIndex and not config.isPage(cfg, cfg.terminalPage) then
     cfg.terminalPage = V3_STYLE_TO_PAGE[tonumber(cfg.termStyleIndex) or 5] or "status"
   end
