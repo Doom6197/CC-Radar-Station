@@ -1,10 +1,11 @@
-# Radar Station v5 - files the in-game installer downloads.
+# Radar Station v6 - files the in-game installer downloads.
 # One path per line, relative to the repository root.
 # Blank lines and lines starting with # are ignored.
 
 radar.lua
 radar/alerts.lua
 radar/app.lua
+radar/backdrops.lua
 radar/biomes.lua
 radar/config.lua
 radar/environment.lua

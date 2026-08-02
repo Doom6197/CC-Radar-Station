@@ -1,9 +1,23 @@
-# Radar Station v5 — Basalt edition
+# Radar Station v6 — Basalt edition
 
 A player radar for **CC: Tweaked + Advanced Peripherals** on **Minecraft
 1.21.1**, built on the [Basalt 2.5](https://basalt.madefor.cc/2.5/) UI
 framework, with a live weather and sky display driven by an Environment
-Detector — and, in v5, a radar screen that flies with you.
+Detector — plus a radar screen that flies with you, and a gallery of skies to
+put behind it.
+
+---
+
+## What v6 adds
+
+**Backdrops.** Twenty pictures for the weather page that owe nothing to the
+weather, the biome or the hour — floating isles through a whole day, a sea of
+cloud seen from above, airships under way, stone spires in haze. Pick one, or
+have them **cycle on a timer** you choose. They need **no Environment Detector
+at all**, which is what makes the weather page worth having on a ship.
+
+See *[Backdrops](#backdrops--pictures-that-ignore-the-weather)*. The default is
+unchanged: the page draws the real sky until you tell it otherwise.
 
 ---
 
@@ -71,7 +85,7 @@ On the computer in game:
 wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 ```
 
-That pulls down all 22 files and offers to install Basalt 2.5 for you. Then:
+That pulls down all 23 files and offers to install Basalt 2.5 for you. Then:
 
 ```
 radar
@@ -99,7 +113,7 @@ wget run <url> dev --dir /apps
 ```
 
 Run the same command again any time to update — it downloads everything into
-memory first and only writes once all 22 files have arrived, so a dropped
+memory first and only writes once all 23 files have arrived, so a dropped
 connection leaves the computer exactly as it was.
 
 ### Installing by hand
@@ -377,17 +391,73 @@ its shadow, one accent) of the ten-tone scene palette. Everything above them
 belongs to the sky. Changing biome therefore costs no extra palette slots at
 all, which is what keeps the weather page inside the sixteen the hardware has.
 
-### Seeing it without launching Minecraft
+## Backdrops — pictures that ignore the weather
 
-`preview/` holds rendered sheets of every scene, every moon phase and the radar
-scope. They are not screenshots of a mock-up: `preview/render-preview.lua`
+Everything above is driven by what the Environment Detector reports. On a pack
+where every dimension is floating islands and you live on an airship, that is
+often either wrong or missing entirely: **a contraption is not made of world
+blocks**, so a detector riding on one has nothing to report at all, and the
+weather page sits empty.
+
+A **backdrop** is a whole scene chosen by hand instead — a sky, a ground and a
+fixed hour. Twenty of them ship with v6:
+
+![Twenty backdrops: floating isles at dawn, noon, sunset and by moonlight, in storm and snow; a cloud sea at dawn, day, dusk and night; airships in fair weather, at sunset, by moonlight, in rain and in a storm; stone spires by day, dusk and night; the Nether lava sea; and the End](preview/backdrops.png)
+
+| | |
+|---|---|
+| **Isles** | the archipelago in parallax, waterfalls off the undersides, right round a day and through storm and snow |
+| **Cloud sea** | a deck of billowing cloud with peaks breaking through it, from above |
+| **Airships** | an envelope, fins and a slung gondola, under way over islands, in five kinds of weather |
+| **Spires** | stone towers standing in haze |
+| **Other dimensions** | the Nether's lava sea, and an End island in the void |
+
+Set it under **Settings → Backdrop**:
+
+| | |
+|---|---|
+| **Picture** | `Live` draws the real sky (the default), `Cycle` walks a set on a timer, or name one and it stays |
+| **Change every** | 10 seconds to 30 minutes |
+| **In the cycle** | which pictures are in the rotation — tick them off one at a time, exactly like a monitor's page rotation |
+
+Plus **Show the next picture now**, to step the cycle by hand.
+
+### What a backdrop does and does not replace
+
+Only the **picture**. The readout beneath it, the badge in the header and the
+status page all carry on reporting what the detector actually says — so a
+sunset backdrop over a real thunderstorm still shows `STORM` in the header and
+`SKY Thunderstorm` in the readout. Nothing on screen lies about the weather
+because you chose a nicer sky.
+
+The big clock is the real time, so a backdrop with no detector behind it simply
+has no clock on it.
+
+Two details are still borrowed from the live world when there is one: the
+**moon phase** on a night backdrop is the real phase, and animation runs at the
+normal rate.
+
+**Settings → Environment → Scenery** only applies while the picture is `Live`,
+and greys out when a backdrop is up — the backdrop brings its own ground.
+
+Backdrops cost **no extra palette slots**. They are built from the same ten-tone
+sky-plus-ground palettes as everything else, so they are exactly as cheap to
+draw as the live sky.
+
+---
+
+## Seeing it without launching Minecraft
+
+`preview/` holds rendered sheets of every scene, every backdrop, every moon
+phase and the radar scope. They are not screenshots of a mock-up:
+`preview/render-preview.lua`
 compiles the real pixel grid into teletext cells exactly as the game will, then
 expands each cell back into its two surviving colours — so what you see is what
 the monitor shows.
 
 ```
 lua preview/render-preview.lua . preview     # needs a desktop Lua 5.x
-lua preview/smoke-test.lua .                 # 49 checks, no Minecraft needed
+lua preview/smoke-test.lua .                 # 59 checks, no Minecraft needed
 ```
 
 `smoke-test.lua` stubs CC:Tweaked and Basalt, then drives every page at seven
@@ -403,6 +473,12 @@ a base broadcasting after a sweep, a ship rebuilding that sweep and comparing
 it **field for field** against the one the base drew, the pairing picker,
 traffic from an unpaired sender being refused, a silent base being called lost,
 and the weather relay producing an identical snapshot with no detector present.
+
+Every backdrop gets the same sub-pixel treatment as every biome, at six sizes
+and four animation frames, plus checks that the cycle honours its interval and
+its skip set, that an open-air scene draws **no horizon** under it, and — by
+reading back the text the page actually wrote — that the backdrop replaces the
+artwork while the readout underneath carries on reporting the real sky.
 
 ---
 
@@ -420,7 +496,9 @@ at it, so the two agree.
 **Aboard a contraption nothing block-based answers.** `getPlayersInRange()` and
 the Environment Detector's calls both need a real world position, and a
 Create: Aeronautics ship is not in the world while it is assembled. That is
-what the BASE and SHIP roles are for — see *Flying: base and ship* above.
+what the BASE and SHIP roles are for — see *Flying: base and ship* above — and
+why *Backdrops* exist for the weather page, which has nothing to draw from a
+detector that cannot answer.
 
 **MAX range** is capped by the server's `playerDetMaxRange` in
 `advancedperipherals-server.toml`. Set it to `-1` for no limit.
@@ -451,6 +529,7 @@ radar/
   link.lua             base <-> ship over rednet: pairing, relay, staleness
   environment.lua      Environment Detector -> snapshot + scene description
   biomes.lua           biome id -> ground profile, and its colours by mood
+  backdrops.lua        hand-picked scenes for the weather page, and the cycle
   alerts.lua           sound, redstone and flash
   logbook.lua          detection history and visitor stats
   theme.lua            colour palettes (chrome + sky + derived ground)
@@ -474,9 +553,10 @@ installer will not fetch it. `preview/install-test.lua` checks for exactly that.
 lua preview/install-test.lua .    # 13 checks against a mocked CC + HTTP
 ```
 
-Views never touch a peripheral. They read `app` and subscribe to five events —
-`scan`, `env`, `anim`, `heading` and `config` — which keeps rendering
-independent of how often the hardware is polled. It is also why the SHIP role
+Views never touch a peripheral. They read `app` and subscribe to six events —
+`scan`, `env`, `anim`, `heading`, `config` and `backdrop` — which keeps
+rendering independent of how often the hardware is polled. It is also why the
+SHIP role
 needed no view changes at all: `radar/link.lua` fills the same tables and fires
 the same events from the network that `radar/scan.lua` fills them from a
 detector, and nothing downstream can tell which it is looking at.

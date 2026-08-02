@@ -57,10 +57,13 @@ function view.build(container, app)
 
   scene.draw = function(self, buf)
     local snap = app:snapshot()
+    -- A chosen backdrop wins over the live sky, and needs no detector at all --
+    -- which is the point of it on a ship, where a detector reports nothing.
+    local sceneData = app:paintedScene()
     local cellW, cellH = self.width, self.height
     if cellW < 2 or cellH < 1 then return end
 
-    if not snap or not snap.available then
+    if not sceneData then
       buf:fill(1, 1, cellW, cellH, " ", theme.dim, theme.panel)
       local lines = {
         "No Environment Detector",
@@ -70,11 +73,15 @@ function view.build(container, app)
         "computer, or on the same wired",
         "modem network, then press O to",
         "rescan.",
+        "",
+        "Or pick a backdrop under",
+        "Settings / Backdrop, which needs",
+        "no detector at all.",
       }
       if snap and snap.reason == "disabled" then
         lines[1] = "Environment polling is off"
         lines[3] = "Turn it back on in Settings."
-        for i = 4, #lines do lines[i] = "" end
+        for i = 4, 7 do lines[i] = "" end
       end
       for i, line in ipairs(lines) do
         if i <= cellH then
@@ -85,14 +92,14 @@ function view.build(container, app)
       return
     end
 
-    local sceneData = snap.scene
     grid:resize(cellW, cellH)
     grid:setPalette(sceneData.palette)
     sky.paint(grid, sceneData, app.cfg.animate and app.anim or 0)
 
     -- Big clock burned into the artwork, with a shadow so it survives a
-    -- bright noon sky as readily as a dark one.
-    if cellW >= 18 and cellH >= 5 then
+    -- bright noon sky as readily as a dark one. The time is always the real
+    -- one, so a backdrop with no detector behind it shows no clock.
+    if snap and snap.available and cellW >= 18 and cellH >= 5 then
       local scale = (cellW >= 30 and cellH >= 8) and 2 or 1
       glyphs.drawShadowed(grid, 3, 3, snap.clock, BODY, LAND_SHADE, scale)
     end

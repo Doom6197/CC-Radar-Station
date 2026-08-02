@@ -324,3 +324,23 @@ sheet(OUT .. "/radar-scope.bmp", {
   radarTile(0, {}),
   radarTile(4.2, contacts, 225),
 }, 3)
+
+------------------------------------------------------------------ backdrops --
+-- Every picture the weather page can be told to draw instead of the live sky,
+-- in the order the settings picker offers them.
+
+local backdrops = require("radar.backdrops")
+
+local function backdropTile(id, anim)
+  return function(grid)
+    local scene = backdrops.scene(id, nil)
+    grid:setPalette(scene.palette)
+    sky.paint(grid, scene, anim or 6.2)
+  end
+end
+
+local backdropTiles = {}
+for i, id in ipairs(backdrops.ids()) do
+  backdropTiles[i] = backdropTile(id, 6.2 + i * 1.7)
+end
+sheet(OUT .. "/backdrops.bmp", backdropTiles, 3)

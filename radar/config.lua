@@ -4,12 +4,13 @@
 -- the older pocket version it grew out of) are imported on first run, so an
 -- existing station keeps its base coordinates, ignore list and history.
 
-local util   = require("radar.util")
-local biomes = require("radar.biomes")
+local util      = require("radar.util")
+local biomes    = require("radar.biomes")
+local backdrops = require("radar.backdrops")
 
 local config = {}
 
-config.VERSION = "5.0"
+config.VERSION = "6.0"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -83,6 +84,11 @@ config.ROLES = {
 
 -- How long a monitor rests on a page before the rotation moves it along.
 config.CYCLE_INTERVALS = { 5, 10, 15, 20, 30, 45, 60, 120, 300 }
+
+-- How long the weather page holds a backdrop before changing to the next. Kept
+-- separate from CYCLE_INTERVALS, and slower at the top end: a picture you are
+-- looking at wants longer than a page you are glancing at.
+config.BACKDROP_INTERVALS = { 10, 15, 30, 60, 120, 300, 600, 900, 1800 }
 
 config.RS_MODES = {
   { id = "pulse",  label = "Pulse",  hint = "brief blip on each new contact" },
@@ -202,6 +208,12 @@ function config.defaults()
     envSeconds = 2,                      -- how often, in seconds
     animate    = true,                   -- animate the sky and radar sweep
     biomeScene = "auto",                 -- weather-page scenery, or a forced one
+
+    -- The weather page's picture. "live" draws the real sky, "cycle" walks the
+    -- chosen set on a timer, anything else is one radar.backdrops id.
+    backdrop        = "live",
+    backdropSeconds = 60,
+    backdropSkip    = {},                -- backdrops left OUT of the cycle
 
     terminalPage = "status",
     tapCycle     = true,                 -- tapping a monitor moves it on a page
@@ -347,6 +359,27 @@ function config.sanitise(cfg)
   if cfg.biomeScene ~= "auto" and not biomes.PROFILES[cfg.biomeScene] then
     cfg.biomeScene = "auto"
   end
+
+  -- A settings file written before v6 has no backdrop at all, and must come
+  -- out of here drawing the live sky exactly as it did.
+  if cfg.backdrop ~= "live" and cfg.backdrop ~= "cycle"
+     and not backdrops.byId(cfg.backdrop) then
+    cfg.backdrop = "live"
+  end
+  cfg.backdropSeconds = snapToNumber(config.BACKDROP_INTERVALS, cfg.backdropSeconds, 60)
+
+  -- Only real backdrop ids may sit in the skip set, and it may never cover
+  -- every picture: a cycle with nothing in it would leave the page blank.
+  local skipped, keptPictures = {}, 0
+  if type(cfg.backdropSkip) == "table" then
+    for id, on in pairs(cfg.backdropSkip) do
+      if on and backdrops.byId(id) then skipped[id] = true end
+    end
+  end
+  for _, id in ipairs(backdrops.ids()) do
+    if not skipped[id] then keptPictures = keptPictures + 1 end
+  end
+  cfg.backdropSkip = keptPictures > 0 and skipped or {}
 
   if type(cfg.displays) ~= "table" then cfg.displays = {} end
   for name, entry in pairs(cfg.displays) do

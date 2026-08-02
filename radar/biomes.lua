@@ -150,6 +150,25 @@ biomes.PROFILES = {
     terrain = "void", flora = "broadleaf", density = 0.8,
     land = "#8a7a66", shade = "#4a4034", accent = "#57a03c" },
 
+  -- Open air. No rule below resolves to any of these: they are here to be
+  -- chosen rather than detected, which is what lets radar.backdrops put a
+  -- picture on the weather page that owes nothing to the biome underfoot.
+  skyIsles = { label = "Sky Archipelago",
+    terrain = "archipelago", flora = "broadleaf", density = 0.7,
+    land = "#8a7a66", shade = "#463c30", accent = "#5fa83f" },
+
+  cloudSea = { label = "Cloud Sea", dry = true,
+    terrain = "cloudSea", flora = "none", density = 0,
+    land = "#8c8579", shade = "#4e4a44", accent = "#b9b2a4" },
+
+  skyship = { label = "Airship", dry = true,
+    terrain = "airship", flora = "none", density = 0,
+    land = "#d8c9a8", shade = "#4a3a2c", accent = "#c2533f" },
+
+  spires = { label = "Stone Spires", dry = true,
+    terrain = "spires", flora = "none", density = 0,
+    land = "#8d8377", shade = "#4b443d", accent = "#6fae4a" },
+
   -- Other dimensions. These never reach the overworld painters; their terrain
   -- ids exist so nothing can accidentally treat them as ground.
   netherWastes = { label = "Nether Wastes", dry = true,
@@ -184,7 +203,8 @@ biomes.ORDER = {
   "jungle", "bamboo", "mushroom", "savanna", "desert", "badlands", "volcanic",
   "peaks", "snowyPeaks", "snowyForest", "snowy", "iceSpikes",
   "swamp", "mangrove", "river", "shore", "ocean", "frozenOcean",
-  "lushCaves", "dripstone", "deepDark", "caves", "void",
+  "lushCaves", "dripstone", "deepDark", "caves",
+  "void", "skyIsles", "cloudSea", "skyship", "spires",
   "netherWastes", "crimsonForest", "warpedForest", "soulValley",
   "basaltDeltas", "theEnd",
 }

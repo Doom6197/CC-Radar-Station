@@ -1,5 +1,5 @@
 --[[
-  RADAR STATION v5  --  Basalt edition
+  RADAR STATION v6  --  Basalt edition
   CC: Tweaked + Advanced Peripherals, Minecraft 1.21.1
 
   A player radar with a live weather and sky display, built on the Basalt 2.5
@@ -82,6 +82,13 @@
     End vary by sub-biome too. A pack whose biome the station reads wrongly
     can force one under Settings / Environment / Scenery.
 
+    BACKDROPS replace that picture with one chosen by hand -- floating isles,
+    a cloud sea, an airship under way -- which owes nothing to the weather,
+    the biome or the hour, and needs no Environment Detector at all. Pick one,
+    or set it to cycle through a chosen set on a timer, under
+    Settings / Backdrop. The readout below the picture and the badge in the
+    header keep reporting the real sky either way.
+
     FIXED vs SELF: getPlayersInRange() is always centred on the Player
     Detector BLOCK. FIXED changes only what distances are measured FROM, so
     put the detector at the base and point the base coordinates at it.
@@ -119,7 +126,7 @@ if not ok then
   term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
-  print("Radar Station v5 needs Basalt 2.5.")
+  print("Radar Station v6 needs Basalt 2.5.")
   print("")
   print("Install it next to this program with:")
   print("  wget run https://basalt.madefor.cc/2.5/install.lua minified")

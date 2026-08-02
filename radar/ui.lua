@@ -420,6 +420,7 @@ function ui.build(app)
   app:on("config", refreshAll)
   app:on("log", refreshAll)
   app:on("ignore", refreshAll)
+  app:on("backdrop", refreshAll)
   -- With smoothing off, or animation off entirely, the heading poll is the
   -- only thing that will ever move the scope.
   app:on("heading", refreshAll)

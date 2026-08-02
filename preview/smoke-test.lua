@@ -238,8 +238,10 @@ package.loaded.basalt = basalt
 
 local Buffer = {}
 Buffer.__index = Buffer
+-- `texts` collects every string blitted as text, which is how a check reads
+-- back what a view actually wrote rather than only that it did not crash.
 local function newBuffer(w, h, label)
-  return setmetatable({ w = w, h = h, label = label, writes = 0 }, Buffer)
+  return setmetatable({ w = w, h = h, label = label, writes = 0, texts = {} }, Buffer)
 end
 
 local function checkColor(self, c, where)
@@ -265,6 +267,8 @@ function Buffer:blit(x, y, str, fg, bg)
     error(("%s: blit at bad position %s,%s"):format(self.label, tostring(x), tostring(y)), 0)
   end
   checkColor(self, fg, "blit fg"); checkColor(self, bg, "blit bg")
+  local texts = rawget(self, "texts")
+  if texts then texts[#texts + 1] = str end
   self.writes = self.writes + 1
 end
 
@@ -1432,6 +1436,329 @@ check("every page draws in the base and ship roles", function()
     end
   end
   app:setRole("station")
+end)
+
+------------------------------------------------------------------ backdrops --
+-- A backdrop replaces the weather page's PICTURE and nothing else, so these
+-- check both halves of that: that every picture draws, and that the readout
+-- and the header badge carry on reporting the real sky underneath it.
+
+local backdrops = require("radar.backdrops")
+
+check("v5 settings sanitise to a live weather page", function()
+  local cfg = config.sanitise({ rangeIndex = 4 })
+  assert(cfg.backdrop == "live", "the page draws the real sky, got " .. tostring(cfg.backdrop))
+  assert(cfg.backdropSeconds == 60, "with a sane interval, got " .. tostring(cfg.backdropSeconds))
+  assert(next(cfg.backdropSkip) == nil, "and every picture in the cycle")
+
+  local junk = config.sanitise({ backdrop = "not-a-picture", backdropSeconds = 7,
+    backdropSkip = { islesDawn = true, nonsense = true } })
+  assert(junk.backdrop == "live", "an unknown picture falls back to live")
+  assert(junk.backdropSeconds == 10, "the interval snaps to a legal one, got "
+    .. junk.backdropSeconds)
+  assert(junk.backdropSkip.islesDawn == true, "a real picture stays out of the cycle")
+  assert(junk.backdropSkip.nonsense == nil, "a made-up one does not")
+
+  -- A cycle that excluded everything would leave the page with nothing to draw.
+  local all = {}
+  for _, id in ipairs(backdrops.ids()) do all[id] = true end
+  local emptied = config.sanitise({ backdropSkip = all })
+  assert(next(emptied.backdropSkip) == nil, "an all-skipping cycle is discarded")
+  assert(#backdrops.rotation(emptied) == backdrops.count(), "so every picture is back in it")
+
+  -- rotation() is the last line of defence, below the sanitiser: handed a set
+  -- that skips everything it must still produce something to draw.
+  assert(#backdrops.rotation({ backdropSkip = all }) == 1,
+    "an all-skipping set still yields one picture")
+  assert(#backdrops.rotation({}) == backdrops.count(), "and no set yields all of them")
+end)
+
+check("open-air backdrops have no horizon under them", function()
+  -- A ground that is not registered as open sky gets a slab of LAND laid
+  -- across the bottom of the frame before the islands go on -- which is
+  -- exactly the horizon these scenes are supposed not to have.
+  local LAND = 8
+  local grid = pixel.new(46, 16, theme.skies.day)
+  for _, id in ipairs({ "islesNoon", "islesDawn", "shipDay", "cloudDay", "spiresDay" }) do
+    local scene = backdrops.scene(id, nil)
+    grid:setPalette(scene.palette)
+    grid.px = {}
+    sky.paint(grid, scene, 7.5)
+
+    local solid = true
+    for x = 1, grid.w do
+      if grid.px[(grid.h - 1) * grid.w + x] ~= LAND then solid = false; break end
+    end
+    assert(not solid, id .. " drew a solid horizon across the bottom of the frame")
+  end
+end)
+
+check("every backdrop is complete and buildable", function()
+  assert(backdrops.count() >= 15, "a set worth cycling, got " .. backdrops.count())
+  local seen = {}
+  for _, id in ipairs(backdrops.ids()) do
+    assert(not seen[id], "ids are unique: " .. id)
+    seen[id] = true
+
+    local entry = backdrops.byId(id)
+    assert(type(entry.label) == "string" and #entry.label > 0, id .. " has a label")
+    assert(theme.skies[entry.sky], id .. " names a real sky: " .. tostring(entry.sky))
+    assert(biomes.PROFILES[entry.ground],
+      id .. " names a real ground: " .. tostring(entry.ground))
+
+    -- No snapshot at all: this is the case that matters on a ship.
+    local scene = backdrops.scene(id, nil)
+    assert(scene, id .. " builds a scene with no snapshot")
+    assert(#scene.palette == 10, id .. " has a ten-entry palette")
+    assert(scene.title and #scene.title > 0, id .. " has a title")
+    assert(scene.groundKind and scene.ground, id .. " has a ground")
+    assert(scene.weather and scene.phase, id .. " has weather and an hour")
+  end
+  assert(backdrops.scene("no-such-picture", nil) == nil, "an unknown id builds nothing")
+end)
+
+check("every backdrop paints every sub-pixel at every size", function()
+  local sizes = { { 4, 2 }, { 10, 4 }, { 18, 6 }, { 26, 9 }, { 46, 16 }, { 82, 30 } }
+  for _, size in ipairs(sizes) do
+    local grid = pixel.new(size[1], size[2], theme.skies.day)
+    local buffer = newBuffer(size[1], size[2], "backdrop " .. size[1] .. "x" .. size[2])
+    for _, id in ipairs(backdrops.ids()) do
+      local scene = backdrops.scene(id, nil)
+      grid:setPalette(scene.palette)
+      for _, anim in ipairs({ 0, 4.2, 31.7, 240.5 }) do
+        -- Blank the surface first, or a previous frame fills in any gap this
+        -- one leaves and the hole only shows up in game.
+        grid.px = {}
+        sky.paint(grid, scene, anim)
+        for i = 1, grid.w * grid.h do
+          local index = grid.px[i]
+          if type(index) ~= "number" or index < 1 or index > #scene.palette then
+            error(("%s at %dx%d anim %s left sub-pixel %d as %s"):format(
+              id, size[1], size[2], anim, i, tostring(index)), 0)
+          end
+        end
+        grid:blitTo(buffer, 1, 1)
+      end
+    end
+  end
+end)
+
+local liveSnapshot
+check("a backdrop replaces the picture and nothing else", function()
+  app:pollEnvironment(true)
+  liveSnapshot = app:snapshot()
+  assert(liveSnapshot.available, "there is a live snapshot to compare against")
+
+  app:setBackdrop("live")
+  assert(app:backdropId() == nil, "live means no backdrop")
+  assert(app:paintedScene() == liveSnapshot.scene, "and the page paints the live sky")
+
+  app:setBackdrop("shipDusk")
+  assert(app:backdropId() == "shipDusk", "a chosen picture is the one on screen")
+  local painted = app:paintedScene()
+  assert(painted.backdrop == "shipDusk", "and it is what gets painted")
+  assert(painted.groundKind == "skyship", "with its own ground")
+  assert(painted.phase == "dusk", "and its own hour, not the real one")
+  assert(painted ~= liveSnapshot.scene, "the live scene is not what is drawn")
+
+  -- The readout and the header badge have to carry on telling the truth.
+  assert(app:snapshot() == liveSnapshot, "the snapshot itself is untouched")
+  assert(app:snapshot().scene.weather == liveSnapshot.scene.weather,
+    "so the readout still reports the real weather")
+  assert(sky.badge(app:snapshot().scene) == "SNOW",
+    "and the header badge with it, got " .. sky.badge(app:snapshot().scene))
+
+  -- The real moon phase is borrowed whenever there is a detector to ask.
+  assert(painted.moonPhase == liveSnapshot.moonId,
+    "the live moon phase shows through, got " .. tostring(painted.moonPhase))
+end)
+
+check("a backdrop needs no Environment Detector at all", function()
+  local saved = app.env.snapshot
+  app.env.snapshot = { available = false, reason = "no detector" }
+
+  app:setBackdrop("live")
+  assert(app:paintedScene() == nil, "live with no detector has nothing to draw")
+
+  app:setBackdrop("islesNight")
+  local painted = app:paintedScene()
+  assert(painted, "a backdrop draws anyway")
+  assert(#painted.palette == 10, "with a full palette")
+  assert(painted.moonPhase == 0, "and a full moon to fall back on, got "
+    .. tostring(painted.moonPhase))
+
+  app.env.snapshot = saved
+  app:setBackdrop("live")
+end)
+
+check("the backdrop cycle changes on its interval", function()
+  -- With animation off nothing else would repaint the page, so the change has
+  -- to drive a redraw of its own.
+  assert(app.listeners.backdrop and #app.listeners.backdrop > 0,
+    "a backdrop change is wired to a redraw")
+
+  app:setBackdrop("cycle")
+  app.cfg.backdropSeconds, app.cfg.backdropSkip = 30, {}
+  app.backdropIndex, app.backdropAt = 1, CLOCK
+
+  local rotation = backdrops.rotation(app.cfg)
+  assert(#rotation == backdrops.count(), "every picture is in it by default")
+  assert(app:backdropId() == rotation[1], "starting on the first")
+
+  assert(app:tickBackdrop(CLOCK + 29) == false, "held until the interval elapses")
+  assert(app:backdropId() == rotation[1], "so the picture has not moved")
+
+  -- Due: walks the list in order and wraps round to the start.
+  local at = CLOCK + 30
+  for step = 1, #rotation + 1 do
+    assert(app:tickBackdrop(at), "step " .. step .. " changed the picture")
+    local want = rotation[(step % #rotation) + 1]
+    assert(app:backdropId() == want,
+      ("step %d landed on %s, wanted %s"):format(step, app:backdropId(), want))
+    at = at + 30
+  end
+
+  -- Pictures left out of the cycle are never landed on.
+  app.cfg.backdropSkip = { islesDawn = true, islesNoon = true }
+  local trimmed = backdrops.rotation(app.cfg)
+  assert(#trimmed == backdrops.count() - 2, "two dropped out, got " .. #trimmed)
+  app.backdropIndex = 1
+  for _ = 1, #trimmed + 2 do
+    at = at + 30
+    app:tickBackdrop(at)
+    local id = app:backdropId()
+    assert(id ~= "islesDawn" and id ~= "islesNoon",
+      "a skipped picture stays out, got " .. id)
+  end
+  app.cfg.backdropSkip = {}
+
+  -- A fixed picture never moves, however long it waits.
+  app:setBackdrop("cloudDay")
+  assert(app:tickBackdrop(at + 100000) == false, "a fixed picture does not cycle")
+  assert(app:backdropId() == "cloudDay", "and stays put")
+  assert(app:nextBackdrop() == false, "nor can it be stepped by hand")
+
+  -- Choosing a fixed picture rewinds the cycle, so turning cycling back on
+  -- starts at the first picture rather than somewhere in the middle.
+  app:setBackdrop("cycle")
+  app.backdropIndex = 5
+  app:setBackdrop("islesDusk")
+  assert(app.backdropIndex == 1, "a fixed picture rewinds the cycle")
+  app:setBackdrop("cycle")
+  assert(app:backdropId() == backdrops.rotation(app.cfg)[1],
+    "so the cycle restarts at the first, got " .. tostring(app:backdropId()))
+
+  -- Stepping by hand buys the new picture a full interval.
+  app:setBackdrop("cycle")
+  local before = app:backdropId()
+  assert(app:nextBackdrop(), "the cycle steps by hand")
+  assert(app:backdropId() ~= before, "onto a different picture")
+
+  app:setBackdrop("live")
+end)
+
+check("the weather page paints the backdrop, and the readout the real sky", function()
+  local saved = app.env.snapshot
+  app.env.snapshot = liveSnapshot
+
+  -- Everything the page writes as text, which is how both halves get checked
+  -- from one render: the caption belongs to the artwork, the SKY row and the
+  -- badge to the readout under it.
+  local function textOf()
+    terminalRoot:setPage("weather", false)
+    rawget(terminalRoot.root, "_p").width = 82
+    rawget(terminalRoot.root, "_p").height = 40
+    local buffer = newBuffer(82, 40, "weather text")
+    drawTree(terminalRoot.root, buffer)
+    return table.concat(buffer.texts, "\n")
+  end
+
+  app:setBackdrop("live")
+  local live = textOf()
+  assert(live:find("Snowfall", 1, true), "the live sky names itself:\n" .. live)
+  assert(not live:find("Moonlit Isles", 1, true), "and no backdrop is drawn")
+
+  app:setBackdrop("islesNight")
+  local painted = textOf()
+  assert(painted:find("Moonlit Isles", 1, true),
+    "the backdrop caption is on the artwork:\n" .. painted)
+  assert(painted:find("Snowfall", 1, true),
+    "while the readout still reports the real sky")
+  assert(painted:find("SNOW", 1, true), "badge included")
+
+  app:setBackdrop("live")
+  app.env.snapshot = saved
+end)
+
+check("the settings page drives the backdrop", function()
+  terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+  app:setBackdrop("live")
+  view.refresh()
+
+  local function findButton(element, text)
+    if element.__kind == "Button" and tostring(element.text) == text then return element end
+    for _, child in ipairs(rawget(element, "_children") or {}) do
+      local hit = findButton(child, text)
+      if hit then return hit end
+    end
+    return nil
+  end
+
+  local button = findButton(view.container, "live - draws the real sky")
+  assert(button, "the backdrop row is on the settings page")
+  rawget(button, "_handlers").onClick(button)
+
+  local picked
+  local function findItem(element, needle)
+    for _, item in ipairs(rawget(element, "_p").items or {}) do
+      if type(item) == "table" and item.text and item.text:find(needle, 1, true) then
+        picked = item
+      end
+    end
+    for _, child in ipairs(rawget(element, "_children") or {}) do findItem(child, needle) end
+  end
+
+  findItem(view.container, "Airship at Sunset")
+  assert(picked, "the picker offers every backdrop by name")
+  picked.callback()
+  assert(app.cfg.backdrop == "shipDusk", "choosing one sets it, got " .. app.cfg.backdrop)
+
+  picked = nil
+  findItem(view.container, "Cycle - change on a timer")
+  assert(picked, "and offers the cycle")
+
+  app:setBackdrop("live")
+  view.refresh()
+end)
+
+check("every page draws with a backdrop up", function()
+  local sizes = { { 15, 10 }, { 51, 19 }, { 82, 40 } }
+  local saved = app.env.snapshot
+  for _, choice in ipairs({ "shipStorm", "cloudNight", "spiresDay", "cycle" }) do
+    app:setBackdrop(choice)
+    for _, hasEnv in ipairs({ true, false }) do
+      app.env.snapshot = hasEnv and liveSnapshot or { available = false }
+      for _, root in ipairs(roots) do
+        for _, page in ipairs(root.pages) do
+          root:setPage(page, false)
+          for _, size in ipairs(sizes) do
+            rawget(root.root, "_p").width = size[1]
+            rawget(root.root, "_p").height = size[2]
+            root:refreshChrome()
+            local label = ("%s %s %dx%d %s env=%s"):format(
+              root.monitor and "monitor" or "terminal", page,
+              size[1], size[2], choice, tostring(hasEnv))
+            local buffer = newBuffer(size[1], size[2], label)
+            local ok, err = pcall(drawTree, root.root, buffer)
+            if not ok then error(label .. ": " .. tostring(err), 0) end
+          end
+        end
+      end
+    end
+  end
+  app.env.snapshot = saved
+  app:setBackdrop("live")
 end)
 
 --------------------------------------------------------------------- report --

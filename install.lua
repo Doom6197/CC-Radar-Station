@@ -1,5 +1,5 @@
 --[[
-  RADAR STATION v5  --  installer
+  RADAR STATION v6  --  installer
 
   Run this on a CC: Tweaked computer:
 
@@ -114,7 +114,7 @@ local function fetch(path)
   return body
 end
 
-say("Radar Station v5 installer", colors.yellow)
+say("Radar Station v6 installer", colors.yellow)
 say("  from " .. options.repo .. " (" .. options.branch .. ")", colors.lightGray)
 say("  into " .. (options.dir == "" and "/" or "/" .. options.dir), colors.lightGray)
 say("")

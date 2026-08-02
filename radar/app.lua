@@ -7,6 +7,7 @@
 --   "env"     the environment snapshot changed
 --   "anim"    animation frame; only fired while something animated is visible
 --   "config"  settings changed and were written to disk
+--   "backdrop" the weather page's chosen picture changed
 --
 -- A SHIP fills the same tables and fires the same events from what a base
 -- relays instead of from a detector, so no view can tell the difference.
@@ -15,6 +16,7 @@
 -- the UI stays responsive throughout.
 
 local basalt      = require("basalt")
+local backdrops   = require("radar.backdrops")
 local config      = require("radar.config")
 local hardware    = require("radar.hardware")
 local scan        = require("radar.scan")
@@ -59,6 +61,9 @@ function app.new()
 
     anim = 0,
     animWanted = 0,       -- number of visible views asking for frames
+
+    backdropIndex = 1,    -- position in the backdrop cycle
+    backdropAt = 0,       -- when the current picture went up
 
     listeners = {},
     running = true,
@@ -191,6 +196,63 @@ function app:easeHeading()
     self.headingShown or self.heading, self.heading, HEADING_EASE)
 end
 
+-- -------------------------------------------------------------- backdrops ---
+-- The weather page can draw a chosen picture instead of the live sky, and can
+-- walk a set of them on a timer. Only the artwork is replaced: the readout
+-- under it and the badge in the header keep reporting the real snapshot, so a
+-- decorative sky never misrepresents the weather.
+
+--- The backdrop that should be on screen, or nil while the page is live.
+function app:backdropId()
+  local choice = self.cfg.backdrop
+  if choice == "live" then return nil end
+  if choice ~= "cycle" then
+    return backdrops.byId(choice) and choice or nil
+  end
+  local rotation = backdrops.rotation(self.cfg)
+  return rotation[((self.backdropIndex or 1) - 1) % #rotation + 1]
+end
+
+--- The scene the weather page paints: a backdrop when one is chosen, the live
+--- sky otherwise, and nil when there is neither.
+function app:paintedScene()
+  local id = self:backdropId()
+  if id then return backdrops.scene(id, self.env.snapshot) end
+  local snap = self.env.snapshot
+  return (snap and snap.available) and snap.scene or nil
+end
+
+--- Moves the cycle on by one and gives the new picture a full interval.
+---@return boolean changed
+function app:nextBackdrop(now)
+  if self.cfg.backdrop ~= "cycle" then return false end
+  local rotation = backdrops.rotation(self.cfg)
+  self.backdropIndex = ((self.backdropIndex or 1) % #rotation) + 1
+  self.backdropAt = now or os.clock()
+  self:emit("backdrop")
+  return true
+end
+
+--- Checks whether the interval has elapsed. The deadline is compared rather
+--- than slept on, so shortening the interval takes effect straight away.
+---@return boolean changed
+function app:tickBackdrop(now)
+  if self.cfg.backdrop ~= "cycle" then
+    self.backdropAt = now
+    return false
+  end
+  if now - (self.backdropAt or 0) < self.cfg.backdropSeconds then return false end
+  return self:nextBackdrop(now)
+end
+
+function app:setBackdrop(choice)
+  self.cfg.backdrop = choice
+  self.backdropAt = os.clock()
+  if choice ~= "cycle" then self.backdropIndex = 1 end
+  self:saveConfig()
+  self:emit("backdrop")
+end
+
 -- ------------------------------------------------------------------ sweep ---
 
 --- Compares a fresh contact list against the previous one and fires alerts
@@ -319,6 +381,16 @@ function app:start()
     while self.running do
       self.alerts:tick()
       sleep(0.1)
+    end
+  end)
+
+  -- The weather page's backdrop cycle. Half-second granularity is ample for an
+  -- interval measured in tens of seconds, and it costs nothing at all while
+  -- the page is live or holding one picture.
+  basalt.schedule(function()
+    while self.running do
+      sleep(0.5)
+      pcall(self.tickBackdrop, self, os.clock())
     end
   end)
 

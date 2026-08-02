@@ -9,6 +9,7 @@
 local basalt = require("basalt")
 local config = require("radar.config")
 local alertsLib = require("radar.alerts")
+local backdrops = require("radar.backdrops")
 local biomes = require("radar.biomes")
 local linkLib = require("radar.link")
 local scan   = require("radar.scan")
@@ -701,10 +702,117 @@ function view.build(container, app, root)
         app:pollEnvironment(true)
         refreshRows()
       end)
-    end, function() return cfg.biomeScene == "auto" and theme.text or theme.accent end)
+    end, function()
+      -- A chosen backdrop replaces the whole picture, so the live scenery
+      -- setting has nothing to act on until the page goes back to live.
+      if cfg.backdrop ~= "live" then return theme.line end
+      return cfg.biomeScene == "auto" and theme.text or theme.accent
+    end)
 
     note("The ground the weather page draws. Force one if your pack")
     note("reports a biome the station does not recognise.")
+    spacer()
+
+    -- backdrop --------------------------------------------------------------
+    -- A picture for the weather page chosen by hand rather than read off the
+    -- detector. On a pack where every dimension is floating islands -- and on
+    -- a ship, where a detector riding a contraption reports nothing at all --
+    -- the live sky is often either wrong or missing.
+    heading("BACKDROP")
+
+    row("Picture", function()
+      if cfg.backdrop == "live" then return "live - draws the real sky" end
+      if cfg.backdrop == "cycle" then
+        local current = app:backdropId()
+        return ("cycle - %d, now %s"):format(#backdrops.rotation(cfg),
+          current and backdrops.label(current) or "?")
+      end
+      return backdrops.label(cfg.backdrop)
+    end, function()
+      local entries = {
+        { label = "Live - draw the real sky", value = "live" },
+        { label = "Cycle - change on a timer", value = "cycle" },
+      }
+      for _, id in ipairs(backdrops.ids()) do
+        entries[#entries + 1] = { label = backdrops.label(id), value = id }
+      end
+      openPicker("WEATHER PAGE BACKDROP", entries, cfg.backdrop, function(value)
+        app:setBackdrop(value)
+        refreshRows()
+      end)
+    end, function() return cfg.backdrop == "live" and theme.text or theme.accent end)
+
+    note("A picture that ignores the weather and the biome.")
+    note("Works with no Environment Detector at all.")
+
+    row("Change every", function()
+      local seconds = cfg.backdropSeconds
+      if seconds >= 60 then return ("%g minutes"):format(seconds / 60) end
+      return seconds .. " seconds"
+    end, function()
+      openPicker("BACKDROP CHANGE INTERVAL",
+        entriesOf(config.BACKDROP_INTERVALS, function(v)
+          if v >= 60 then return ("%g minutes"):format(v / 60) end
+          return v .. " seconds"
+        end, function(v) return v end),
+        cfg.backdropSeconds,
+        function(value)
+          cfg.backdropSeconds = value
+          app.backdropAt = os.clock()
+          app:saveConfig()
+          refreshRows()
+        end)
+    end, function() return cfg.backdrop == "cycle" and theme.text or theme.line end)
+
+    -- The cycle is a set rather than a single choice, so the picker toggles
+    -- one picture and opens itself again for the next.
+    local function editBackdrops()
+      local entries = {}
+      for _, id in ipairs(backdrops.ids()) do
+        entries[#entries + 1] = {
+          label = (cfg.backdropSkip[id] and "[ ] " or "[x] ") .. backdrops.label(id),
+          value = id,
+        }
+      end
+      entries[#entries + 1] = { label = "-- done --", value = false }
+      openPicker("PICTURES IN THE CYCLE", entries, nil, function(id)
+        if not id then refreshRows(); return end
+        local skip = cfg.backdropSkip
+        skip[id] = (not skip[id]) or nil
+        -- Refuse to empty the cycle: backdrops.rotation papers over an empty
+        -- set by handing back one picture, so the count has to be taken from
+        -- the skip list itself.
+        local remaining = 0
+        for _, other in ipairs(backdrops.ids()) do
+          if not skip[other] then remaining = remaining + 1 end
+        end
+        if remaining == 0 then
+          skip[id] = nil
+          root:toast("At least one picture has to stay in the cycle", "warning")
+        end
+        app:saveConfig()
+        refreshRows()
+        editBackdrops()
+      end)
+    end
+
+    row("In the cycle", function()
+      local rotation = backdrops.rotation(cfg)
+      if #rotation == backdrops.count() then
+        return ("all %d pictures"):format(#rotation)
+      end
+      return ("%d of %d pictures"):format(#rotation, backdrops.count())
+    end, editBackdrops,
+      function() return cfg.backdrop == "cycle" and theme.text or theme.line end)
+
+    action("Show the next picture now", function()
+      if cfg.backdrop ~= "cycle" then
+        root:toast("Set the picture to Cycle first", "info")
+        return
+      end
+      app:nextBackdrop()
+      root:toast(backdrops.label(app:backdropId()), "info")
+    end)
     spacer()
 
     -- displays --------------------------------------------------------------

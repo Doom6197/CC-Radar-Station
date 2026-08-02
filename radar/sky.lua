@@ -441,6 +441,228 @@ function TERRAIN.void(grid, w, h, horizon, p, anim)
   end
 end
 
+-- --------------------------------------------------------- open-air scenes ---
+-- Grounds for a world with no ground. Everything below hangs in open air, so
+-- these paint over the sky gradient rather than under a horizon line. No biome
+-- id resolves to any of them: they exist to be picked, which is what lets
+-- radar.backdrops put a scene on screen that owes nothing to the detector.
+
+--- Layered floating islands. The far bands drift for parallax; the near band
+--- is deliberately held still, because paintFlora places trees at a fixed x
+--- and a tree whose island slides out from under it looks as wrong as it
+--- sounds.
+function TERRAIN.archipelago(grid, w, h, horizon, p, anim)
+  local near = {}
+  local bands = (w >= 30 and h >= 12) and 3 or 2
+
+  for band = 1, bands do
+    local depth = band / bands                       -- 0 far .. 1 near
+    local nearest = (band == bands)
+    -- Sparse on purpose. A skyful of islands reads as rubble and leaves the
+    -- sun nowhere to be, which is most of what makes the scene.
+    local count = max(1, floor(w / (52 - band * 10)))
+    local span = w + 30
+    local drift = nearest and 0 or anim * (0.5 + depth * 0.8)
+
+    for i = 0, count do
+      local cx = nearest
+        and ((i + 0.5 + (hash(i, 90 + band) - 0.5) * 0.6) * (w / (count + 1)))
+        or (((hash(i, 90 + band) * span + drift) % span) - 15)
+      local halfW = max(1.5, w * (0.03 + depth * 0.075) * (0.7 + hash(i, 95 + band) * 0.6))
+      local top = h * (0.16 + hash(i, 97 + band) * 0.50)
+        + sin(anim * 0.22 + i * 1.3) * max(0.4, h * 0.012)
+      local deep = max(2, halfW * (1.1 + hash(i, 99 + band) * 0.7))
+
+      for row = 0, deep do
+        local taper = halfW * (1 - (row / (deep + 1)) ^ 1.4)
+        if taper >= 0.5 then
+          local index = LAND_SHADE
+          if nearest then
+            if row < 1 then index = ACCENT               -- grass cap
+            elseif row < deep * 0.4 then index = LAND end
+          elseif row < deep * 0.35 then
+            index = LAND
+          end
+          grid:hline(cx - taper, cx + taper, top + row, index)
+        end
+      end
+
+      -- Water pouring off the underside. At this size it is the one detail
+      -- that reads as "island" rather than as "rock" -- but only if it stops
+      -- short: a line all the way to the frame edge reads as rain instead.
+      local base = top + deep
+      if nearest and base < h - 4 and hash(i, 101) > 0.5 then
+        grid:vline(cx + (hash(i, 102) - 0.5) * halfW, base - deep * 0.3,
+          base + (h - base) * (0.18 + hash(i, 103) * 0.22), CLOUD)
+      end
+
+      if nearest then near[#near + 1] = { cx = cx, halfW = halfW, top = top } end
+    end
+  end
+
+  return function(x)
+    for _, isle in ipairs(near) do
+      if x > isle.cx - isle.halfW * 0.6 and x < isle.cx + isle.halfW * 0.6 then
+        return isle.top
+      end
+    end
+    return nil
+  end
+end
+
+--- A sea of cloud with peaks breaking through it: the world as seen from an
+--- airship at altitude, where the weather is below you rather than around you.
+function TERRAIN.cloudSea(grid, w, h, horizon, p, anim)
+  local sea = h * 0.60
+  local base = sea + max(2, h * 0.14)
+  local peaks = {}
+
+  local count = max(2, floor(w / 16))
+  for i = 0, count do
+    local cx = (i + 0.5) * (w / (count + 1)) + (hash(i, 61) - 0.5) * w * 0.05
+    local halfW = max(2, w * (0.04 + hash(i, 62) * 0.06))
+    local top = sea - h * (0.08 + hash(i, 63) * 0.34)
+    for x = floor(cx - halfW), floor(cx + halfW) do
+      local t = abs(x - cx) / halfW
+      -- Lit on the left, shaded on the right, the same way round on every
+      -- peak: one consistent light is what makes them read as solid.
+      grid:vline(x, top + t * t * (base - top), base, x < cx and LAND or LAND_SHADE)
+    end
+    peaks[#peaks + 1] = { cx = cx, halfW = halfW, top = top }
+  end
+
+  -- The deck, over the peaks so only their summits stay clear of it. Drawn as
+  -- overlapping billows rather than a filled line: a flat band of one colour
+  -- reads as paint, not as cloud.
+  grid:rect(1, floor(sea), w, h - floor(sea) + 1, CLOUD)
+  local lobes = max(3, floor(w / 8))
+  for i = 0, lobes do
+    local x = (i + 0.5) / (lobes + 1) * w + sin(anim * 0.15 + i * 1.7) * max(0.5, w * 0.012)
+    local r = max(1.5, h * (0.035 + hash(i, 71) * 0.05))
+    grid:disc(x, sea + r * 0.4, r, CLOUD)
+    grid:disc(x - r * 0.9, sea + r * 0.8, r * 0.6, CLOUD)
+  end
+
+  -- Crevices between the billows, drifting slowly through the deck.
+  for i = 1, max(2, floor(w / 12)) do
+    local x = (hash(i, 73) * (w + 24) + anim * (0.5 + hash(i, 74) * 0.8)) % (w + 24) - 12
+    local y = sea + h * (0.10 + hash(i, 75) * 0.16)
+    grid:disc(x, y, max(1.5, h * 0.045), CLOUD_SHADE)
+    grid:hline(x - h * 0.09, x + h * 0.09, y + h * 0.05, CLOUD_SHADE)
+  end
+
+  -- A shaded near edge along the bottom, which is what gives the deck depth.
+  for x = 1, w do
+    grid:vline(x, h - max(2, h * 0.10)
+      + sin(x / w * 4.1 - anim * 0.25) * max(1, h * 0.02), h, CLOUD_SHADE)
+  end
+
+  return function(x)
+    for _, peak in ipairs(peaks) do
+      if x > peak.cx - peak.halfW * 0.4 and x < peak.cx + peak.halfW * 0.4 then
+        return peak.top
+      end
+    end
+    return nil
+  end
+end
+
+--- One airship: an envelope with a lit top and a shaded underside, fins at the
+--- blunt end so which way it is heading is never in doubt, and a gondola slung
+--- underneath on rigging.
+local function airshipAt(grid, cx, cy, len, tall)
+  for dx = -len, len do
+    local t = dx / len
+    local half = tall * sqrt(max(0, 1 - t * t))
+    grid:vline(cx + dx, cy - half, cy + half, LAND)
+    grid:vline(cx + dx, cy + half * 0.3, cy + half, LAND_SHADE)
+  end
+  grid:hline(cx - len * 0.88, cx + len * 0.88, cy - tall * 0.3, ACCENT)
+
+  local tx = cx - len
+  grid:line(tx, cy, tx - len * 0.3, cy - tall * 1.1, LAND_SHADE)
+  grid:line(tx, cy, tx - len * 0.3, cy + tall * 1.1, LAND_SHADE)
+  grid:line(tx - len * 0.3, cy - tall * 1.1, tx - len * 0.3, cy + tall * 1.1, LAND_SHADE)
+
+  local gy = cy + tall + max(1, tall * 0.5)
+  grid:rect(cx - len * 0.2, gy, max(2, len * 0.4), max(1, floor(tall * 0.5)), LAND_SHADE)
+  grid:line(cx - len * 0.18, gy, cx - len * 0.3, cy + tall * 0.8, ACCENT)
+  grid:line(cx + len * 0.18, gy, cx + len * 0.3, cy + tall * 0.8, ACCENT)
+end
+
+--- Airships under way, with islands beneath them for scale. Nothing grows
+--- here: everything in the frame is moving, and flora is placed at a fixed x.
+function TERRAIN.airship(grid, w, h, horizon, p, anim)
+  local count = max(1, floor(w / 26))
+  for i = 0, count do
+    local cx = ((hash(i, 111) * (w + 24) + anim * 0.35) % (w + 24)) - 12
+    local halfW = max(1.5, w * (0.03 + hash(i, 112) * 0.04))
+    local top = h * (0.68 + hash(i, 113) * 0.20)
+    local deep = max(2, halfW * 1.3)
+    for row = 0, deep do
+      local taper = halfW * (1 - (row / (deep + 1)) ^ 1.4)
+      if taper >= 0.5 then
+        grid:hline(cx - taper, cx + taper, top + row, row < 1 and ACCENT or LAND_SHADE)
+      end
+    end
+  end
+
+  -- A small one in the distance, then the near one over the top of it.
+  if w >= 30 and h >= 12 then
+    local len = max(2, w * 0.05)
+    airshipAt(grid, ((anim * 0.9 + w * 0.35) % (w + len * 6)) - len * 3,
+      h * 0.26, len, max(1, len * 0.42))
+  end
+
+  local len = max(3, w * 0.13)
+  airshipAt(grid, ((anim * 2.0) % (w + len * 8)) - len * 4,
+    h * 0.44 + sin(anim * 0.5) * max(0.5, h * 0.03), len, max(1.5, len * 0.42))
+
+  return function() return nil end
+end
+
+--- Stone spires standing in haze: the shape a world of floating islands leaves
+--- behind where the islands are columns rather than plates.
+function TERRAIN.spires(grid, w, h, horizon, p, anim)
+  local tops = {}
+  local count = max(2, floor(w / 12))
+  for i = 0, count do
+    local cx = (i + 0.5) * (w / (count + 1)) + (hash(i, 81) - 0.5) * w * 0.06
+    local halfW = max(1, w * (0.012 + hash(i, 82) * 0.02))
+    local top = h * (0.08 + hash(i, 83) * 0.38)
+    local reach = max(1, h * (0.74 + hash(i, 84) * 0.24) - top)
+    local index = hash(i, 85) > 0.5 and LAND or LAND_SHADE
+    for row = 0, reach do
+      local flare = halfW * (1 + (row / reach) ^ 2 * 1.1)
+      grid:hline(cx - flare, cx + flare, top + row, index)
+    end
+    grid:hline(cx - halfW * 1.5, cx + halfW * 1.5, top, ACCENT)
+    tops[#tops + 1] = { cx = cx, halfW = halfW * 1.5, top = top }
+  end
+
+  -- Haze pooling around the feet, so the towers fade out rather than being
+  -- sliced off by the bottom of the frame. Its top edge is lumpy for the same
+  -- reason the cloud deck's is: a straight line reads as a painted band.
+  local haze = h * 0.80
+  grid:rect(1, floor(haze), w, h - floor(haze) + 1, CLOUD_SHADE)
+  for i = 0, max(3, floor(w / 9)) do
+    local x = (hash(i, 86) * (w + 20) + anim * (0.3 + hash(i, 87) * 0.5)) % (w + 20) - 10
+    local r = max(1.5, h * (0.03 + hash(i, 88) * 0.04))
+    grid:disc(x, haze + r * 0.5, r, CLOUD_SHADE)
+  end
+  for x = 1, w do
+    local t = x / w
+    grid:vline(x, h * 0.91 + sin(t * 3.1 - anim * 0.2) * max(1, h * 0.02), h, CLOUD)
+  end
+
+  return function(x)
+    for _, spire in ipairs(tops) do
+      if x > spire.cx - spire.halfW and x < spire.cx + spire.halfW then return spire.top end
+    end
+    return nil
+  end
+end
+
 -- ----------------------------------------------------------------- flora ---
 -- One painter per kind of plant. `base` is the row it grows from, `growth` a
 -- height budget derived from the room below the horizon, and `seed` its index
@@ -723,7 +945,10 @@ end
 -- Grounds that change the shape of the frame itself rather than just the
 -- silhouette at the bottom of it.
 local ENCLOSED = { cavern = true }     -- no sky at all
-local OPEN_SKY = { void = true }       -- sky all the way down, no horizon
+-- Sky all the way down, no horizon: the ground, where there is any, hangs in it.
+local OPEN_SKY = {
+  void = true, archipelago = true, cloudSea = true, airship = true, spires = true,
+}
 
 --- Paints a complete scene into a pixel grid.
 ---@param grid table radar.pixel grid, already sized and given scene.palette
