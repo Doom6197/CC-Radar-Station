@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.2"
+config.VERSION = "8.3"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -246,6 +246,11 @@ function config.defaults()
     mode   = "fixed",                    -- "fixed" measures from baseX/Y/Z
     baseX = nil, baseY = nil, baseZ = nil, baseDim = nil,
 
+    -- A MOBILE takes its base coordinates from the main base it is paired
+    -- with, rather than being left on whatever is in its own file -- which on
+    -- a fresh install is 0, 64, 0, and makes "home" point at the world origin.
+    baseFollow = true,
+
     rangeIndex      = config.MAX_RANGE_INDEX,
     alertRangeIndex = config.MAX_RANGE_INDEX,
     scanIndex       = 2,                 -- SCAN_INTERVALS[2] = 1 second
@@ -396,6 +401,7 @@ function config.sanitise(cfg)
   if type(cfg.rs.side) ~= "string" then cfg.rs.side = "back" end
 
   if cfg.mode ~= "self" and cfg.mode ~= "fixed" then cfg.mode = "fixed" end
+  cfg.baseFollow = cfg.baseFollow ~= false
   if type(cfg.myName) ~= "string" or #cfg.myName == 0 then cfg.myName = nil end
 
   -- A settings file written before v8 names a role by its old id; one written

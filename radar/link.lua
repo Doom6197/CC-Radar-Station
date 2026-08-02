@@ -166,6 +166,16 @@ function link:sendScan(app)
   local list = {}
   for i, contact in ipairs(app.contacts) do list[i] = packContact(contact) end
 
+  -- Where the main base itself stands. A mobile has no way of knowing that
+  -- otherwise -- it was left showing whatever coordinates happened to be in
+  -- its own settings file, which on a fresh install is 0, 64, 0 -- and it is
+  -- what "home" means on the flight page.
+  local home = nil
+  if app.cfg.baseX then
+    home = { x = app.cfg.baseX, y = app.cfg.baseY, z = app.cfg.baseZ,
+             d = app.cfg.baseDim }
+  end
+
   return pcall(rednet.broadcast, {
     t = "s",
     c = packPos(app.centre),
@@ -173,6 +183,7 @@ function link:sendScan(app)
     g = app.headingRaw,
     e = app.scanError,
     i = config.scanInterval(app.cfg),
+    h = home,
     l = list,
   }, link.PROTOCOL)
 end
@@ -189,6 +200,30 @@ end
 
 -- ------------------------------------------------------------ receiving ---
 
+--- Takes the main base's own coordinates off a relayed sweep.
+---
+--- Written into the ordinary base settings rather than kept somewhere
+--- separate, so everything that already reads them -- the status page, the
+--- flight page's way home -- needs no special case for being a mobile. Only
+--- written when they actually change, or a save would run every sweep.
+---@return boolean changed
+function link:applyHome(app, message)
+  if not app.cfg.baseFollow then return false end
+  local home = unpackPos(message.h)
+  if not home then return false end
+
+  local cfg = app.cfg
+  if cfg.baseX == home.x and cfg.baseY == home.y and cfg.baseZ == home.z
+     and cfg.baseDim == home.dimension then
+    return false
+  end
+
+  cfg.baseX, cfg.baseY, cfg.baseZ = home.x, home.y, home.z
+  cfg.baseDim = home.dimension
+  app:saveConfig()
+  return true
+end
+
 function link:applyScan(app, message)
   local centre = unpackPos(message.c)
 
@@ -204,6 +239,8 @@ function link:applyScan(app, message)
   self.lastAt = os.clock()
   self.interval = tonumber(message.i)
   self.headingRaw = tonumber(message.g)
+
+  self:applyHome(app, message)
 
   app:applyScan(unpackPos(message.p), contacts, centre,
     type(message.e) == "string" and message.e or nil)

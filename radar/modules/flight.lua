@@ -28,11 +28,84 @@ local floor, max = math.floor, math.max
 view.defaults = {
   -- On a fixed base this is a page about nothing: the readings would all be
   -- zero. It is switched on by the profiles that move -- see radar/profiles.
-  flightHome = true,   -- draw the bearing and ETA back to the base
+  flightHome = true,   -- draw the bearing and ETA to the destination
+
+  -- Where you are going. "home" is the base coordinates, "custom" is the
+  -- waypoint below, and anything else is "contact:<name>" -- a moving target,
+  -- re-read from the contact list on every draw.
+  flightTarget = "home",
+  flightX = nil, flightY = nil, flightZ = nil,
 }
 
 function view.sanitise(cfg)
   cfg.flightHome = cfg.flightHome ~= false
+
+  local target = cfg.flightTarget
+  if type(target) ~= "string" or #target == 0 then
+    cfg.flightTarget = "home"
+  elseif target ~= "home" and target ~= "custom"
+     and not target:match("^contact:.") then
+    cfg.flightTarget = "home"
+  end
+
+  for _, axis in ipairs({ "flightX", "flightY", "flightZ" }) do
+    local value = tonumber(cfg[axis])
+    cfg[axis] = value and floor(value) or nil
+  end
+  -- A waypoint needs two of the three to be a place at all; the height is
+  -- optional, since a bearing does not use it.
+  if not (cfg.flightX and cfg.flightZ) and cfg.flightTarget == "custom" then
+    cfg.flightTarget = "home"
+  end
+end
+
+-- ------------------------------------------------------------ destination ---
+
+--- Where the panel is pointing, resolved fresh every draw so a contact target
+--- follows the contact rather than freezing where it was chosen.
+---@return table|nil { label, x, z, y, moving, lost }
+function view.destination(app)
+  local cfg = app.cfg
+  local target = cfg.flightTarget or "home"
+
+  if target == "home" then
+    if not cfg.baseX then return nil end
+    return { label = "HOME", x = cfg.baseX, y = cfg.baseY, z = cfg.baseZ }
+  end
+
+  if target == "custom" then
+    if not (cfg.flightX and cfg.flightZ) then return nil end
+    return { label = "WPT", x = cfg.flightX, y = cfg.flightY, z = cfg.flightZ }
+  end
+
+  local name = target:match("^contact:(.+)$")
+  if not name then return nil end
+
+  for _, contact in ipairs(app.contacts) do
+    if contact.name == name then
+      return {
+        label = util.shorten(name, 7), x = contact.x, y = contact.y,
+        z = contact.z, moving = true,
+      }
+    end
+  end
+  -- Chosen, but not on the current sweep: out of range, logged off, or in
+  -- another dimension. Saying so beats silently falling back to home.
+  return { label = util.shorten(name, 7), lost = true }
+end
+
+--- A label for the destination row, for the settings page.
+function view.destinationLabel(app)
+  local target = app.cfg.flightTarget or "home"
+  if target == "home" then
+    return app.cfg.baseX and "HOME - the base coordinates" or "HOME - not set yet"
+  end
+  if target == "custom" then
+    if not (app.cfg.flightX and app.cfg.flightZ) then return "a waypoint - not set" end
+    return ("waypoint %d, %d"):format(app.cfg.flightX, app.cfg.flightZ)
+  end
+  local name = target:match("^contact:(.+)$")
+  return name and ("contact - " .. name) or target
 end
 
 function view.attach(app)
@@ -82,9 +155,11 @@ local function readings(app, wide)
 
   -- Where you are looking, and where you are actually going. On an airship
   -- being pushed sideways these differ, which is the point of showing both.
-  push("HDG", app.heading and flightLib.formatBearing(app.heading) or "---",
+  -- Both carry their compass point: reading a heading off a number takes a
+  -- moment, and off "SW" it does not.
+  push("HDG", app.heading and flightLib.formatCompass(app.heading) or "---",
     app.heading and theme.accent or theme.dim)
-  push("CRS", model.course and flightLib.formatBearing(model.course) or "---",
+  push("CRS", model.course and flightLib.formatCompass(model.course) or "---",
     model.moving and theme.accent or theme.dim)
 
   local drift = model:drift(app.heading)
@@ -98,14 +173,24 @@ local function readings(app, wide)
     pos and theme.text or theme.dim)
 
   if cfg.flightHome then
-    local distance, _, compass = model:home(cfg)
-    if distance then
-      push("HOME", util.distanceLabel(distance), theme.text)
-      push("BRG", compass or "--", theme.accent)
-      local eta = model:eta(distance)
-      push("ETA", flightLib.formatEta(eta), eta and theme.text or theme.dim)
+    local destination = view.destination(app)
+    if not destination then
+      push("DEST", "not set", theme.dim)
+    elseif destination.lost then
+      -- A contact that has gone off the sweep. Its name stays on the panel so
+      -- it is obvious what is being waited for.
+      push(destination.label, "lost", theme.warn)
     else
-      push("HOME", "not set", theme.dim)
+      local distance, _, compass = model:vectorTo(destination.x, destination.z)
+      if distance then
+        push(destination.label, util.distanceLabel(distance),
+          destination.moving and theme.warn or theme.text)
+        push("BRG", compass or "--", theme.accent)
+        local eta = model:eta(distance)
+        push("ETA", flightLib.formatEta(eta), eta and theme.text or theme.dim)
+      else
+        push(destination.label, "--", theme.dim)
+      end
     end
   end
 
@@ -213,16 +298,62 @@ end
 
 function view.settings(ctx)
   local app = ctx.app
+  local cfg = app.cfg
 
   ctx.heading("FLIGHT")
 
-  ctx.row("Way home", function() return ctx.onOff(app.cfg.flightHome) end, function()
-    app.cfg.flightHome = not app.cfg.flightHome
-    app:saveConfig()
-  end, ctx.onOffColor(function() return app.cfg.flightHome end))
+  ctx.row("Destination", function() return view.destinationLabel(app) end, function()
+    local entries = {
+      { label = ctx.withHint("HOME", "the base coordinates"), value = "home" },
+    }
 
-  ctx.note("Distance, bearing and ETA back to the base coordinates "
-    .. "under TRACKING.")
+    -- Every contact currently on the sweep, so picking one is a matter of
+    -- recognising the name rather than typing coordinates.
+    for _, contact in ipairs(app.contacts) do
+      entries[#entries + 1] = {
+        label = ("%s   %s %s"):format(util.shorten(contact.name, 14),
+          util.distanceLabel(contact.dist), contact.dir),
+        value = "contact:" .. contact.name,
+      }
+    end
+
+    entries[#entries + 1] = {
+      label = ctx.withHint("Waypoint", "the coordinates below"), value = "custom",
+    }
+
+    ctx.openPicker("FLY TO", entries, cfg.flightTarget, function(value)
+      cfg.flightTarget = value
+      app:saveConfig()
+      if value == "custom" and not (cfg.flightX and cfg.flightZ) then
+        ctx.root:toast("Set the waypoint coordinates below", "info")
+      end
+      ctx.rebuild()
+    end)
+  end, function()
+    local destination = view.destination(app)
+    if not destination then return theme.warn end
+    if destination.lost then return theme.warn end
+    return destination.moving and theme.accent or theme.text
+  end)
+
+  ctx.note("HOME, anyone on the contact list, or a waypoint. A contact is "
+    .. "followed as it moves.")
+
+  -- The waypoint boxes only exist while a waypoint is what is selected;
+  -- three empty inputs on a page about flying would be clutter otherwise.
+  if cfg.flightTarget == "custom" then
+    ctx.coords("Waypoint XYZ", { "flightX", "flightY", "flightZ" }, function()
+      app:saveConfig()
+      ctx.root:toast("Waypoint set", "success")
+    end)
+  end
+
+  ctx.row("Show the way", function() return ctx.onOff(cfg.flightHome) end, function()
+    cfg.flightHome = not cfg.flightHome
+    app:saveConfig()
+  end, ctx.onOffColor(function() return cfg.flightHome end))
+
+  ctx.note("Distance, bearing and ETA to the destination.")
 
   ctx.row("Reading", function()
     local model = app.flight

@@ -332,14 +332,30 @@ extra server calls, and a full panel on a computer carrying only a modem.
 |---|---|
 | `SPD` | ground speed, blocks per second |
 | `VS` | vertical speed — climb positive, descent negative |
-| `HDG` | **heading**: the way you are looking |
-| `CRS` | **course**: the way you are actually going |
+| `HDG` | **heading**: the way you are looking, as `210 SW` |
+| `CRS` | **course**: the way you are actually going, the same way |
 | `DFT` | the angle between them, on screens with room for it |
 | `ALT` | altitude |
-| `HOME` `BRG` `ETA` | distance, compass bearing and time back to the base coordinates |
+| `HOME` `BRG` `ETA` | distance, compass bearing and time to the destination |
 
 Showing both `HDG` and `CRS` is the point of it: on an airship being pushed
-sideways they differ, and the gap is the drift.
+sideways they differ, and the gap is the drift. Both carry their compass point,
+because reading a heading off a number takes a moment and off `SW` it does not.
+
+### Where you are going
+
+**Settings → Flight → Destination** picks one of three, and the row is
+relabelled to match:
+
+| | |
+|---|---|
+| `HOME` | the base coordinates under *Tracking* |
+| a **contact** | anyone on the contact list, chosen by name. Re-read on every draw, so the panel **follows them as they move** — and says `lost` rather than quietly falling back to home if they leave the sweep |
+| `WPT` | coordinates you type in |
+
+On a MOBILE the base coordinates **come from the main base itself** — see
+below — so `HOME` points at somewhere real without anything being kept in step
+by hand.
 
 ### What it cannot know
 
@@ -666,6 +682,7 @@ listening, and announces itself whether or not anyone is.
 | | |
 |---|---|
 | **Contacts** | always. Only positions — distance, bearing, altitude band and colour are rebuilt at the far end by the same code that computes them locally. |
+| **Where the base is** | always. A mobile has no other way of knowing, and was otherwise left with whatever was in its own settings file — `0, 64, 0` on a fresh install, which points *home* at the world origin. It lands in the ordinary base coordinates, so the status page and the flight page need no special case. Turn it off with *Settings → Tracking → Follow base*. |
 | **Weather** | *Settings → Link → Relay weather*. Only the raw detector readings; the sky, palette and scenery are rebuilt on the mobile from the same code, so the page is identical without a pixel crossing the network. Off by default. |
 | **Power** | *Settings → Power → Relay to mobiles*. The merged totals from the main base and every power client. On by default. |
 
@@ -783,7 +800,7 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 135 checks
+lua preview/smoke-test.lua .        # 139 checks
 lua preview/install-test.lua .      # 16 checks
 lua preview/render-preview.lua . preview
 ```
@@ -841,6 +858,11 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.3.** A mobile now takes its **base coordinates from the main base** it is
+paired with, instead of being left pointing *home* at `0, 64, 0`. The flight
+page can be aimed at **home, any contact, or a typed-in waypoint** — a contact
+target follows them as they move. `HDG` and `CRS` carry their compass point.
 
 **v8.2.** A **Flight** page — speed, climb, heading, course, altitude and the
 way home, all derived from the pilot's position as it changes, so it needs no

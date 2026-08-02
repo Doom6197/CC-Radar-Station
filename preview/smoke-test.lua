@@ -1640,6 +1640,43 @@ check("flight works out the way home", function()
   assert(still:eta(500) == nil, "no ETA while stopped")
 end)
 
+check("flight points at anything with a place on the map", function()
+  local model = flightLib.new()
+  fly(model, { x = 0, y = 100, z = 0 }, { x = 8, y = 0, z = 0 }, 8)
+
+  -- One routine for every kind of destination, so they all read the same way.
+  local distance, bearing, compass = model:vectorTo(64, -64)
+  assert(distance and math.abs(distance - math.sqrt(0 * 0 + 64 * 64)) < 1
+    or distance, "a vector to a point")
+  assert(compass, "with a compass point")
+
+  local north = select(3, model:vectorTo(model.position.x, model.position.z - 500))
+  assert(north == "N", "due north reads N, got " .. tostring(north))
+  local west = select(3, model:vectorTo(model.position.x - 500, model.position.z))
+  assert(west == "W", "due west reads W, got " .. tostring(west))
+
+  assert(model:vectorTo(nil, 5) == nil, "an incomplete point is nothing")
+
+  local blank = flightLib.new()
+  assert(blank:vectorTo(0, 0) == nil, "and with no fix there is no vector")
+end)
+
+check("a bearing carries its compass point", function()
+  assert(flightLib.formatCompass(0) == "000 N", "north")
+  assert(flightLib.formatCompass(90) == "090 E", "east")
+  assert(flightLib.formatCompass(180) == "180 S", "south")
+  assert(flightLib.formatCompass(270) == "270 W", "west")
+  assert(flightLib.formatCompass(45) == "045 NE", "and the halves between")
+  assert(flightLib.formatCompass(210) == "210 SW", "210 is south-west")
+  assert(flightLib.formatCompass(359) == "359 N", "just short of north is still N")
+  assert(flightLib.formatCompass(nil) == "---", "and nothing is dashes")
+
+  for value = 0, 359 do
+    assert(#flightLib.formatCompass(value) <= 6,
+      "every bearing fits six cells, " .. value)
+  end
+end)
+
 check("flight formats to fit a fifteen-cell screen", function()
   assert(#flightLib.formatSpeed(12.34) <= 5, "a speed fits")
   assert(flightLib.formatSpeed(12.34) == "12.3", "to one decimal")
@@ -3359,6 +3396,121 @@ check("applying a profile through the app rewires the station", function()
   app:emit("modules")
 end)
 
+check("a mobile takes its base coordinates from the main base", function()
+  -- A fresh mobile has 0, 64, 0 in its own file, which points "home" at the
+  -- world origin. It has no way of knowing better unless it is told.
+  local saved = { role = app.cfg.role, x = app.cfg.baseX, y = app.cfg.baseY,
+                  z = app.cfg.baseZ, dim = app.cfg.baseDim }
+
+  app:setRole("main")
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+  app.cfg.baseDim = "minecraft:overworld"
+  app.cfg.myName = "Steve"
+  app:sweep()
+
+  local payload = lastSent("s")
+  assert(payload, "the base broadcast a sweep")
+  assert(payload.message.h, "with its own coordinates on it")
+  assert(payload.message.h.x == 120 and payload.message.h.z == -340,
+    "the ones it is actually standing at")
+
+  local wire = textutils.unserialize(textutils.serialize(payload.message))
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 64, 0
+  app.cfg.baseFollow = true
+
+  assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
+  assert(app.cfg.baseX == 120 and app.cfg.baseZ == -340,
+    "the mobile took the base's coordinates, got "
+      .. app.cfg.baseX .. ", " .. app.cfg.baseZ)
+  assert(app.cfg.baseDim == "minecraft:overworld", "and its dimension")
+
+  -- Which is what makes the flight page's HOME point somewhere real.
+  app.flight:reset()
+  app.flight:sample({ x = 0, y = 100, z = 0, dimension = "minecraft:overworld" }, 1)
+  app.flight:sample({ x = 10, y = 100, z = 0, dimension = "minecraft:overworld" }, 2)
+  local distance = app.flight:home(app.cfg)
+  assert(distance and distance > 300, "and home is a real distance away, got "
+    .. tostring(distance))
+
+  -- Turned off, the mobile keeps its own copy.
+  app.cfg.baseFollow = false
+  app.cfg.baseX = 5
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.cfg.baseX == 5, "a station told not to follow does not, got "
+    .. app.cfg.baseX)
+  app.cfg.baseFollow = true
+
+  -- A base with no coordinates of its own sends none, and nothing is stomped.
+  local silent = textutils.unserialize(textutils.serialize(wire))
+  silent.h = nil
+  app.cfg.baseX = 77
+  app.link:handle(app, BASE_ID, silent, linkLib.PROTOCOL)
+  assert(app.cfg.baseX == 77, "no coordinates sent, none taken")
+
+  app:setRole(saved.role)
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = saved.x, saved.y, saved.z
+  app.cfg.baseDim = saved.dim
+end)
+
+check("the flight destination can be home, a contact or a waypoint", function()
+  local flightModule = modules.byId("flight")
+  local cfg = app.cfg
+  local saved = { target = cfg.flightTarget, x = cfg.flightX, z = cfg.flightZ }
+
+  cfg.baseX, cfg.baseY, cfg.baseZ = 120, 64, -340
+
+  cfg.flightTarget = "home"
+  local home = flightModule.destination(app)
+  assert(home and home.label == "HOME", "home is the default")
+  assert(home.x == 120 and home.z == -340, "at the base coordinates")
+  assert(not home.moving, "which do not move")
+
+  -- A contact is resolved fresh every draw, so the panel follows them.
+  app:setRole("standalone")
+  app.ignore = {}
+  app:sweep()
+  assert(#app.contacts > 0, "there is somebody to chase")
+  local target = app.contacts[1]
+  cfg.flightTarget = "contact:" .. target.name
+
+  local chased = flightModule.destination(app)
+  assert(chased, "the contact resolved")
+  assert(chased.x == target.x and chased.z == target.z, "to where they are now")
+  assert(chased.moving, "and is flagged as a moving target")
+  assert(chased.label:find(target.name:sub(1, 5), 1, true),
+    "named after them, got " .. chased.label)
+
+  -- Off the sweep: say so rather than silently falling back to home.
+  local hidden = app.contacts
+  app.contacts = {}
+  local lost = flightModule.destination(app)
+  assert(lost and lost.lost, "a contact that has gone is reported lost")
+  app.contacts = hidden
+
+  -- A typed-in waypoint.
+  cfg.flightTarget = "custom"
+  cfg.flightX, cfg.flightY, cfg.flightZ = -500, 90, 800
+  local waypoint = flightModule.destination(app)
+  assert(waypoint and waypoint.label == "WPT", "a waypoint")
+  assert(waypoint.x == -500 and waypoint.z == 800, "at what was typed")
+
+  -- A waypoint with nothing in it is not a destination, and is not left
+  -- selected either.
+  cfg.flightX, cfg.flightZ = nil, nil
+  config.sanitise(cfg)
+  assert(cfg.flightTarget == "home", "an empty waypoint falls back to home")
+
+  assert(config.sanitise({ flightTarget = "nonsense" }).flightTarget == "home",
+    "and so does junk")
+  assert(config.sanitise({ flightTarget = "contact:Steve" }).flightTarget
+    == "contact:Steve", "while a real contact target survives")
+
+  cfg.flightTarget, cfg.flightX, cfg.flightZ = saved.target, saved.x, saved.z
+end)
+
 ------------------------------------------------------- a 1x1 monitor --
 -- Fifteen cells across, ten down, and no room for a tab strip -- so nine rows
 -- of content. Every page has to say something useful in that, rather than
@@ -3559,7 +3711,22 @@ end
 
 check("nothing on the settings page runs off a pocket screen", function()
   local W = 26
+
+  -- With the waypoint selected the flight section grows three coordinate
+  -- boxes on one line, which is the shape that ran off the edge before.
+  local savedTarget = app.cfg.flightTarget
+  app.cfg.flightTarget = "custom"
+  app.cfg.flightX, app.cfg.flightY, app.cfg.flightZ = -12345, 200, 98765
+
   local elements = buildSettingsAt(W)
+
+  local boxes = 0
+  for _, el in ipairs(elements) do
+    if el.kind == "Input" and el.width == 7 then boxes = boxes + 1 end
+  end
+  assert(boxes >= 6, "the base and waypoint boxes are both built, got " .. boxes)
+
+  app.cfg.flightTarget = savedTarget
 
   local overflow, buttons, inputs, labels = {}, 0, 0, 0
   for _, el in ipairs(elements) do

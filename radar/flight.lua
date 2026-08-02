@@ -181,16 +181,26 @@ function flight:drift(heading)
   return util.angleDelta(heading, self.course)
 end
 
+--- Distance and bearing from here to a point. Everything that has a place on
+--- the map goes through this -- the base, a contact, a typed-in waypoint --
+--- so they all read the same way.
+---@return number|nil distance
+---@return number|nil bearing
+---@return string|nil compass
+function flight:vectorTo(x, z)
+  local pos = self.position
+  if not pos or not tonumber(x) or not tonumber(z) then return nil end
+  local dx, dz = x - pos.x, z - pos.z
+  return sqrt(dx * dx + dz * dz), util.bearingOf(dx, dz), util.directionOf(dx, dz)
+end
+
 --- Distance and bearing back to the configured base coordinates.
 ---@return number|nil distance
 ---@return number|nil bearing
 ---@return string|nil compass
 function flight:home(cfg)
-  local pos = self.position
-  if not pos or not cfg or not cfg.baseX then return nil end
-  local dx = cfg.baseX - pos.x
-  local dz = cfg.baseZ - pos.z
-  return sqrt(dx * dx + dz * dz), util.bearingOf(dx, dz), util.directionOf(dx, dz)
+  if not cfg or not cfg.baseX then return nil end
+  return self:vectorTo(cfg.baseX, cfg.baseZ)
 end
 
 --- How long to cover `distance` at the current ground speed. Nil when
@@ -245,6 +255,15 @@ end
 function flight.formatBearing(value)
   if type(value) ~= "number" then return "---" end
   return ("%03d"):format(floor(value + 0.5) % 360)
+end
+
+--- A bearing with its compass point: "210 SW". Reading a heading off a number
+--- takes a moment; reading it off a compass point does not, and both together
+--- still fit a fifteen-cell row.
+function flight.formatCompass(value)
+  if type(value) ~= "number" then return "---" end
+  local index = floor((value % 360 + 22.5) / 45) % 8 + 1
+  return ("%s %s"):format(flight.formatBearing(value), util.DIR_NAMES[index])
 end
 
 return flight

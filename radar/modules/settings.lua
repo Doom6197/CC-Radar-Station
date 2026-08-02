@@ -246,6 +246,44 @@ function view.build(container, app, root)
     return button
   end
 
+  --- Three coordinate boxes on one line, under their own label.
+  ---
+  --- Stacked, the label gets its own row and the boxes start hard left; side
+  --- by side they sit in the value column. The old fixed offsets needed 41
+  --- cells and ran off a pocket screen entirely.
+  ---@param keys string[] Three config keys, x then y then z
+  ---@param onCommit function called after any box is entered
+  local function coords(label, keys, onCommit)
+    body:addLabel({ x = 1, y = nextY, text = label, foreground = theme.dim })
+    if narrow then nextY = nextY + 1 end
+
+    local x = narrow and 1 or (LABEL_WIDTH + 1)
+    local boxWidth = narrow and 7 or 8
+    local gap = boxWidth + 1
+
+    for index, key in ipairs(keys) do
+      local box = body:addInput({
+        x = x + (index - 1) * gap, y = nextY,
+        width = boxWidth, height = 1,
+        text = tostring(app.cfg[key] or ""),
+        placeholder = ({ "x", "y", "z" })[index],
+        pattern = "[%d%-]",          -- Input tests each typed character
+
+        background = theme.panel, foreground = theme.text,
+        placeholderColor = theme.line,
+      })
+      box:onEnter(function(self)
+        local value = tonumber(self.text)
+        if value then
+          app.cfg[key] = math.floor(value)
+          if onCommit then onCommit(key, app.cfg[key]) end
+        end
+        refreshRows()
+      end)
+    end
+    nextY = nextY + 1
+  end
+
   --- A full-width text input under its own label. Every one of these was
   --- previously pinned to the label column, which put it off the edge of a
   --- pocket screen.
@@ -322,7 +360,7 @@ function view.build(container, app, root)
   local ctx = {
     app = app, root = root,
     heading = heading, row = row, action = action, note = note, spacer = spacer,
-    input = input, withHint = withHint,
+    input = input, coords = coords, withHint = withHint,
     openPicker = openPicker,
     refreshRows = function() refreshRows() end,
     entriesOf = entriesOf, onOff = onOff, onOffColor = onOffColor,
@@ -459,36 +497,23 @@ function view.build(container, app, root)
 
     note("Press to snap the base to where you stand.")
 
-    -- Three boxes on one line. Stacked, the label gets its own row and the
-    -- boxes start hard left; side by side they sit in the value column. The
-    -- old fixed offsets needed 41 cells and ran off a pocket screen.
-    body:addLabel({ x = 1, y = nextY, text = "Base X Y Z", foreground = theme.dim })
-    if narrow then nextY = nextY + 1 end
-    local coordX = narrow and 1 or (LABEL_WIDTH + 1)
-    local coordW = narrow and 7 or 8
-    local coordGap = coordW + 1
-    for i, axis in ipairs({ "baseX", "baseY", "baseZ" }) do
-      local box = body:addInput({
-        x = coordX + (i - 1) * coordGap, y = nextY,
-        width = coordW, height = 1,
-        text = tostring(cfg[axis] or ""),
-        placeholder = axis:sub(5),
-        pattern = "[%d%-]",          -- Input tests each typed character
+    coords("Base X Y Z", { "baseX", "baseY", "baseZ" }, function()
+      app:saveConfig()
+      root:toast("Base updated", "success")
+    end)
 
-        background = theme.panel, foreground = theme.text,
-        placeholderColor = theme.line,
-      })
-      box:onEnter(function(self)
-        local value = tonumber(self.text)
-        if value then
-          cfg[axis] = math.floor(value)
-          app:saveConfig()
-          root:toast("Base updated", "success")
-        end
-        refreshRows()
-      end)
+    -- A MOBILE is told where its main base stands, so the coordinates above
+    -- stop being something to keep in step by hand. Only worth a row on a
+    -- station that is actually being fed them.
+    if config.isMobile(cfg) then
+      row("Follow base", function() return onOff(cfg.baseFollow) end, function()
+        cfg.baseFollow = not cfg.baseFollow
+        app:saveConfig()
+      end, onOffColor(function() return cfg.baseFollow end))
+
+      note("Take the base coordinates from the main base as it "
+        .. "reports them, instead of keeping a copy here.")
     end
-    nextY = nextY + 1
 
     local nameInput = input("Username", {
       text = cfg.myName or "",
