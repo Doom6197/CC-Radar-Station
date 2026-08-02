@@ -24,10 +24,49 @@ end
 
 --- Reads the operator's own position, if a username is configured.
 function scan.myPosition(kit, cfg)
+  if not kit.detector then return nil end
   if not cfg.myName or #cfg.myName == 0 then return nil end
   local ok, p = pcall(kit.detector.getPlayerPos, cfg.myName)
   if ok and type(p) == "table" and p.x then return p end
   return nil
+end
+
+--- Builds one contact row from a raw position, relative to a centre.
+--- Everything a display needs is derived here rather than stored, so a
+--- position that arrived over the network (see radar.link) produces exactly
+--- the same row a local sweep would.
+---@return table|nil contact
+function scan.contactFrom(centre, name, pos)
+  if not centre or not name or type(pos) ~= "table" or not pos.x then return nil end
+  local dx = pos.x - centre.x
+  local dz = pos.z - centre.z
+  local dy = pos.y - (centre.y or pos.y)
+  local dist = math.sqrt(dx * dx + dz * dz)
+  local zoneLabel, zoneColor, zoneTone = theme.zoneFor(dist)
+  return {
+    name = name,
+    x = pos.x, y = pos.y, z = pos.z,
+    dx = dx, dy = dy, dz = dz,
+    dist    = dist,
+    bearing = util.bearingOf(dx, dz),
+    dir     = util.directionOf(dx, dz),
+    yaw     = tonumber(pos.yaw),
+    health  = tonumber(pos.health),
+    maxHealth = tonumber(pos.maxHealth),
+    dim     = pos.dimension,
+    zone      = zoneLabel,
+    zoneColor = zoneColor,
+    zoneTone  = zoneTone,
+  }
+end
+
+--- Nearest first, ties broken by name so the order never flickers.
+function scan.sort(contacts)
+  table.sort(contacts, function(a, b)
+    if a.dist == b.dist then return a.name < b.name end
+    return a.dist < b.dist
+  end)
+  return contacts
 end
 
 --- Runs one sweep.
@@ -70,36 +109,13 @@ function scan.run(kit, cfg, ignore)
           sameDim = (pos.dimension == centre.dimension)
         end
         if sameDim then
-          local dx = pos.x - centre.x
-          local dz = pos.z - centre.z
-          local dy = pos.y - (centre.y or pos.y)
-          local dist = math.sqrt(dx * dx + dz * dz)
-          local zoneLabel, zoneColor, zoneTone = theme.zoneFor(dist)
-          contacts[#contacts + 1] = {
-            name = name,
-            x = pos.x, y = pos.y, z = pos.z,
-            dx = dx, dy = dy, dz = dz,
-            dist    = dist,
-            bearing = util.bearingOf(dx, dz),
-            dir     = util.directionOf(dx, dz),
-            yaw     = tonumber(pos.yaw),
-            health  = tonumber(pos.health),
-            maxHealth = tonumber(pos.maxHealth),
-            dim     = pos.dimension,
-            zone      = zoneLabel,
-            zoneColor = zoneColor,
-            zoneTone  = zoneTone,
-          }
+          contacts[#contacts + 1] = scan.contactFrom(centre, name, pos)
         end
       end
     end
   end
 
-  table.sort(contacts, function(a, b)
-    if a.dist == b.dist then return a.name < b.name end
-    return a.dist < b.dist
-  end)
-  return myPos, contacts, centre, nil
+  return myPos, scan.sort(contacts), centre, nil
 end
 
 --- Names currently online, for the ignore-list picker.

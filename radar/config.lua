@@ -9,7 +9,7 @@ local biomes = require("radar.biomes")
 
 local config = {}
 
-config.VERSION = "4.0"
+config.VERSION = "5.0"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -25,6 +25,9 @@ config.LEGACY = {
 }
 
 config.MAX_LOG_ENTRIES = 250
+
+-- Station names ride on every announcement, so they are kept short.
+config.MAX_STATION_NAME = 24
 
 config.RANGES = {
   { value = 25,     label = "25" },
@@ -65,6 +68,18 @@ config.HEADING_STEPS = {
 }
 
 config.HEADING_INTERVALS = { 0.25, 0.5, 1, 2 }
+
+-- ------------------------------------------------------------------- roles ---
+-- A ship assembled by Create: Aeronautics is a contraption, not world blocks,
+-- so getPlayersInRange() aboard one comes back empty. getPlayerPos(name) is an
+-- entity lookup and keeps working, so a station on the ground can see the
+-- pilot wherever they fly. BASE detects and relays; SHIP only draws.
+
+config.ROLES = {
+  { id = "station", label = "STATION", hint = "stands alone, no network" },
+  { id = "base",    label = "BASE",    hint = "scans, and relays to a ship" },
+  { id = "ship",    label = "SHIP",    hint = "draws what a base relays" },
+}
 
 -- How long a monitor rests on a page before the rotation moves it along.
 config.CYCLE_INTERVALS = { 5, 10, 15, 20, 30, 45, 60, 120, 300 }
@@ -148,9 +163,21 @@ end
 
 -- --------------------------------------------------------------- defaults ---
 
+--- Name this station announces itself under, before the operator picks one.
+function config.defaultStationName()
+  local id = (os.getComputerID and os.getComputerID()) or 0
+  return "Base " .. tostring(id)
+end
+
 function config.defaults()
   return {
     version = config.VERSION,
+
+    role          = "station",         -- see config.ROLES
+    stationName   = nil,               -- filled in by sanitise
+    relayWeather  = false,             -- a base also relays the environment
+    pairedBaseId  = nil,               -- the one base a ship listens to
+    pairedBaseName = nil,              -- its friendly name, for the UI
 
     myName = nil,
     mode   = "fixed",                    -- "fixed" measures from baseX/Y/Z
@@ -300,6 +327,20 @@ function config.sanitise(cfg)
   if cfg.mode ~= "self" and cfg.mode ~= "fixed" then cfg.mode = "fixed" end
   if type(cfg.myName) ~= "string" or #cfg.myName == 0 then cfg.myName = nil end
 
+  -- A settings file written before v5 has no role at all, and must come out of
+  -- here as a plain stand-alone station with nothing networked turned on.
+  if not indexOfId(config.ROLES, cfg.role) then cfg.role = "station" end
+  if type(cfg.stationName) ~= "string" or #cfg.stationName == 0 then
+    cfg.stationName = config.defaultStationName()
+  end
+  cfg.stationName = cfg.stationName:sub(1, config.MAX_STATION_NAME)
+  cfg.relayWeather = cfg.relayWeather == true
+  local paired = tonumber(cfg.pairedBaseId)
+  cfg.pairedBaseId = paired and math.floor(paired) or nil
+  if type(cfg.pairedBaseName) ~= "string" or #cfg.pairedBaseName == 0 then
+    cfg.pairedBaseName = nil
+  end
+
   if not config.isPage(cfg.terminalPage) then cfg.terminalPage = "status" end
   cfg.tapCycle = cfg.tapCycle ~= false
 
@@ -425,6 +466,35 @@ function config.headingStepLabel(cfg)
 end
 
 function config.isUnlocked(cfg) return cfg.orientation == "heading" end
+
+-- ------------------------------------------------------------------ roles ---
+
+function config.isBase(cfg) return cfg.role == "base" end
+function config.isShip(cfg) return cfg.role == "ship" end
+
+--- Whether this role needs a modem open at all. A STATION never touches the
+--- network, so nothing here can break an install that does not want one.
+function config.usesNetwork(cfg)
+  return cfg.role == "base" or cfg.role == "ship"
+end
+
+function config.role(cfg)
+  for _, entry in ipairs(config.ROLES) do
+    if entry.id == cfg.role then return entry end
+  end
+  return config.ROLES[1]
+end
+
+function config.roleLabel(cfg)
+  local entry = config.role(cfg)
+  return entry.label .. " - " .. entry.hint
+end
+
+--- How a paired base is named in the UI, falling back to its computer id.
+function config.pairedLabel(cfg)
+  if not cfg.pairedBaseId then return nil end
+  return cfg.pairedBaseName or ("computer " .. tostring(cfg.pairedBaseId))
+end
 
 --- One line describing how the scope is oriented. `heading` is the bearing
 --- currently being followed, or nil when the operator's yaw is unreadable.

@@ -75,10 +75,19 @@ end
 function environment.new()
   return setmetatable({
     snapshot = { available = false },
+    readings = nil,        -- raw detector values, which is what gets relayed
     _slowAt = -math.huge,
     _slow = {},
   }, environment)
 end
+
+-- Every field a snapshot is derived from, and nothing that can be recomputed.
+-- This is the whole payload radar.link relays, so the receiving station builds
+-- an identical snapshot without owning a detector.
+environment.READINGS = {
+  "rawTime", "raining", "thundering", "biome", "dimension", "moonId",
+  "skyLight", "blockLight", "dayLight", "slimeChunk",
+}
 
 local function call(dev, method, ...)
   local ok, value = pcall(dev[method], ...)
@@ -93,27 +102,23 @@ end
 function environment:poll(kit, cfg, force)
   local dev = kit.env
   if not dev or not cfg.env then
+    self.readings = nil
     self.snapshot = { available = false, reason = dev and "disabled" or "no detector" }
     return self.snapshot
   end
 
-  local snap = { available = true }
-
   local raw = call(dev, "getTime")
   if type(raw) ~= "number" then
+    self.readings = nil
     self.snapshot = { available = false, reason = "detector error" }
     return self.snapshot
   end
 
-  snap.rawTime = raw
-  snap.tick = math.floor(raw % DAY)
-  snap.day = math.floor(raw / DAY)
-  snap.clock, snap.hour, snap.minute = environment.clockOf(snap.tick)
-  snap.phase = environment.phaseOf(snap.tick)
-  snap.body, snap.bodyProgress = environment.celestial(snap.tick)
-
-  snap.raining = call(dev, "isRaining") == true
-  snap.thundering = call(dev, "isThunder") == true
+  local readings = {
+    rawTime = raw,
+    raining = call(dev, "isRaining") == true,
+    thundering = call(dev, "isThunder") == true,
+  }
 
   local now = os.clock()
   if force or (now - self._slowAt) >= 10 then
@@ -128,15 +133,38 @@ function environment:poll(kit, cfg, force)
     slow.slimeChunk = call(dev, "isSlimeChunk") == true
     self._slow = slow
   end
-  for k, v in pairs(self._slow) do snap[k] = v end
+  for k, v in pairs(self._slow) do readings[k] = v end
+
+  self.readings = readings
+  self.snapshot = environment.fromReadings(readings, cfg)
+  return self.snapshot
+end
+
+--- Everything derived from a set of raw readings. Split out from poll() so a
+--- relayed reading set produces a byte-identical snapshot on a station that
+--- has no Environment Detector of its own.
+function environment.fromReadings(readings, cfg)
+  local raw = type(readings) == "table" and tonumber(readings.rawTime) or nil
+  if not raw then return { available = false, reason = "no readings" } end
+
+  local snap = { available = true }
+  for _, key in ipairs(environment.READINGS) do snap[key] = readings[key] end
+
+  snap.rawTime = raw
+  snap.tick = math.floor(raw % DAY)
+  snap.day = math.floor(raw / DAY)
+  snap.clock, snap.hour, snap.minute = environment.clockOf(snap.tick)
+  snap.phase = environment.phaseOf(snap.tick)
+  snap.body, snap.bodyProgress = environment.celestial(snap.tick)
+  snap.raining = readings.raining == true
+  snap.thundering = readings.thundering == true
 
   snap.biomeName = util.prettyId(snap.biome)
   snap.dimensionName = util.prettyId(snap.dimension)
   snap.kind = dimensionKind(snap.dimension)
   snap.moonName = environment.MOON_NAMES[snap.moonId or 0] or "Unknown"
 
-  snap.scene = environment.describe(snap, cfg.biomeScene)
-  self.snapshot = snap
+  snap.scene = environment.describe(snap, cfg and cfg.biomeScene)
   return snap
 end
 

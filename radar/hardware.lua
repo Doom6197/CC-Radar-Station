@@ -21,22 +21,42 @@ local function looksLikeEnvironmentDetector(p)
      and type(p.getBiome) == "function"
 end
 
+local function looksLikeModem(p)
+  return type(p) == "table"
+     and type(p.transmit) == "function"
+     and type(p.isWireless) == "function"
+end
+
 hardware.looksLikePlayerDetector = looksLikePlayerDetector
 hardware.looksLikeEnvironmentDetector = looksLikeEnvironmentDetector
+hardware.looksLikeModem = looksLikeModem
 
 --- Scans every side and every network name.
----@return table kit { detector, detectorName, env, envName, speakers, monitors }
+---@return table kit { detector, detectorName, env, envName, speakers, monitors, modems, modem }
 function hardware.discover()
   local kit = {
     detector = nil, detectorName = nil,
     env = nil, envName = nil,
     speakers = {},
     monitors = {},          -- { { name = , dev = , scale = } , ... }
+    modems = {},            -- { { name = , dev = , wireless = } , ... }
+    modem = nil, modemName = nil,
   }
+
+  local seenModem = {}
 
   local function consider(name, p)
     if not p then return end
-    if not kit.detector and looksLikePlayerDetector(p) then
+    if looksLikeModem(p) then
+      -- A modem answers on both its side and its network name; the rednet API
+      -- only wants one of them.
+      if not seenModem[name] then
+        seenModem[name] = true
+        local ok, wireless = pcall(p.isWireless)
+        kit.modems[#kit.modems + 1] =
+          { name = name, dev = p, wireless = (ok and wireless) == true }
+      end
+    elseif not kit.detector and looksLikePlayerDetector(p) then
       kit.detector, kit.detectorName = p, name
     elseif not kit.env and looksLikeEnvironmentDetector(p) then
       kit.env, kit.envName = p, name
@@ -65,6 +85,15 @@ function hardware.discover()
   -- Stable ordering, so "monitor 1" stays monitor 1 across rescans and the
   -- per-monitor page settings keep pointing at the same screen.
   table.sort(kit.monitors, function(a, b) return a.name < b.name end)
+
+  -- A wireless or ender modem is what a flying ship needs, so it wins over a
+  -- wired one even if the wired one was found first.
+  table.sort(kit.modems, function(a, b)
+    if a.wireless ~= b.wireless then return a.wireless end
+    return a.name < b.name
+  end)
+  kit.modem = kit.modems[1]
+  kit.modemName = kit.modem and kit.modem.name or nil
   return kit
 end
 

@@ -10,6 +10,7 @@ local basalt = require("basalt")
 local config = require("radar.config")
 local alertsLib = require("radar.alerts")
 local biomes = require("radar.biomes")
+local linkLib = require("radar.link")
 local scan   = require("radar.scan")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
@@ -78,7 +79,35 @@ function view.build(container, app, root)
   local rows = {}        -- refreshed in place, so values never go stale
   local nextY = 1
 
-  local function refreshRows()
+  local refreshRows
+
+  --- Offers whichever base stations have announced themselves lately. Pairing
+  --- is a choice, not a subscription, so two crews on one world never end up
+  --- watching each other's contacts.
+  local function openBasePicker()
+    local found = app.link:knownBases()
+    if #found == 0 then
+      root:toast(app.link.open and "No base stations heard"
+        or (app.link.error or "No modem attached"),
+        app.link.open and "warning" or "error")
+      return
+    end
+    local entries = {}
+    for i, base in ipairs(found) do
+      entries[i] = { label = ("%s   (id %d)"):format(base.name, base.id), value = base.id }
+    end
+    openPicker("BASE STATIONS HEARD", entries, app.cfg.pairedBaseId, function(id)
+      local name
+      for _, base in ipairs(found) do
+        if base.id == id then name = base.name end
+      end
+      app:pairWithBase(id, name)
+      root:toast("Linked to " .. (name or ("computer " .. id)), "success")
+      refreshRows()
+    end)
+  end
+
+  refreshRows = function()
     for _, entry in ipairs(rows) do
       entry.button.text = entry.text()
       if entry.color then entry.button.foreground = entry.color() end
@@ -337,6 +366,109 @@ function view.build(container, app, root)
     end)
 
     note("MAX asks for the largest radius the server permits.")
+    spacer()
+
+    -- link ------------------------------------------------------------------
+    -- Only the rows the chosen role actually uses are built, so the page does
+    -- not grow a networking section for a station that has no network.
+    heading("LINK")
+
+    row("Role", function() return config.roleLabel(cfg) end, function()
+      openPicker("STATION ROLE",
+        entriesOf(config.ROLES,
+          function(r) return r.label .. " - " .. r.hint end,
+          function(r) return r.id end),
+        cfg.role,
+        function(value)
+          app:setRole(value)
+          -- The rest of this section depends on the role, so it is rebuilt
+          -- rather than left showing rows that no longer apply.
+          build()
+        end)
+    end, function() return cfg.role == "station" and theme.text or theme.accent end)
+
+    if cfg.role == "station" then
+      note("STATION is the stand-alone radar, exactly as before.")
+      note("A ship assembled by Create: Aeronautics cannot scan for")
+      note("itself, so pair a BASE on the ground with a SHIP aboard.")
+    else
+      row("Modem", function()
+        if not app.kit.modem then return "not found" end
+        return app.kit.modem.name .. (app.kit.modem.wireless and "  wireless" or "  wired")
+      end, function()
+        app:rescan()
+        root:toast(app.kit.modem and ("Modem: " .. app.kit.modem.name)
+          or "Still no modem", app.kit.modem and "success" or "warning")
+      end, function() return app.kit.modem and theme.good or theme.warn end)
+      note("An ender modem has no range limit and crosses dimensions.")
+    end
+
+    if cfg.role == "base" then
+      body:addLabel({ x = 1, y = nextY, text = "Station name", foreground = theme.dim })
+      local stationInput = body:addInput({
+        x = LABEL_WIDTH + 1, y = nextY, height = 1,
+        width = function(s) return math.max(6, s.parent.width - LABEL_WIDTH - 2) end,
+        text = cfg.stationName,
+        placeholder = "how ships see this base",
+        background = theme.panel, foreground = theme.text,
+        placeholderColor = theme.line,
+      })
+      local function commitStationName(self)
+        app:setStationName(self.text)
+        self.text = cfg.stationName
+      end
+      stationInput:onEnter(commitStationName)
+      stationInput:onBlur(commitStationName)
+      nextY = nextY + 1
+
+      row("Relay weather", function() return onOff(cfg.relayWeather) end, function()
+        app:toggleRelayWeather()
+      end, onOffColor(function() return cfg.relayWeather end))
+
+      note("Also sends the environment, so the ship's weather page works.")
+
+      row("Broadcasting", function()
+        local text = app.link:summary(cfg)
+        return text
+      end, function()
+        app.link:attach(app.kit, cfg)
+        app.link:announce(cfg)
+        root:toast(app.link.open and "Announced on the network"
+          or (app.link.error or "No modem"), app.link.open and "success" or "error")
+      end, function() return app.link.open and theme.good or theme.warn end)
+    end
+
+    if cfg.role == "ship" then
+      row("Paired base", function()
+        return config.pairedLabel(cfg) or "not paired - scan below"
+      end, function()
+        openBasePicker()
+      end, function() return cfg.pairedBaseId and theme.text or theme.warn end)
+
+      action("Scan for base stations", function()
+        if not app.link.open then
+          root:toast(app.link.error or "No modem attached", "error")
+          return
+        end
+        root:toast("Listening for " .. linkLib.SCAN_SECONDS .. " seconds...", "info")
+        -- Listening blocks, so it runs as a schedule and the UI stays live.
+        basalt.schedule(function()
+          sleep(linkLib.SCAN_SECONDS)
+          openBasePicker()
+        end)
+      end)
+
+      row("Link", function() return (app.link:summary(cfg)) end, function()
+        app:checkLink()
+        root:toast((app.link:summary(cfg)), app.link:status(cfg) and "warning" or "success")
+      end, function()
+        local _, healthy = app.link:summary(cfg)
+        return healthy and theme.good or theme.warn
+      end)
+
+      note("A ship needs no Player Detector and no GPS: the base")
+      note("reads the pilot by name, so it sees them in the air.")
+    end
     spacer()
 
     -- alerts ----------------------------------------------------------------
@@ -790,6 +922,8 @@ function view.build(container, app, root)
   return {
     refresh = refreshRows,
     hidden = function() picker.visible = false end,
+    -- Named so the pairing flow can be driven without a keyboard.
+    pickBase = openBasePicker,
   }
 end
 

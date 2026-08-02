@@ -73,6 +73,7 @@ os.day = function() return 142 end
 os.time = function() return 9.5 end
 os.pullEvent = function() error("pullEvent should not run in the harness", 0) end
 os.epoch = function() return 0 end
+os.getComputerID = function() return 3 end
 
 function sleep(_) error("sleep should not run in the harness", 0) end
 
@@ -98,6 +99,35 @@ redstone = {
   getSides = function() return { "top","bottom","left","right","front","back" } end,
   setAnalogOutput = function() end,
 }
+
+-- rednet, as a loopback: everything broadcast lands in SENT, and a test posts
+-- to INBOX whatever it wants the station to have received.
+local REDNET = { open = {}, sent = {}, inbox = {} }
+rednet = {
+  open = function(name) REDNET.open[name] = true end,
+  close = function(name) REDNET.open[name] = nil end,
+  isOpen = function(name) return REDNET.open[name] == true end,
+  broadcast = function(message, protocol)
+    REDNET.sent[#REDNET.sent + 1] = { message = message, protocol = protocol }
+  end,
+  send = function(id, message, protocol)
+    REDNET.sent[#REDNET.sent + 1] = { id = id, message = message, protocol = protocol }
+  end,
+  receive = function(_, _)
+    local entry = table.remove(REDNET.inbox, 1)
+    if not entry then return nil end
+    return entry.id, entry.message, entry.protocol
+  end,
+}
+
+--- Last thing broadcast on a protocol with the given payload type.
+local function lastSent(kind)
+  for i = #REDNET.sent, 1, -1 do
+    local entry = REDNET.sent[i]
+    if type(entry.message) == "table" and entry.message.t == kind then return entry end
+  end
+  return nil
+end
 
 term = {
   setBackgroundColor = function() end, setTextColor = function() end,
@@ -710,8 +740,21 @@ local function fakeEnvironment()
   }
 end
 
+local function fakeModem(wireless)
+  return {
+    __type = "modem",
+    isWireless = function() return wireless end,
+    transmit = function() end,
+    open = function() end,
+    close = function() end,
+    isOpen = function() return false end,
+  }
+end
+
 PERIPHERALS.back = fakeDetector()
 PERIPHERALS.environment_detector_1 = fakeEnvironment()
+PERIPHERALS.modem_0 = fakeModem(false)      -- wired, and found first
+PERIPHERALS.modem_1 = fakeModem(true)       -- ender: what a flying ship needs
 PERIPHERALS.monitor_0 = {
   __type = "monitor",
   setTextScale = function() end,
@@ -729,6 +772,10 @@ check("app boots", function()
   assert(app.kit.env, "environment detector found")
   assert(#app.kit.monitors == 1, "monitor found")
   assert(#app.kit.speakers == 1, "speaker found")
+  assert(#app.kit.modems == 2, "both modems found, got " .. #app.kit.modems)
+  assert(app.kit.modem.name == "modem_1", "the wireless one wins, got " .. app.kit.modem.name)
+  assert(app.cfg.role == "station", "a fresh install stands alone")
+  assert(not app.link.open, "and never opens the modem")
   app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
   app.cfg.baseDim = "minecraft:overworld"
 end)
@@ -1071,6 +1118,320 @@ check("redstone modes behave", function()
   assert(app.alerts:level() == 0, "inverted hold reads zero")
   app.cfg.rs.invert = false
   app.cfg.rs.enabled = false
+end)
+
+--------------------------------------------------------------- base / ship --
+-- One app is flipped between the roles rather than two being built, so a
+-- relayed sweep can be compared field for field against the local sweep that
+-- produced it.
+
+local linkLib = require("radar.link")
+
+local BASE_ID = 12
+local SHIP_PAYLOAD = nil        -- the last scan payload the base broadcast
+local LOCAL_CONTACTS = nil      -- what the base itself drew from it
+
+check("v4 settings sanitise to a stand-alone station", function()
+  local cfg = config.sanitise({ rangeIndex = 4, mode = "self" })
+  assert(cfg.role == "station", "role defaults to station, got " .. tostring(cfg.role))
+  assert(cfg.relayWeather == false, "the weather relay stays off")
+  assert(cfg.pairedBaseId == nil, "nothing is paired")
+  assert(cfg.stationName == "Base 3", "named from the computer id, got " .. cfg.stationName)
+  assert(config.usesNetwork(cfg) == false, "and it never opens a modem")
+
+  local junk = config.sanitise({ role = "wat", stationName = 42,
+    relayWeather = "yes", pairedBaseId = "17.8" })
+  assert(junk.role == "station", "an unknown role falls back")
+  assert(junk.stationName == "Base 3", "a non-string name is replaced")
+  assert(junk.relayWeather == false, "only a real boolean turns the relay on")
+  assert(junk.pairedBaseId == 17, "a paired id is forced to a whole number")
+
+  local long = config.sanitise({ stationName = string.rep("x", 90) })
+  assert(#long.stationName == config.MAX_STATION_NAME, "names are capped")
+end)
+
+check("a station never touches the network", function()
+  local before = #REDNET.sent
+  app.cfg.role = "station"
+  app.link:attach(app.kit, app.cfg)
+  app:sweep()
+  app:pollEnvironment(true)
+  assert(not app.link.open, "the modem stays shut")
+  assert(#REDNET.sent == before, "and nothing was broadcast, got "
+    .. (#REDNET.sent - before) .. " messages")
+end)
+
+check("a base broadcasts every sweep", function()
+  app.ignore = {}
+  app.cfg.myName = "Steve"          -- the pilot, so a position and yaw travel
+  app:setRole("base")
+  assert(app.link.open, "the modem opened: " .. tostring(app.link.error))
+  assert(REDNET.open.modem_1, "on the wireless modem")
+
+  app:sweep()
+  LOCAL_CONTACTS = app.contacts
+  local entry = lastSent("s")
+  assert(entry, "a sweep payload went out")
+  assert(entry.protocol == linkLib.PROTOCOL, "on the data protocol, got "
+    .. tostring(entry.protocol))
+
+  local payload = entry.message
+  assert(#payload.l == #app.contacts,
+    ("%d contacts relayed, %d drawn"):format(#payload.l, #app.contacts))
+  assert(payload.c and payload.c.x == app.centre.x, "the centre travels")
+  assert(payload.p and payload.p.x == 130, "so does the pilot's position")
+  assert(payload.g == 225, "and their heading, got " .. tostring(payload.g))
+  assert(payload.i == config.scanInterval(app.cfg), "and the sweep interval")
+  -- Nothing the far end can work out for itself is on the wire.
+  assert(payload.l[1].dist == nil and payload.l[1].bearing == nil,
+    "derived fields are left off the wire")
+
+  SHIP_PAYLOAD = textutils.unserialize(textutils.serialize(payload))
+
+  -- A base is still a working radar in its own right.
+  assert(#app.contacts == 2, "the base drew its own sweep, got " .. #app.contacts)
+  assert(app.scanError == nil, "with no fault")
+
+  app.link:announce(app.cfg)
+  local hello = lastSent("h")
+  assert(hello and hello.protocol == linkLib.HELLO, "and announces itself")
+  assert(hello.message.n == app.cfg.stationName, "under its own name")
+end)
+
+check("a ship renders a relayed sweep exactly as the base did", function()
+  app:setRole("ship")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.contacts, app.myPos, app.heading = {}, nil, nil
+
+  assert(app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL),
+    "the payload was accepted")
+  assert(#app.contacts == #LOCAL_CONTACTS,
+    ("%d contacts rebuilt, %d expected"):format(#app.contacts, #LOCAL_CONTACTS))
+
+  for i, want in ipairs(LOCAL_CONTACTS) do
+    local got = app.contacts[i]
+    for _, field in ipairs({ "name", "x", "y", "z", "dx", "dy", "dz", "dist",
+                             "bearing", "dir", "zone", "zoneColor", "health",
+                             "maxHealth", "yaw", "dim" }) do
+      assert(got[field] == want[field],
+        ("contact %d %s: got %s, wanted %s"):format(
+          i, field, tostring(got[field]), tostring(want[field])))
+    end
+  end
+
+  assert(app.scanError == nil, "no fault reported: " .. tostring(app.scanError))
+  assert(app.myPos and app.myPos.x == 130, "the pilot's position came across")
+  assert(app.centre and app.centre.x == 120, "and what distances are measured from")
+  assert(app.heading == 225, "and their heading, got " .. tostring(app.heading))
+
+  -- The ship snaps the relayed bearing with its OWN heading step, so two
+  -- screens can be set up differently off one broadcast.
+  local saved = app.cfg.headingStep
+  app.cfg.headingStep = 90
+  app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL)
+  assert(app.heading == 270, "snapped locally, got " .. tostring(app.heading))
+  app.cfg.headingStep = saved
+end)
+
+check("a ship ignores everything but its paired base", function()
+  local stranger = textutils.unserialize(textutils.serialize(SHIP_PAYLOAD))
+  stranger.l = {}
+  local before = #app.contacts
+  assert(before > 0, "there is something to lose")
+
+  assert(app.link:handle(app, BASE_ID + 1, stranger, linkLib.PROTOCOL) == false,
+    "another station's sweep is refused")
+  assert(#app.contacts == before, "and changes nothing")
+
+  -- A beacon from a stranger is still collected: that list is the picker.
+  assert(app.link:handle(app, BASE_ID + 1, { t = "h", n = "Someone else" },
+    linkLib.HELLO), "beacons are heard from anyone")
+  assert(#app.contacts == before, "without touching the contacts")
+
+  -- Junk on the protocol must not take the station down.
+  assert(app.link:handle(app, BASE_ID, "not a table", linkLib.PROTOCOL) == false)
+  assert(app.link:handle(app, BASE_ID, { t = "?" }, linkLib.PROTOCOL) == false)
+  assert(app.link:handle(app, nil, SHIP_PAYLOAD, linkLib.PROTOCOL) == false)
+end)
+
+check("scanning for base stations, then pairing with one", function()
+  app.link.seen = {}
+  app:pairWithBase(nil, nil)
+  assert(config.pairedLabel(app.cfg) == nil, "nothing paired to start with")
+
+  -- What the pump would have collected while the operator waited.
+  app.link:handle(app, BASE_ID, { t = "h", n = "Hangar" }, linkLib.HELLO)
+  app.link:handle(app, 40, { t = "h", n = "Ore Island" }, linkLib.HELLO)
+  app.link:handle(app, 41, { t = "h" }, linkLib.HELLO)
+
+  local found = app.link:knownBases()
+  assert(#found == 3, "three stations heard, got " .. #found)
+  assert(found[1].name == "Computer 41", "sorted by name, got " .. found[1].name)
+  assert(found[2].name == "Hangar" and found[2].id == BASE_ID, "ids kept with names")
+
+  -- Drive the real picker the settings page opens.
+  terminalRoot:setPage("settings", false)
+  local settingsView = terminalRoot.views.settings
+  assert(settingsView.pickBase, "the settings page exposes the base picker")
+  settingsView.pickBase()
+  local items = rawget(terminalRoot.views.settings.container, "_children")
+  local picked = nil
+  local function findItems(element)
+    for _, item in ipairs(rawget(element, "_p").items or {}) do
+      if type(item) == "table" and item.text and item.text:find("Hangar", 1, true) then
+        picked = item
+      end
+    end
+    for _, child in ipairs(rawget(element, "_children") or {}) do findItems(child) end
+  end
+  for _, child in ipairs(items) do findItems(child) end
+  assert(picked, "the picker offered the base by name")
+  picked.callback()
+
+  assert(app.cfg.pairedBaseId == BASE_ID, "paired, got " .. tostring(app.cfg.pairedBaseId))
+  assert(app.cfg.pairedBaseName == "Hangar", "and remembered its name")
+  assert(config.pairedLabel(app.cfg) == "Hangar", "which is what the UI shows")
+
+  -- A base heard long enough ago has probably gone; it drops out of the list.
+  CLOCK = CLOCK + linkLib.SEEN_SECONDS + 1
+  assert(#app.link:knownBases() == 0, "stale beacons are forgotten")
+end)
+
+check("silence from the paired base is reported as a lost link", function()
+  app.link:forget()
+  app:pairWithBase(BASE_ID, "Hangar")
+
+  -- Nothing heard yet.
+  app:sweep()
+  assert(app.scanError and app.scanError:find("Waiting for Hangar", 1, true),
+    "says what it is waiting for, got " .. tostring(app.scanError))
+
+  app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL)
+  app:sweep()
+  assert(app.scanError == nil, "a fresh sweep clears it: " .. tostring(app.scanError))
+  assert(#app.contacts > 0, "and there is something to draw")
+
+  -- The base said it sweeps once a second, so the tolerance is measured off
+  -- that rather than off this ship's own interval.
+  assert(app.link.interval == 1, "the base's interval came across, got "
+    .. tostring(app.link.interval))
+  assert(app.link:staleAfter(app.cfg) == 3,
+    "two sweeps, floored at three seconds, got " .. app.link:staleAfter(app.cfg))
+
+  -- One missed sweep is not a lost link.
+  CLOCK = CLOCK + 2
+  app:sweep()
+  assert(app.scanError == nil, "a single missed sweep is tolerated: "
+    .. tostring(app.scanError))
+
+  CLOCK = CLOCK + 3
+  app:sweep()
+  assert(app.scanError and app.scanError:find("Link lost", 1, true),
+    "the link is called lost, got " .. tostring(app.scanError))
+  assert(#app.contacts == 0, "and the scope is cleared rather than left stale")
+
+  local summary, healthy = app.link:summary(app.cfg)
+  assert(not healthy and summary:find("Link lost", 1, true), "the status line agrees")
+
+  -- Unpaired and modem-less ships say so just as plainly.
+  app:pairWithBase(nil, nil)
+  app:sweep()
+  assert(app.scanError:find("No base station paired", 1, true),
+    "an unpaired ship says so, got " .. app.scanError)
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.link:close()
+  app:sweep()
+  assert(app.scanError:find("modem", 1, true),
+    "a ship with no modem says so, got " .. app.scanError)
+  app.link:attach(app.kit, app.cfg)
+end)
+
+check("the weather relay rebuilds an identical snapshot", function()
+  app:setRole("base")
+  app.cfg.relayWeather = false
+  app:pollEnvironment(true)
+  local baseSnap = app:snapshot()
+  assert(baseSnap.available, "the base has a snapshot")
+  assert(lastSent("e") == nil, "nothing relayed while the relay is off")
+
+  app.cfg.relayWeather = true
+  app:pollEnvironment(true)
+  local entry = lastSent("e")
+  assert(entry, "the readings went out once it was on")
+  assert(entry.protocol == linkLib.PROTOCOL, "on the data protocol")
+  assert(entry.message.r.scene == nil and entry.message.r.palette == nil,
+    "raw readings only -- the scene is rebuilt, not shipped")
+
+  local payload = textutils.unserialize(textutils.serialize(entry.message))
+
+  app:setRole("ship")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.env.snapshot = { available = false }
+  assert(app.link:handle(app, BASE_ID, payload, linkLib.PROTOCOL), "accepted")
+
+  local shipSnap = app:snapshot()
+  assert(shipSnap.available, "the ship has a snapshot without a detector")
+  for _, field in ipairs({ "rawTime", "tick", "day", "clock", "phase", "body",
+                           "raining", "thundering", "biome", "biomeName",
+                           "dimension", "kind", "moonId", "moonName",
+                           "skyLight", "blockLight", "dayLight", "slimeChunk" }) do
+    assert(shipSnap[field] == baseSnap[field],
+      ("%s: got %s, wanted %s"):format(field, tostring(shipSnap[field]),
+        tostring(baseSnap[field])))
+  end
+  assert(shipSnap.scene.weather == baseSnap.scene.weather, "same weather")
+  assert(shipSnap.scene.groundKind == baseSnap.scene.groundKind, "same ground")
+  assert(#shipSnap.scene.palette == 10, "and a full scene palette to draw it")
+
+  -- While the relay is fresh the ship leaves its own detector alone.
+  local polled = false
+  local realGetTime = PERIPHERALS.environment_detector_1.getTime
+  PERIPHERALS.environment_detector_1.getTime = function()
+    polled = true
+    return realGetTime()
+  end
+  app:pollEnvironment(false)
+  assert(not polled, "a fresh relay stops the local poll")
+  assert(app:snapshot().clock == baseSnap.clock, "and keeps the relayed snapshot")
+
+  CLOCK = CLOCK + 60
+  app:pollEnvironment(false)
+  assert(polled, "a stale relay falls back to whatever is attached")
+  PERIPHERALS.environment_detector_1.getTime = realGetTime
+end)
+
+check("every page draws in the base and ship roles", function()
+  local sizes = { { 15, 10 }, { 51, 19 }, { 82, 40 } }
+  local scenarios = {
+    { name = "ship-live",  role = "ship", feed = true },
+    { name = "ship-lost",  role = "ship", feed = false },
+    { name = "base",       role = "base", feed = false },
+  }
+  for _, scenario in ipairs(scenarios) do
+    app:setRole(scenario.role)
+    app:pairWithBase(BASE_ID, "Hangar")
+    if scenario.feed then
+      app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL)
+    else
+      app:sweep()
+    end
+    for _, root in ipairs(roots) do
+      for _, page in ipairs(root.pages) do
+        root:setPage(page, false)
+        for _, size in ipairs(sizes) do
+          rawget(root.root, "_p").width = size[1]
+          rawget(root.root, "_p").height = size[2]
+          root:refreshChrome()
+          local label = ("%s %s %dx%d %s"):format(
+            root.monitor and "monitor" or "terminal", page, size[1], size[2], scenario.name)
+          local buffer = newBuffer(size[1], size[2], label)
+          local ok, err = pcall(drawTree, root.root, buffer)
+          if not ok then error(label .. ": " .. tostring(err), 0) end
+        end
+      end
+    end
+  end
+  app:setRole("station")
 end)
 
 --------------------------------------------------------------------- report --

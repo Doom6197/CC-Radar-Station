@@ -90,6 +90,13 @@ function view.build(container, app)
       app.kit.env and "env ok" or "no env"),
       app.kit.env and theme.text or theme.warn)
 
+    -- A stand-alone station has no link to report, and saying so every time
+    -- would only take a row away from everything that does matter.
+    if config.usesNetwork(app.cfg) then
+      local summary, healthy = app.link:summary(app.cfg)
+      ly = row(leftX, ly, "Link", summary, healthy and theme.good or theme.warn)
+    end
+
     if app.scanError then
       ly = row(leftX, ly, "Fault", app.scanError, theme.alarm)
     end

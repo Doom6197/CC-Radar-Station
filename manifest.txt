@@ -1,4 +1,4 @@
-# Radar Station v4 - files the in-game installer downloads.
+# Radar Station v5 - files the in-game installer downloads.
 # One path per line, relative to the repository root.
 # Blank lines and lines starting with # are ignored.
 
@@ -10,6 +10,7 @@ radar/config.lua
 radar/environment.lua
 radar/glyphs.lua
 radar/hardware.lua
+radar/link.lua
 radar/logbook.lua
 radar/pixel.lua
 radar/scan.lua

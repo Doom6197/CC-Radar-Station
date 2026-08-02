@@ -8,6 +8,9 @@
 --   "anim"    animation frame; only fired while something animated is visible
 --   "config"  settings changed and were written to disk
 --
+-- A SHIP fills the same tables and fires the same events from what a base
+-- relays instead of from a detector, so no view can tell the difference.
+--
 -- Every loop runs as a Basalt schedule, so sleep() is legal inside them and
 -- the UI stays responsive throughout.
 
@@ -18,6 +21,7 @@ local scan        = require("radar.scan")
 local logbook     = require("radar.logbook")
 local alertsLib   = require("radar.alerts")
 local environment = require("radar.environment")
+local linkLib     = require("radar.link")
 local util        = require("radar.util")
 
 local app = {}
@@ -50,6 +54,7 @@ function app.new()
     lastScanAt = 0,
 
     heading = nil,        -- bearing the operator faces, nil when unreadable
+    headingRaw = nil,     -- before snapping; what a base relays to a ship
     headingShown = nil,   -- eased toward `heading`; what actually gets drawn
 
     anim = 0,
@@ -61,6 +66,8 @@ function app.new()
 
   self.env = environment.new()
   self.alerts = alertsLib.new(cfg, self.kit)
+  self.link = linkLib.new()
+  self.link:attach(self.kit, cfg)
   return self
 end
 
@@ -109,6 +116,7 @@ function app:saveIgnore() config.saveIgnore(self.ignore) end
 function app:rescan()
   self.kit = hardware.discover()
   self.alerts:setKit(self.kit)
+  self.link:attach(self.kit, self.cfg)
   for _, monitor in ipairs(self.kit.monitors) do
     if not self.cfg.displays[monitor.name] then
       self.cfg.displays[monitor.name] = config.displayDefaults()
@@ -141,15 +149,15 @@ function app:rotation()
   return self.cfg.rotation
 end
 
---- Re-reads the operator's yaw.
+--- Takes a raw bearing -- read locally, or relayed by a base -- and snaps it
+--- to this station's own heading step.
 ---@return boolean changed True when the snapped heading moved
-function app:readHeading()
-  local pos = scan.myPosition(self.kit, self.cfg)
-  local raw = pos and util.headingOf(pos.yaw) or nil
+function app:applyHeading(raw)
   local heading = raw and util.snapAngle(raw, self.cfg.headingStep) or nil
 
   local changed = heading ~= self.heading
   self.heading = heading
+  self.headingRaw = raw
 
   -- Without smoothing, or with nothing running the animation loop, the drawn
   -- value has to follow immediately or the scope would never turn at all.
@@ -158,6 +166,18 @@ function app:readHeading()
     self.headingShown = heading
   end
   return changed
+end
+
+--- Re-reads the operator's yaw.
+---@return boolean changed True when the snapped heading moved
+function app:readHeading()
+  -- A ship has no detector to ask; the pilot's yaw arrives with every relayed
+  -- sweep, which is exactly what "heading up" on a moving scope needs.
+  if config.isShip(self.cfg) then
+    return self:applyHeading(self.link.headingRaw)
+  end
+  local pos = scan.myPosition(self.kit, self.cfg)
+  return self:applyHeading(pos and util.headingOf(pos.yaw) or nil)
 end
 
 --- Advances the eased heading one animation frame.
@@ -197,11 +217,15 @@ function app:processDetections(contacts, hadError)
   self:emit("contact", arrivals)
 end
 
-function app:sweep()
-  local myPos, contacts, centre, err = scan.run(self.kit, self.cfg, self.ignore)
+--- Publishes a finished contact list, wherever it came from. A sweep run here
+--- and a sweep relayed by a base land in exactly the same state, which is why
+--- no view has to know which one it is looking at.
+function app:applyScan(myPos, contacts, centre, err)
   self.scanError = err
   self.myPos = myPos
   self.centre = centre or self.centre
+  -- A detector that blinks keeps the last good list rather than emptying the
+  -- scope; only a lost link clears it, and does so before calling in.
   if not err then self.contacts = contacts end
 
   self.alerts.contacts = self.contacts
@@ -211,8 +235,37 @@ function app:sweep()
   self:emit("scan")
 end
 
+--- On a ship there is nothing to sweep: the contacts arrive over the network.
+--- This runs on the same timer purely to notice that they have stopped.
+function app:checkLink()
+  local problem = self.link:status(self.cfg)
+  if not problem then return end
+  -- Stale contacts drawn as if they were live are worse than an empty scope.
+  self.contacts = {}
+  self:applyScan(nil, {}, self.centre, problem)
+end
+
+function app:sweep()
+  if config.isShip(self.cfg) then return self:checkLink() end
+
+  local myPos, contacts, centre, err = scan.run(self.kit, self.cfg, self.ignore)
+  self:applyScan(myPos, contacts, centre, err)
+
+  -- The pilot's yaw comes free with their position, so a base can relay a
+  -- heading even while its own scope sits locked to a fixed bearing.
+  if myPos then self.headingRaw = util.headingOf(myPos.yaw) end
+  if config.isBase(self.cfg) then self.link:sendScan(self) end
+end
+
 function app:pollEnvironment(force)
+  -- A ship being fed the weather leaves its own detector alone -- it probably
+  -- has none, and aboard a contraption it would not answer anyway.
+  if config.isShip(self.cfg) and self.link:envFresh(self.cfg) then
+    self:emit("env")
+    return
+  end
   self.env:poll(self.kit, self.cfg, force)
+  if config.isBase(self.cfg) then self.link:sendEnv(self) end
   self:emit("env")
 end
 
@@ -268,10 +321,34 @@ function app:start()
       sleep(0.1)
     end
   end)
+
+  -- Inbound traffic. rednet.receive blocks, so it gets a loop to itself; with
+  -- no network role it idles without ever touching the modem.
+  basalt.schedule(function()
+    while self.running do
+      if self.link.open then
+        pcall(self.link.pump, self.link, self)
+      else
+        sleep(1)
+      end
+    end
+  end)
+
+  -- A base says who it is on a fixed cadence whether or not anyone is
+  -- listening, so pairing needs no handshake state at this end.
+  basalt.schedule(function()
+    while self.running do
+      if config.isBase(self.cfg) and self.link.open then
+        pcall(self.link.announce, self.link, self.cfg)
+      end
+      sleep(linkLib.ANNOUNCE_SECONDS)
+    end
+  end)
 end
 
 function app:stop()
   self.running = false
+  self.link:close()
 end
 
 -- ---------------------------------------------------------------- actions ---
@@ -303,6 +380,46 @@ function app:toggleOrientation()
   end
   self:saveConfig()
   return config.isUnlocked(self.cfg)
+end
+
+-- ------------------------------------------------------------------ link ---
+
+--- Switches this station between standing alone, feeding a ship and being fed
+--- by a base. Clearing the arrival set stops the new role from alerting on
+--- everyone who happened to be standing there already.
+function app:setRole(role)
+  self.cfg.role = role
+  config.sanitise(self.cfg)
+  self.link:attach(self.kit, self.cfg)
+  self.link:forget()
+  self.previous, self.firstScan = {}, true
+  self.scanError = nil
+  self:saveConfig()
+end
+
+function app:setStationName(name)
+  if type(name) ~= "string" or #name == 0 then
+    name = config.defaultStationName()
+  end
+  self.cfg.stationName = name:sub(1, config.MAX_STATION_NAME)
+  self:saveConfig()
+end
+
+--- Locks this ship onto one base. Everything else on the protocol is ignored
+--- from here on, so several base/ship pairs can share a world.
+function app:pairWithBase(id, name)
+  self.cfg.pairedBaseId = id and math.floor(id) or nil
+  self.cfg.pairedBaseName = name
+  self.link:forget()
+  self.scanError = nil
+  self:saveConfig()
+end
+
+function app:toggleRelayWeather()
+  self.cfg.relayWeather = not self.cfg.relayWeather
+  self:saveConfig()
+  if self.cfg.relayWeather then self.link:sendEnv(self) end
+  return self.cfg.relayWeather
 end
 
 function app:toggleAlerts()

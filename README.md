@@ -1,9 +1,25 @@
-# Radar Station v4 — Basalt edition
+# Radar Station v5 — Basalt edition
 
-A stationary player radar for **CC: Tweaked + Advanced Peripherals** on
-**Minecraft 1.21.1**, rebuilt on the [Basalt 2.5](https://basalt.madefor.cc/2.5/)
-UI framework, with a live weather and sky display driven by an Environment
-Detector.
+A player radar for **CC: Tweaked + Advanced Peripherals** on **Minecraft
+1.21.1**, built on the [Basalt 2.5](https://basalt.madefor.cc/2.5/) UI
+framework, with a live weather and sky display driven by an Environment
+Detector — and, in v5, a radar screen that flies with you.
+
+---
+
+## What v5 adds
+
+A **role**, under *Settings → Link*:
+
+| Role | What it is |
+|---|---|
+| **STATION** | the stand-alone radar. Exactly v4, no network involved. The default. |
+| **BASE** | the same radar, which also broadcasts what it sees over rednet |
+| **SHIP** | a screen with no detector at all, drawing what one paired base sends it |
+
+That exists because a **Create: Aeronautics** contraption cannot scan for
+itself. See *[Flying: base and ship](#flying-base-and-ship)*. Nothing changes
+for anyone who leaves the role alone.
 
 ---
 
@@ -32,11 +48,15 @@ imported automatically on first run** — as are the older `pocket_radar.*` file
 
 - Advanced Computer (advanced, for colour)
 - **Player Detector** (Advanced Peripherals) — adjacent, or on a wired modem
-  network shared with the computer
+  network shared with the computer.
+  **Not needed in the SHIP role**, which carries no detector at all.
 
 **Optional**
 
 - **Environment Detector** (Advanced Peripherals) — unlocks the Weather page
+- **Wireless or ender modem** — required by the BASE and SHIP roles, ignored by
+  a STATION. Use an **ender** modem: no range limit, and it works across
+  dimensions.
 - **Advanced Monitor(s)** — any size; each monitor gets its own page
 - **Speaker(s)** — every speaker on the network plays the alert
 - Any redstone contraption on a side of the computer
@@ -51,7 +71,7 @@ On the computer in game:
 wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
 ```
 
-That pulls down all 20 files and offers to install Basalt 2.5 for you. Then:
+That pulls down all 22 files and offers to install Basalt 2.5 for you. Then:
 
 ```
 radar
@@ -79,7 +99,7 @@ wget run <url> dev --dir /apps
 ```
 
 Run the same command again any time to update — it downloads everything into
-memory first and only writes once all 20 files have arrived, so a dropped
+memory first and only writes once all 22 files have arrived, so a dropped
 connection leaves the computer exactly as it was.
 
 ### Installing by hand
@@ -177,6 +197,118 @@ Only the picture turns.
 
 ---
 
+## Flying: base and ship
+
+### Why a radar on a ship cannot scan
+
+Create: Aeronautics assembles a structure into a **contraption**. While it is
+assembled, its blocks live in a proxy level rather than in the world, so
+anything that asks a question about a real block position gets nothing back.
+The computer keeps running, `peripheral.getNames()` still lists the detector,
+and `getPlayersInRange()` returns an **empty list** the whole time you are
+flying. Dock the ship and it works again.
+
+`getPlayerPos(name)` is different: it looks up an **entity by name**, not a
+position in the world. A Player Detector bolted to the ground can therefore
+read the pilot accurately wherever they have got to — including three thousand
+blocks up, aboard a ship.
+
+So the detecting is done on the ground and the picture is flown:
+
+```
+   ground                                    in the air
+   ┌────────────────────┐                    ┌────────────────────┐
+   │ BASE               │   contacts, your   │ SHIP               │
+   │ Player Detector    │   position, yaw    │ ender modem        │
+   │ ender modem        │ ─────────────────► │ monitor            │
+   │ SELF mode          │      rednet        │ no detector, no GPS│
+   └────────────────────┘                    └────────────────────┘
+```
+
+Because the base runs in **SELF** mode — centred on you rather than on a fixed
+point — every distance and bearing it computes is already relative to the
+pilot, which is what a scope on the ship wants. Nothing is recalculated for
+being airborne.
+
+### Setting it up
+
+**On the ground station**
+
+1. *Settings → Link → Role* → **BASE**.
+2. Give it a name under *Station name* — this is what ships see. It defaults to
+   `Base <computer id>`.
+3. Set *Tracking → Mode* to **SELF** and your *Username*, so the scope is
+   centred on you. (BASE works in FIXED mode too; it just watches the base
+   coordinates instead, which is rarely what you want while flying.)
+4. Attach a wireless or ender modem. The *Modem* row shows which one it opened.
+
+**On the ship**
+
+1. Put a computer, an **ender modem** and a monitor on the contraption. No
+   Player Detector and no GPS constellation are needed.
+2. *Settings → Link → Role* → **SHIP**.
+3. Press **Scan for base stations**. The ship listens for a few seconds,
+   collects every base that announced itself, and offers them in a picker.
+4. Pick yours. The status page then reads `SHIP - linked to <name>`.
+
+The ship accepts traffic **only** from the computer id it was paired with, so
+several base/ship pairs can share one world without seeing each other's
+contacts. Pairing is a one-way choice: the base never needs to know who is
+listening, and announces itself whether or not anyone is.
+
+Every page then works exactly as it does on the ground — the radar scope, the
+contacts table, the log and the alerts all read the same `app.contacts` a local
+sweep would have produced. The pilot's yaw is relayed too, so unlocking the
+orientation (`L`) gives the ship a proper heading-up scope.
+
+### Weather on the ship
+
+*Settings → Link → Relay weather*, on the **base**, also sends the environment
+readings. A paired ship then draws the full weather page — sky, biome scenery,
+clock, moon phase, light levels — from what the base's Environment Detector
+reads, and stops asking its own. It is off by default: it is extra traffic, and
+not everyone flying wants it.
+
+Only the raw readings travel. The sky, palette and scenery are rebuilt on the
+ship from the same code that builds them on the base, so the page is identical
+without a single pixel crossing the network.
+
+### When the link drops
+
+If nothing arrives from the paired base for roughly two of its sweep intervals,
+the ship treats the link as lost. It **clears the scope** and says so — a
+stale picture drawn as though it were live is worse than an empty one. The
+message appears where a detector fault already does: across the contacts page,
+along the bottom of the radar, and on the `Link` row of the status page.
+
+| What you see | What it means |
+|---|---|
+| `Waiting for <name>` | paired, but that base has not spoken yet |
+| `Link lost - nothing from <name>` | it has gone quiet, or you have flown out of a wireless modem's range |
+| `No base station paired` | pick one with *Scan for base stations* |
+| `No modem - the ship link needs one` | attach a wireless or ender modem and press *Modem* to rescan |
+
+### Notes
+
+- **STATION is untouched and is still the default.** It opens no modem, sends
+  nothing, and needs no network to exist. A v4 install upgrades straight into
+  it with nothing new turned on.
+- A **BASE is a fully working radar in its own right** — it keeps its own
+  screens, alerts, log and redstone whether or not a ship is ever paired to it.
+- **The ship carries no position source.** Everything it draws, including "you
+  are at X, Y, Z" on the status page, is the pilot's position as read by the
+  base. That is the ship's position *while the pilot is aboard it* — if you
+  leave the ship flying on autopilot and walk away, the status page follows
+  **you**, not the ship. There is deliberately no GPS fallback.
+- **Ender modems** are the right choice: unlimited range, and not
+  dimension-limited. A plain wireless modem is fine within its range, and the
+  link simply goes stale beyond it.
+- Only positions travel. Distance, bearing, altitude band and colour are
+  rebuilt at the far end by the same code that computes them locally, so there
+  is one implementation of that maths rather than two that can drift apart.
+
+---
+
 ## The weather page
 
 The sky is **generated from the live snapshot**, not chosen from a set of stock
@@ -255,7 +387,7 @@ the monitor shows.
 
 ```
 lua preview/render-preview.lua . preview     # needs a desktop Lua 5.x
-lua preview/smoke-test.lua .                 # 40 checks, no Minecraft needed
+lua preview/smoke-test.lua .                 # 49 checks, no Minecraft needed
 ```
 
 `smoke-test.lua` stubs CC:Tweaked and Basalt, then drives every page at seven
@@ -265,6 +397,12 @@ also paints **every biome** at six sizes in every weather and every hour, and
 reads the pixel grid back afterwards to prove no terrain painter leaves a hole
 in the ground — `blitTo` silently substitutes a palette entry for an unpainted
 sub-pixel, so a gap would otherwise only show up in game.
+
+rednet is stubbed as a loopback, so the whole base/ship link is exercised too:
+a base broadcasting after a sweep, a ship rebuilding that sweep and comparing
+it **field for field** against the one the base drew, the pairing picker,
+traffic from an unpaired sender being refused, a silent base being called lost,
+and the weather relay producing an identical snapshot with no detector present.
 
 ---
 
@@ -278,6 +416,11 @@ compass bearings. See *Orientation* above for following your heading instead.
 Detector *block*. FIXED changes only what distances are measured *from*. For a
 stationary station, put the detector at the base and point the base coordinates
 at it, so the two agree.
+
+**Aboard a contraption nothing block-based answers.** `getPlayersInRange()` and
+the Environment Detector's calls both need a real world position, and a
+Create: Aeronautics ship is not in the world while it is assembled. That is
+what the BASE and SHIP roles are for — see *Flying: base and ship* above.
 
 **MAX range** is capped by the server's `playerDetMaxRange` in
 `advancedperipherals-server.toml`. Set it to `-1` for no limit.
@@ -305,6 +448,7 @@ radar/
   config.lua           settings schema, defaults, v3 import, persistence
   hardware.lua         peripheral discovery by capability
   scan.lua             Player Detector -> contact list
+  link.lua             base <-> ship over rednet: pairing, relay, staleness
   environment.lua      Environment Detector -> snapshot + scene description
   biomes.lua           biome id -> ground profile, and its colours by mood
   alerts.lua           sound, redstone and flash
@@ -332,4 +476,7 @@ lua preview/install-test.lua .    # 13 checks against a mocked CC + HTTP
 
 Views never touch a peripheral. They read `app` and subscribe to five events —
 `scan`, `env`, `anim`, `heading` and `config` — which keeps rendering
-independent of how often the hardware is polled.
+independent of how often the hardware is polled. It is also why the SHIP role
+needed no view changes at all: `radar/link.lua` fills the same tables and fires
+the same events from the network that `radar/scan.lua` fills them from a
+detector, and nothing downstream can tell which it is looking at.

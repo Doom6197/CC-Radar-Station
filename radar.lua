@@ -1,9 +1,10 @@
 --[[
-  RADAR STATION v4  --  Basalt edition
+  RADAR STATION v5  --  Basalt edition
   CC: Tweaked + Advanced Peripherals, Minecraft 1.21.1
 
-  A stationary player radar with a live weather and sky display, built on the
-  Basalt 2.5 UI framework.
+  A player radar with a live weather and sky display, built on the Basalt 2.5
+  UI framework, that can also run as a paired BASE on the ground and SHIP in
+  the air.
 
   ---------------------------------------------------------------------------
   HARDWARE
@@ -11,12 +12,17 @@
     REQUIRED
       Advanced Computer  (advanced, for colour)
       Player Detector    (Advanced Peripherals) adjacent, or on a wired modem
-                         network shared with the computer
+                         network shared with the computer.
+                         NOT needed in the SHIP role -- a ship is fed by its
+                         base and carries no detector at all.
 
     OPTIONAL
       Environment Detector (Advanced Peripherals)
                          unlocks the WEATHER page: live sky, biome scenery,
                          time of day, moon phase and light levels
+      Wireless or ender modem
+                         needed by the BASE and SHIP roles. Ender is the one
+                         to use: no range limit, and it crosses dimensions.
       Advanced Monitor(s)
                          any size; each monitor shows its own page
       Speaker(s)         every speaker on the network plays the alert
@@ -80,6 +86,15 @@
     Detector BLOCK. FIXED changes only what distances are measured FROM, so
     put the detector at the base and point the base coordinates at it.
 
+    ROLES. A ship assembled by Create: Aeronautics is a contraption rather
+    than world blocks, so getPlayersInRange() aboard one returns nothing while
+    it flies. getPlayerPos(name) is an entity lookup and keeps working, so a
+    BASE on the ground -- in SELF mode, centred on the pilot -- sees everyone
+    around them wherever they are, and relays that over rednet to a SHIP.
+    A SHIP needs only a modem: no Player Detector, no GPS. Pick the role and
+    pair the two under Settings / Link. STATION is the default and never
+    touches the network.
+
     MAX RANGE is capped by the server's "playerDetMaxRange" setting in
     advancedperipherals-server.toml. Set it to -1 for no limit.
 ]]
@@ -104,7 +119,7 @@ if not ok then
   term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
-  print("Radar Station v4 needs Basalt 2.5.")
+  print("Radar Station v5 needs Basalt 2.5.")
   print("")
   print("Install it next to this program with:")
   print("  wget run https://basalt.madefor.cc/2.5/install.lua minified")
@@ -131,7 +146,9 @@ if argv[1] and tonumber(argv[1]) then
   config.saveConfig(app.cfg)
 end
 
-if not app.kit.detector then
+-- A SHIP draws what its base relays and needs no detector of its own, so the
+-- hard stop below only applies to a station that has to do its own scanning.
+if not app.kit.detector and not config.isShip(app.cfg) then
   term.setBackgroundColor(colors.black)
   term.setTextColor(colors.white)
   term.clear()
@@ -141,6 +158,9 @@ if not app.kit.detector then
   print("Place an Advanced Peripherals Player Detector")
   print("next to this computer, or connect one with a")
   print("wired modem, then run radar again.")
+  print("")
+  print("A radar aboard a Create: Aeronautics ship wants")
+  print("the SHIP role instead - see Settings / Link.")
   return
 end
 
@@ -164,8 +184,12 @@ app:start()
 if app.imported then
   terminalRoot:toast("Imported settings from an earlier version", "info")
 end
-if not app.kit.env then
+if not app.kit.env and not config.isShip(app.cfg) then
   terminalRoot:toast("No Environment Detector - weather page is idle", "warning")
+end
+if config.usesNetwork(app.cfg) then
+  local summary, healthy = app.link:summary(app.cfg)
+  terminalRoot:toast(summary, healthy and "info" or "warning")
 end
 
 basalt.run()
