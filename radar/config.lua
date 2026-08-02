@@ -10,7 +10,7 @@ local backdrops = require("radar.backdrops")
 
 local config = {}
 
-config.VERSION = "6.0"
+config.VERSION = "6.1"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -89,6 +89,16 @@ config.CYCLE_INTERVALS = { 5, 10, 15, 20, 30, 45, 60, 120, 300 }
 -- separate from CYCLE_INTERVALS, and slower at the top end: a picture you are
 -- looking at wants longer than a page you are glancing at.
 config.BACKDROP_INTERVALS = { 10, 15, 30, 60, 120, 300, 600, 900, 1800 }
+
+-- A backdrop is a place plus a sky, and the two are chosen separately: keep
+-- the place and let the sky run live, and the picture follows the real hour
+-- and the real weather.
+config.BACKDROP_SKIES = {
+  { id = "picture", label = "From the picture",
+    hint = "the hour and weather it was drawn with" },
+  { id = "live",    label = "Live",
+    hint = "the real hour, weather and sun" },
+}
 
 config.RS_MODES = {
   { id = "pulse",  label = "Pulse",  hint = "brief blip on each new contact" },
@@ -212,6 +222,7 @@ function config.defaults()
     -- The weather page's picture. "live" draws the real sky, "cycle" walks the
     -- chosen set on a timer, anything else is one radar.backdrops id.
     backdrop        = "live",
+    backdropSky     = "picture",         -- or "live": follow the real sky
     backdropSeconds = 60,
     backdropSkip    = {},                -- backdrops left OUT of the cycle
 
@@ -367,6 +378,9 @@ function config.sanitise(cfg)
     cfg.backdrop = "live"
   end
   cfg.backdropSeconds = snapToNumber(config.BACKDROP_INTERVALS, cfg.backdropSeconds, 60)
+  if not indexOfId(config.BACKDROP_SKIES, cfg.backdropSky) then
+    cfg.backdropSky = "picture"
+  end
 
   -- Only real backdrop ids may sit in the skip set, and it may never cover
   -- every picture: a cycle with nothing in it would leave the page blank.
@@ -499,6 +513,14 @@ function config.headingStepLabel(cfg)
 end
 
 function config.isUnlocked(cfg) return cfg.orientation == "heading" end
+
+--- One line describing where a backdrop's sky comes from.
+function config.backdropSkyLabel(cfg)
+  for _, entry in ipairs(config.BACKDROP_SKIES) do
+    if entry.id == cfg.backdropSky then return entry.label .. " - " .. entry.hint end
+  end
+  return cfg.backdropSky
+end
 
 -- ------------------------------------------------------------------ roles ---
 

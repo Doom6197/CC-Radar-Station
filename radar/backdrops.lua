@@ -15,12 +15,17 @@
 -- header and the status page all keep reporting what the detector actually
 -- says, so a decorative sky never misrepresents the real one.
 
+-- A backdrop has two halves, and they can be chosen separately: the PLACE
+-- (which ground, and therefore which painter) and the SKY (the hour, the
+-- weather, where the sun is). Keep the place and let the sky run live and you
+-- get an airship that flies through the real dusk and the real rain.
+
 local biomes = require("radar.biomes")
 
--- Required on first use rather than up top: radar.config validates backdrop
--- ids while loading settings, and must not drag Basalt in through the theme
--- to do it.
-local theme
+-- Both required on first use rather than up top: radar.config validates
+-- backdrop ids while loading settings, and must not drag Basalt in through
+-- the theme to do it.
+local theme, environment
 
 local backdrops = {}
 
@@ -72,11 +77,15 @@ backdrops.LIST = {
   { id = "spiresNight", label = "Spires by Night",     hint = "the towers after dark",
     sky = "night", ground = "spires",   phase = "night", body = "moon", at = 0.40 },
 
-  -- The other dimensions, which on a pack like this are islands too.
+  -- The other dimensions, which on a pack like this are islands too. These are
+  -- places rather than weathers -- there is no overworld dusk over the lava
+  -- sea -- so they are drawn as authored even when the sky is set to live.
   { id = "netherSea",   label = "Over the Lava Sea",   hint = "the Nether, from above",
-    sky = "nether", ground = "netherWastes", kind = "nether",  phase = "day" },
+    sky = "nether", ground = "netherWastes", kind = "nether",  phase = "day",
+    fixedSky = true },
   { id = "endVoid",     label = "The Far End",         hint = "an island in the void",
-    sky = "theEnd", ground = "theEnd",       kind = "the_end", phase = "night" },
+    sky = "theEnd", ground = "theEnd",       kind = "the_end", phase = "night",
+    fixedSky = true },
 }
 
 local byId = {}
@@ -98,28 +107,71 @@ end
 
 function backdrops.count() return #backdrops.LIST end
 
+--- Whether this configuration draws its backdrops under the real sky.
+function backdrops.isLiveSky(cfg)
+  return cfg.backdropSky == "live"
+end
+
 --- Backdrops in the cycle, in list order. `backdropSkip` holds the ones left
 --- OUT, so a picture added in a later version joins the cycle by default
 --- rather than silently going missing from it. Never returns an empty list:
 --- a cycle with nothing in it would leave the page with nothing to draw.
+---
+--- Under a live sky the six presets that share the archipelago differ only in
+--- the hour they were drawn at -- and the hour is coming from the detector --
+--- so the cycle walks distinct PLACES instead, rather than showing the same
+--- picture six times running.
 function backdrops.rotation(cfg)
   local skip = type(cfg.backdropSkip) == "table" and cfg.backdropSkip or {}
-  local out = {}
+  local live = backdrops.isLiveSky(cfg)
+  local out, seenGround = {}, {}
+
   for _, entry in ipairs(backdrops.LIST) do
-    if not skip[entry.id] then out[#out + 1] = entry.id end
+    local duplicate = live and not entry.fixedSky and seenGround[entry.ground]
+    if not skip[entry.id] and not duplicate then
+      out[#out + 1] = entry.id
+      seenGround[entry.ground] = true
+    end
   end
+
   if #out == 0 then return { backdrops.LIST[1].id } end
   return out
 end
 
 --- Builds a scene in exactly the shape radar.environment.describe produces, so
 --- radar.sky paints it without knowing where it came from.
+---
+--- With `liveSky` the picture keeps only its ground and the rest of the scene
+--- is the real one -- the hour, the weather, where the sun is, the dimension.
+--- That is the same path the live weather page takes with its scenery forced,
+--- so an airship under a live sky is lit exactly as the ground beneath it
+--- would have been. With no detector to ask there is no live sky to use, so
+--- the picture falls back to the hour it was drawn with rather than to
+--- nothing -- which is what keeps it working on a ship.
 ---@param id string A backdrop id
----@param snap table|nil The live snapshot; only the moon phase is borrowed
+---@param snap table|nil The live snapshot
+---@param liveSky? boolean Take the sky from `snap` instead of from the picture
 ---@return table|nil scene
-function backdrops.scene(id, snap)
+function backdrops.scene(id, snap, liveSky)
   local entry = byId[id]
   if not entry then return nil end
+
+  if liveSky and not entry.fixedSky and snap and snap.available then
+    environment = environment or require("radar.environment")
+    -- The picture says what to draw; the biome you are actually in says
+    -- whether it can rain and whether that falls as snow. An airship is not a
+    -- climate, so taking those flags from the picture would show rain over a
+    -- snowfield -- and nothing at all over a desert.
+    local realGround = biomes.profile(biomes.classify(snap.biome, snap.kind))
+    local scene = environment.describe(snap, entry.ground, realGround)
+    scene.backdrop = id
+    scene.backdropLive = true
+    -- describe() names the weather in the title; the subtitle is where the
+    -- chosen picture gets to say which place this is.
+    scene.subtitle = biomes.label(entry.ground)
+    return scene
+  end
+
   theme = theme or require("radar.theme")
 
   local scene = {

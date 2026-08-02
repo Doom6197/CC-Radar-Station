@@ -157,15 +157,17 @@ biomes.PROFILES = {
     terrain = "archipelago", flora = "broadleaf", density = 0.7,
     land = "#8a7a66", shade = "#463c30", accent = "#5fa83f" },
 
-  cloudSea = { label = "Cloud Sea", dry = true,
+  -- None of these three is marked dry: weather has to be able to fall on them,
+  -- or a backdrop set to follow the live sky would never show any.
+  cloudSea = { label = "Cloud Sea",
     terrain = "cloudSea", flora = "none", density = 0,
     land = "#8c8579", shade = "#4e4a44", accent = "#b9b2a4" },
 
-  skyship = { label = "Airship", dry = true,
+  skyship = { label = "Airship",
     terrain = "airship", flora = "none", density = 0,
     land = "#d8c9a8", shade = "#4a3a2c", accent = "#c2533f" },
 
-  spires = { label = "Stone Spires", dry = true,
+  spires = { label = "Stone Spires",
     terrain = "spires", flora = "none", density = 0,
     land = "#8d8377", shade = "#4b443d", accent = "#6fae4a" },
 

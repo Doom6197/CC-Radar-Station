@@ -1657,6 +1657,174 @@ check("the backdrop cycle changes on its interval", function()
   app:setBackdrop("live")
 end)
 
+check("a backdrop can keep its place and take the live sky", function()
+  local cfg = config.sanitise({})
+  assert(cfg.backdropSky == "picture", "the sky comes from the picture by default")
+  assert(config.sanitise({ backdropSky = "wat" }).backdropSky == "picture",
+    "and an unknown mode falls back to it")
+  assert(backdrops.isLiveSky({ backdropSky = "live" }), "live is recognised")
+
+  -- The fake detector is a snowy taiga in the rain at 11:12, so a live sky is
+  -- unmistakably different from any hour a picture was drawn at.
+  app.env.snapshot = liveSnapshot
+  local snap = app:snapshot()
+  assert(snap.scene.weather == "snow" and snap.phase == "day",
+    "the live sky is snow by day, got " .. snap.scene.weather .. "/" .. snap.phase)
+
+  local fixed = backdrops.scene("shipDay", snap, false)
+  assert(fixed.weather == "clear", "the picture's own sky is clear")
+  assert(fixed.bodyProgress == 0.40, "with the sun where it was drawn")
+
+  local livened = backdrops.scene("shipDay", snap, true)
+  assert(livened.groundKind == "skyship", "the place is kept, got " .. livened.groundKind)
+  assert(livened.ground.terrain == "airship", "so the airships still fly")
+  assert(livened.weather == "snow", "but the weather is the real one, got " .. livened.weather)
+  assert(livened.phase == snap.phase, "and so is the hour")
+  assert(livened.tick == snap.tick, "down to the tick")
+  assert(livened.bodyProgress == snap.bodyProgress, "and the sun's place on its arc")
+  assert(livened.backdropLive, "and it says so")
+  assert(livened.subtitle == "Airship", "while still naming the picture that was chosen")
+  assert(#livened.palette == 10, "with a full palette")
+
+  -- The mood has to follow the live weather too, or the ground would stay lit
+  -- for noon under a snowstorm.
+  assert(livened.mood ~= fixed.mood, "and it is lit by the real sky")
+
+  -- Whether it can rain, and whether that falls as snow, is a fact about where
+  -- you are standing rather than about the picture. An airship is not a
+  -- climate: taking those flags from it would show rain over a snowfield.
+  local function overBiome(biome)
+    local s = {
+      available = true, tick = 6000, day = 1, kind = "overworld", phase = "day",
+      raining = true, thundering = false, biome = biome, moonId = 0,
+    }
+    s.body, s.bodyProgress = environment.celestial(6000)
+    local built = backdrops.scene("shipDay", s, true)
+    assert(built.groundKind == "skyship", "the airships fly over " .. biome)
+    return built.weather
+  end
+  assert(overBiome("minecraft:plains") == "rain", "rain over plains")
+  assert(overBiome("minecraft:snowy_taiga") == "snow",
+    "snow over a cold biome, got " .. overBiome("minecraft:snowy_taiga"))
+  assert(overBiome("minecraft:desert") == "clear",
+    "and a desert stays dry under it, got " .. overBiome("minecraft:desert"))
+
+  -- Forcing scenery on the live page is unchanged: there the ground you draw
+  -- IS the ground you are standing on, so it keeps deciding.
+  local desertSnap = {
+    available = true, tick = 6000, day = 1, kind = "overworld", phase = "day",
+    raining = true, thundering = false, biome = "minecraft:plains", moonId = 0,
+  }
+  desertSnap.body, desertSnap.bodyProgress = environment.celestial(6000)
+  assert(environment.describe(desertSnap, "desert").weather == "clear",
+    "a forced desert still shuts the rain off")
+
+  -- A picture that is a place rather than a weather is drawn as authored.
+  local nether = backdrops.scene("netherSea", snap, true)
+  assert(nether.kind == "nether", "the lava sea ignores a live overworld sky")
+  assert(nether.backdropLive == nil, "and does not claim otherwise")
+
+  -- No detector, no live sky: fall back to the hour it was drawn with rather
+  -- than to nothing, which is what keeps this working on a ship.
+  local blind = backdrops.scene("shipDay", { available = false }, true)
+  assert(blind and blind.weather == "clear", "falls back to the picture's own sky")
+  assert(backdrops.scene("shipDay", nil, true).groundKind == "skyship",
+    "and still draws the place")
+
+  -- Through the app, which is the path the page actually takes.
+  app:setBackdrop("shipDay")
+  app:setBackdropSky("live")
+  local viaApp = app:paintedScene()
+  assert(viaApp.backdropLive, "the page asks for a live sky when the setting says so")
+  assert(viaApp.weather == "snow", "and gets one, got " .. viaApp.weather)
+  assert(viaApp.groundKind == "skyship", "keeping the chosen place")
+
+  app:setBackdropSky("picture")
+  local backToPicture = app:paintedScene()
+  assert(backToPicture.weather == "clear", "and the picture's own sky when told that")
+  assert(backToPicture.backdropLive == nil, "without claiming to be live")
+
+  app:setBackdrop("live")
+end)
+
+check("every backdrop paints under every live sky", function()
+  -- Live mode makes ground/sky pairings that no fixed picture contains, and a
+  -- painter only ever tested under its own sky can still leave a hole.
+  local sizes = { { 10, 4 }, { 26, 9 }, { 46, 16 } }
+  local weathers = { { false, false }, { true, false }, { true, true } }
+  for _, size in ipairs(sizes) do
+    local grid = pixel.new(size[1], size[2], theme.skies.day)
+    for _, id in ipairs(backdrops.ids()) do
+      for _, tick in ipairs({ 1000, 6000, 12000, 18000 }) do
+        for _, weather in ipairs(weathers) do
+          for _, biome in ipairs({ "minecraft:plains", "minecraft:snowy_taiga" }) do
+            local snap = {
+              available = true, tick = tick, day = 3, kind = "overworld",
+              phase = environment.phaseOf(tick), raining = weather[1],
+              thundering = weather[2], biome = biome, moonId = 2,
+              moonName = "Last Quarter",
+            }
+            snap.body, snap.bodyProgress = environment.celestial(tick)
+
+            local scene = backdrops.scene(id, snap, true)
+            grid:setPalette(scene.palette)
+            grid.px = {}
+            sky.paint(grid, scene, 18.3)
+            for i = 1, grid.w * grid.h do
+              local index = grid.px[i]
+              if type(index) ~= "number" or index < 1 or index > #scene.palette then
+                error(("%s live at %dx%d tick %d left sub-pixel %d as %s"):format(
+                  id, size[1], size[2], tick, i, tostring(index)), 0)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end)
+
+check("a live-sky cycle walks places, not repeats of one", function()
+  local fixedCfg = { backdropSky = "picture", backdropSkip = {} }
+  local liveCfg  = { backdropSky = "live",    backdropSkip = {} }
+
+  assert(#backdrops.rotation(fixedCfg) == backdrops.count(),
+    "every picture cycles when each brings its own sky")
+
+  -- Under a live sky the six island presets differ only in an hour that is now
+  -- coming from the detector, so they would be the same picture six times.
+  local live = backdrops.rotation(liveCfg)
+  local grounds = {}
+  for _, id in ipairs(live) do
+    local ground = backdrops.byId(id).ground
+    assert(not grounds[ground],
+      "no place appears twice in a live cycle: " .. ground .. " via " .. id)
+    grounds[ground] = true
+  end
+  assert(#live < backdrops.count(), "so the live cycle is shorter, got " .. #live)
+  assert(#live >= 5, "but still worth cycling, got " .. #live)
+
+  -- Both dimension pictures survive it, being places rather than hours.
+  local ids = {}
+  for _, id in ipairs(live) do ids[id] = true end
+  assert(ids.netherSea and ids.endVoid, "the Nether and the End stay in")
+
+  -- The skip set still applies on top.
+  local skipped = backdrops.rotation({ backdropSky = "live",
+    backdropSkip = { netherSea = true } })
+  assert(#skipped == #live - 1, "a skipped picture drops out of a live cycle too")
+
+  -- Switching mode rewinds, so the index never points past a shorter rotation.
+  app:setBackdrop("cycle")
+  app:setBackdropSky("picture")
+  app.backdropIndex = backdrops.count()
+  app:setBackdropSky("live")
+  assert(app.backdropIndex == 1, "changing the sky rewinds the cycle")
+  assert(backdrops.byId(app:backdropId()), "and lands on a real picture")
+  app:setBackdropSky("picture")
+  app:setBackdrop("live")
+end)
+
 check("the weather page paints the backdrop, and the readout the real sky", function()
   local saved = app.env.snapshot
   app.env.snapshot = liveSnapshot

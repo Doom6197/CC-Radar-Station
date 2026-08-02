@@ -745,6 +745,25 @@ function view.build(container, app, root)
     note("A picture that ignores the weather and the biome.")
     note("Works with no Environment Detector at all.")
 
+    row("Sky", function() return config.backdropSkyLabel(cfg) end, function()
+      openPicker("BACKDROP SKY",
+        entriesOf(config.BACKDROP_SKIES,
+          function(s) return s.label .. " - " .. s.hint end,
+          function(s) return s.id end),
+        cfg.backdropSky,
+        function(value)
+          app:setBackdropSky(value)
+          refreshRows()
+        end)
+    end, function()
+      if cfg.backdrop == "live" then return theme.line end
+      return backdrops.isLiveSky(cfg) and theme.accent or theme.text
+    end)
+
+    note("Live keeps the picture but takes the hour, the weather")
+    note("and the sun from the detector - so the airships fly")
+    note("through the real dusk and the real rain.")
+
     row("Change every", function()
       local seconds = cfg.backdropSeconds
       if seconds >= 60 then return ("%g minutes"):format(seconds / 60) end

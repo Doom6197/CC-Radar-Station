@@ -214,10 +214,13 @@ function app:backdropId()
 end
 
 --- The scene the weather page paints: a backdrop when one is chosen, the live
---- sky otherwise, and nil when there is neither.
+--- sky otherwise, and nil when there is neither. A backdrop set to a live sky
+--- keeps only its ground and takes the hour and the weather from the detector.
 function app:paintedScene()
   local id = self:backdropId()
-  if id then return backdrops.scene(id, self.env.snapshot) end
+  if id then
+    return backdrops.scene(id, self.env.snapshot, backdrops.isLiveSky(self.cfg))
+  end
   local snap = self.env.snapshot
   return (snap and snap.available) and snap.scene or nil
 end
@@ -249,6 +252,18 @@ function app:setBackdrop(choice)
   self.cfg.backdrop = choice
   self.backdropAt = os.clock()
   if choice ~= "cycle" then self.backdropIndex = 1 end
+  self:saveConfig()
+  self:emit("backdrop")
+end
+
+--- Switches a backdrop between the sky it was drawn with and the real one.
+--- The cycle is rewound with it: the two modes walk different rotations,
+--- because under a live sky the presets that differ only by hour collapse
+--- into one another.
+function app:setBackdropSky(mode)
+  self.cfg.backdropSky = mode
+  self.backdropIndex = 1
+  self.backdropAt = os.clock()
   self:saveConfig()
   self:emit("backdrop")
 end

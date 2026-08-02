@@ -10,14 +10,21 @@ put behind it.
 
 ## What v6 adds
 
-**Backdrops.** Twenty pictures for the weather page that owe nothing to the
-weather, the biome or the hour — floating isles through a whole day, a sea of
-cloud seen from above, airships under way, stone spires in haze. Pick one, or
-have them **cycle on a timer** you choose. They need **no Environment Detector
-at all**, which is what makes the weather page worth having on a ship.
+**Backdrops.** Twenty pictures for the weather page — floating isles through a
+whole day, a sea of cloud seen from above, airships under way, stone spires in
+haze. Pick one, or have them **cycle on a timer** you choose.
 
-See *[Backdrops](#backdrops--pictures-that-ignore-the-weather)*. The default is
-unchanged: the page draws the real sky until you tell it otherwise.
+A backdrop is a **place** and a **sky**, and you choose those separately:
+
+- keep the sky the picture was drawn with, and it needs **no Environment
+  Detector at all** — which is what makes the weather page worth having on a
+  ship;
+- or set the sky to **live**, and the picture keeps its place while the hour,
+  the weather and the sun all come from the detector. Your airships then fly
+  through the real dusk and the real rain.
+
+See *[Backdrops](#backdrops--a-place-and-a-sky)*. The default is unchanged: the
+page draws the real sky until you tell it otherwise.
 
 ---
 
@@ -391,7 +398,7 @@ its shadow, one accent) of the ten-tone scene palette. Everything above them
 belongs to the sky. Changing biome therefore costs no extra palette slots at
 all, which is what keeps the weather page inside the sixteen the hardware has.
 
-## Backdrops — pictures that ignore the weather
+## Backdrops — a place and a sky
 
 Everything above is driven by what the Environment Detector reports. On a pack
 where every dimension is floating islands and you live on an airship, that is
@@ -399,8 +406,15 @@ often either wrong or missing entirely: **a contraption is not made of world
 blocks**, so a detector riding on one has nothing to report at all, and the
 weather page sits empty.
 
-A **backdrop** is a whole scene chosen by hand instead — a sky, a ground and a
-fixed hour. Twenty of them ship with v6:
+A **backdrop** is a scene chosen by hand instead. It has two halves, and you
+pick them separately:
+
+| | |
+|---|---|
+| the **place** | which ground gets drawn — the archipelago, a cloud sea, airships, spires |
+| the **sky** | the hour, the weather and where the sun is: either baked into the picture, or taken live from the detector |
+
+Twenty pictures ship with v6:
 
 ![Twenty backdrops: floating isles at dawn, noon, sunset and by moonlight, in storm and snow; a cloud sea at dawn, day, dusk and night; airships in fair weather, at sunset, by moonlight, in rain and in a storm; stone spires by day, dusk and night; the Nether lava sea; and the End](preview/backdrops.png)
 
@@ -417,10 +431,41 @@ Set it under **Settings → Backdrop**:
 | | |
 |---|---|
 | **Picture** | `Live` draws the real sky (the default), `Cycle` walks a set on a timer, or name one and it stays |
+| **Sky** | `From the picture` — the hour and weather it was drawn with — or `Live` |
 | **Change every** | 10 seconds to 30 minutes |
 | **In the cycle** | which pictures are in the rotation — tick them off one at a time, exactly like a monitor's page rotation |
 
 Plus **Show the next picture now**, to step the cycle by hand.
+
+### Keeping the picture, following the weather
+
+Set **Sky** to `Live` and the picture keeps only its **place**. The hour, the
+weather, the sun's position on its arc, the moon's phase and the dimension all
+come from the detector, and the ground is lit to match:
+
+![One airship picture under twelve live skies: sunrise, noon, sunset, a moonlit night, rain, a lightning strike, snow over a taiga and clear sky over a desert, then the isles at night and in a storm, a cloud sea at dusk and spires at sunrise](preview/backdrops-live.png)
+
+That is the same code path the live weather page takes with its scenery forced,
+so nothing about the lighting is special-cased for backdrops.
+
+Two things follow from *where you actually are* rather than from the picture:
+
+- **whether it can rain at all**, and **whether that falls as snow**. An
+  airship is not a climate — so it snows over a taiga, rains over plains, and
+  stays clear over a desert while it rains elsewhere.
+- **the dimension.** In the Nether you get the Nether sky.
+
+*Over the Lava Sea* and *The Far End* are places rather than hours, so they are
+always drawn as authored, live sky or not.
+
+**With no detector there is no live sky to follow**, so the picture quietly
+falls back to the hour it was drawn with rather than to nothing. A ship set to
+a live sky therefore still shows something the moment it leaves the ground.
+
+Under a live sky the **cycle walks places rather than pictures**. The six
+island presets differ only in the hour they were drawn at, and the hour is now
+coming from the detector — so cycling them would show the same picture six
+times running. The rotation collapses to one entry per place instead.
 
 ### What a backdrop does and does not replace
 
@@ -433,9 +478,8 @@ because you chose a nicer sky.
 The big clock is the real time, so a backdrop with no detector behind it simply
 has no clock on it.
 
-Two details are still borrowed from the live world when there is one: the
-**moon phase** on a night backdrop is the real phase, and animation runs at the
-normal rate.
+Even with the sky set to `From the picture`, the **moon phase** on a night
+backdrop is the real one whenever there is a detector to ask.
 
 **Settings → Environment → Scenery** only applies while the picture is `Live`,
 and greys out when a backdrop is up — the backdrop brings its own ground.
@@ -457,7 +501,7 @@ the monitor shows.
 
 ```
 lua preview/render-preview.lua . preview     # needs a desktop Lua 5.x
-lua preview/smoke-test.lua .                 # 59 checks, no Minecraft needed
+lua preview/smoke-test.lua .                 # 62 checks, no Minecraft needed
 ```
 
 `smoke-test.lua` stubs CC:Tweaked and Basalt, then drives every page at seven

@@ -344,3 +344,36 @@ for i, id in ipairs(backdrops.ids()) do
   backdropTiles[i] = backdropTile(id, 6.2 + i * 1.7)
 end
 sheet(OUT .. "/backdrops.bmp", backdropTiles, 3)
+
+-- The same picture with its sky set to live: one place, the real hour and the
+-- real weather. Whether it rains or snows comes from the biome, not the
+-- picture, which is why the airship snows over a taiga and stays dry over sand.
+local function liveTile(id, tick, raining, thundering, biome, anim)
+  return function(grid)
+    local snap = {
+      available = true, tick = tick, day = 142, kind = "overworld",
+      phase = environment.phaseOf(tick), raining = raining,
+      thundering = thundering, biome = biome or "minecraft:plains",
+      moonId = 6, moonName = "First Quarter",
+    }
+    snap.body, snap.bodyProgress = environment.celestial(tick)
+    local scene = backdrops.scene(id, snap, true)
+    grid:setPalette(scene.palette)
+    sky.paint(grid, scene, anim or 6.2)
+  end
+end
+
+sheet(OUT .. "/backdrops-live.bmp", {
+  liveTile("shipDay", 23400, false, false, nil, 3.1),          -- airship, sunrise
+  liveTile("shipDay", 6000,  false, false, nil, 8.4),          -- airship, noon
+  liveTile("shipDay", 12200, false, false, nil, 12.7),         -- airship, sunset
+  liveTile("shipDay", 18000, false, false, nil, 17.2),         -- airship, night
+  liveTile("shipDay", 6000,  true,  false, nil, 21.5),         -- airship, rain
+  liveTile("shipDay", 6000,  true,  true,  nil, 25.9),         -- airship, storm
+  liveTile("shipDay", 4000, true, false, "minecraft:snowy_taiga", 30.3),
+  liveTile("shipDay", 6000, true, false, "minecraft:desert", 34.8),
+  liveTile("islesDawn", 18000, false, false, nil, 39.1),       -- isles, night
+  liveTile("islesDawn", 6000, true, true, nil, 43.6),          -- isles, storm
+  liveTile("cloudDay", 12200, false, false, nil, 48.0),        -- cloud sea, dusk
+  liveTile("spiresDay", 23400, false, false, nil, 52.4),       -- spires, sunrise
+}, 3)

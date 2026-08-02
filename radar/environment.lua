@@ -175,7 +175,11 @@ end
 --- kind of ground sits under all of it.
 ---@param snap table
 ---@param override? string A radar.biomes profile id to force, or "auto"/nil
-function environment.describe(snap, override)
+---@param climate? table A profile whose dry/cold flags gate the weather,
+---  instead of the drawn ground's. A backdrop following the live sky wants
+---  this: the picture says what to draw, but whether it can rain -- and
+---  whether that falls as snow -- is a fact about where you actually are.
+function environment.describe(snap, override, climate)
   local scene = {
     kind = snap.kind,
     phase = snap.phase,
@@ -194,6 +198,10 @@ function environment.describe(snap, override)
   scene.groundLabel = scene.ground.label
   scene.groundForced = forced ~= nil
 
+  -- Normally the ground you are drawing is the ground you are standing on, so
+  -- these are the same thing.
+  local weatherOn = climate or scene.ground
+
   local base
   if snap.kind == "nether" then
     scene.weather, base = "clear", theme.skies.nether
@@ -205,12 +213,12 @@ function environment.describe(snap, override)
     scene.body = "none"
     scene.title = "The End"
     scene.subtitle = "Void sky"
-  elseif snap.thundering and not scene.ground.dry then
+  elseif snap.thundering and not weatherOn.dry then
     scene.weather, base = "storm", theme.skies.storm
     scene.body = "none"
     scene.title = "Thunderstorm"
-  elseif snap.raining and not scene.ground.dry then
-    if scene.ground.cold then
+  elseif snap.raining and not weatherOn.dry then
+    if weatherOn.cold then
       scene.weather = "snow"
       base = scene.night and theme.skies.snowNight or theme.skies.snow
       scene.title = "Snowfall"
@@ -228,7 +236,7 @@ function environment.describe(snap, override)
       dusk = "Sunset", night = "Clear Night",
     }
     scene.title = titles[snap.phase] or "Clear"
-    if snap.raining and scene.ground.dry then
+    if snap.raining and weatherOn.dry then
       scene.subtitle = "Raining elsewhere; this biome stays dry"
     end
   end
