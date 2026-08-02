@@ -1,10 +1,17 @@
 --[[
-  RADAR STATION v6  --  Basalt edition
+  RADAR STATION v7  --  modular edition
   CC: Tweaked + Advanced Peripherals, Minecraft 1.21.1
 
-  A player radar with a live weather and sky display, built on the Basalt 2.5
-  UI framework, that can also run as a paired BASE on the ground and SHIP in
-  the air.
+  A player radar with a live weather and sky display and a power monitor,
+  built on the Basalt 2.5 UI framework. Every page is a MODULE: one file in
+  radar/modules/ that owns its page, its settings, its hardware and its
+  background loops. Drop a file in that folder and the station has a new page.
+
+  It runs in three places, and asks which on first boot:
+
+    BASE STATION    a fixed installation with monitors
+    POCKET          carried in hand, on the move
+    AIRSHIP/VEHICLE aboard something that moves
 
   ---------------------------------------------------------------------------
   HARDWARE
@@ -20,6 +27,8 @@
       Environment Detector (Advanced Peripherals)
                          unlocks the WEATHER page: live sky, biome scenery,
                          time of day, moon phase and light levels
+      Energy Detector    (Advanced Peripherals) inline in a cable, plus any
+                         directly wrappable battery -- unlocks the POWER page
       Wireless or ender modem
                          needed by the BASE and SHIP roles. Ender is the one
                          to use: no range limit, and it crosses dimensions.
@@ -31,7 +40,7 @@
   ---------------------------------------------------------------------------
   INSTALL
   ---------------------------------------------------------------------------
-    wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
+    wget run https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/install.lua
 
     That fetches every file and offers to install Basalt 2.5 too. Add
     --startup to launch the radar on boot. Then:
@@ -43,13 +52,14 @@
       wget run https://basalt.madefor.cc/2.5/install.lua minified
     then copy radar.lua and the radar/ folder next to basalt.lua.
 
-    Settings, log and ignore list from Radar Station v3 (and from the older
-    pocket build) are imported automatically on first run.
+    Settings from every earlier version are imported automatically on first
+    run, and an upgrade never sees the first-boot profile chooser: the
+    settings already on disk are that answer.
 
   ---------------------------------------------------------------------------
   KEYS
   ---------------------------------------------------------------------------
-    1..6       jump to Status / Radar / Contacts / Weather / Log / Settings
+    1..9       jump to a page, in tab-strip order
     Left/Right previous / next page
     Up/Down    scan range up / down
     R          rotate the picture 45 degrees
@@ -69,6 +79,14 @@
   ---------------------------------------------------------------------------
   NOTES
   ---------------------------------------------------------------------------
+    MODULES are switched on and off under Settings / Modules. Turning one off
+    removes its page, its settings section and its background polling, so a
+    pocket computer is not paying for a power page it has nothing to wire to.
+
+    PROFILES are a set of defaults, applied once. Nothing keeps enforcing one:
+    after it has been applied every setting it touched is an ordinary setting.
+    Change or reapply one under Settings / Profile.
+
     ROTATION only turns the picture, so a monitor can hang on any wall with
     "up" matching the way you face. Distances and the N/NE/E labels stay true
     compass bearings.
@@ -78,16 +96,17 @@
     which needs your username set. Press L, or use Settings / Orientation.
 
     SCENERY on the weather page comes from the biome the Environment Detector
-    reports: terrain, plants and colours all follow it, and the Nether and the
-    End vary by sub-biome too. A pack whose biome the station reads wrongly
-    can force one under Settings / Environment / Scenery.
+    reports. A pack whose biome the station reads wrongly can force one under
+    Settings / Environment / Scenery.
 
-    BACKDROPS replace that picture with one chosen by hand -- floating isles,
-    a cloud sea, an airship under way -- which owes nothing to the weather,
-    the biome or the hour, and needs no Environment Detector at all. Pick one,
-    or set it to cycle through a chosen set on a timer, under
-    Settings / Backdrop. The readout below the picture and the badge in the
-    header keep reporting the real sky either way.
+    BACKDROPS replace that picture with one chosen by hand, which owes nothing
+    to the weather, the biome or the hour, and needs no Environment Detector
+    at all. See Settings / Backdrop.
+
+    POWER reads an Energy Detector for rate and any wrappable battery for
+    stored and capacity, and graphs the last few minutes. A low buffer fires
+    the ordinary alert channels, and Redstone Output / Mode / Buffer maps
+    1-15 to how full the bank is.
 
     FIXED vs SELF: getPlayersInRange() is always centred on the Player
     Detector BLOCK. FIXED changes only what distances are measured FROM, so
@@ -126,7 +145,7 @@ if not ok then
   term.setTextColor(colors.white)
   term.clear()
   term.setCursorPos(1, 1)
-  print("Radar Station v6 needs Basalt 2.5.")
+  print("Radar Station v7 needs Basalt 2.5.")
   print("")
   print("Install it next to this program with:")
   print("  wget run https://basalt.madefor.cc/2.5/install.lua minified")
@@ -138,11 +157,29 @@ end
 local App      = require("radar.app")
 local config   = require("radar.config")
 local hardware = require("radar.hardware")
+local modules  = require("radar.modules")
+local setup    = require("radar.setup")
 local ui       = require("radar.ui")
+
+-- Where the registry scans for extra modules. Resolved from the folder this
+-- program was launched from, so an install under /apps finds its own modules
+-- rather than another copy's at the root.
+modules.dir = fs.combine(programDir, "radar/modules")
 
 local argv = { ... }
 
 local app = App.new()
+
+-- A computer with no settings of any vintage is a new install, and the one
+-- thing it cannot work out for itself is what it is bolted to. Everything
+-- after this is ordinary settings, changeable at any time.
+if app.fresh then
+  local chosen = setup.run(app.cfg, app.kit)
+  config.sanitise(app.cfg)
+  config.saveConfig(app.cfg)
+  app.link:attach(app.kit, app.cfg)
+  app.profileChosen = chosen
+end
 
 -- Coordinates on the command line win over anything on disk.
 if argv[1] and tonumber(argv[1]) then
@@ -188,9 +225,19 @@ config.saveConfig(app.cfg)
 local roots, terminalRoot = ui.build(app)
 app:start()
 
-if app.imported then
+if app.profileChosen then
+  terminalRoot:toast("Set up as " .. require("radar.profiles").label(app.profileChosen),
+    "success")
+elseif app.imported then
   terminalRoot:toast("Imported settings from an earlier version", "info")
 end
+
+-- A module that failed to load is reported rather than swallowed: a page
+-- quietly missing is a far more confusing thing to debug than a red banner.
+for _, failure in ipairs(modules.failures or {}) do
+  terminalRoot:toast("Module " .. failure.id .. " failed to load", "error")
+end
+
 if not app.kit.env and not config.isShip(app.cfg) then
   terminalRoot:toast("No Environment Detector - weather page is idle", "warning")
 end

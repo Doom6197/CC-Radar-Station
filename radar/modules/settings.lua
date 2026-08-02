@@ -1,22 +1,40 @@
--- Settings, hardware and the ignore list.
+-- SETTINGS module: everything configurable, on one scrolling page.
 --
 -- Every setting is a row: a dim label on the left and a button showing the
 -- current value on the right. Pressing the button either toggles it or opens a
 -- full-page picker, so the same interaction works for a two-state switch and
 -- for a twenty-eight entry sound list, and there is only one code path to keep
--- correct. The whole body is rebuilt whenever the hardware changes.
+-- correct. The whole body is rebuilt whenever the hardware or the module set
+-- changes.
+--
+-- What is HERE is what belongs to the station rather than to a page: the
+-- profile, which modules are on, tracking, the scope, the sweep, the link, the
+-- alerts, the redstone line, the displays and the ignore list. Anything owned
+-- by one page is built by that page's module through settings(ctx) -- the
+-- weather module contributes ENVIRONMENT and BACKDROP, the power module
+-- contributes POWER -- and those sections come and go with their modules
+-- rather than being switched on and off from in here.
 
 local basalt = require("basalt")
 local config = require("radar.config")
 local alertsLib = require("radar.alerts")
-local backdrops = require("radar.backdrops")
-local biomes = require("radar.biomes")
 local linkLib = require("radar.link")
+local modules = require("radar.modules")
+local profiles = require("radar.profiles")
 local scan   = require("radar.scan")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
 
-local view = {}
+local view = {
+  id = "settings",
+  title = "SETTINGS",
+  short = "SET",
+  order = 90,
+  core = true,
+  -- A monitor has no keyboard, and this page is mostly typing.
+  monitor = false,
+  summary = "everything configurable; terminal only",
+}
 
 local LABEL_WIDTH = 14
 
@@ -81,6 +99,7 @@ function view.build(container, app, root)
   local nextY = 1
 
   local refreshRows
+  local build
 
   --- Offers whichever base stations have announced themselves lately. Pairing
   --- is a choice, not a subscription, so two crews on one world never end up
@@ -181,13 +200,86 @@ function view.build(container, app, root)
     return out
   end
 
+  --- What a module's settings() is handed: everything it needs to build a
+  --- section that matches the rest of the page, and nothing else. A module
+  --- cannot reach the row list or the layout cursor, so it cannot leave the
+  --- page half built.
+  local ctx = {
+    app = app, root = root,
+    heading = heading, row = row, action = action, note = note, spacer = spacer,
+    openPicker = openPicker,
+    refreshRows = function() refreshRows() end,
+    entriesOf = entriesOf, onOff = onOff, onOffColor = onOffColor,
+    body = body, LABEL_WIDTH = LABEL_WIDTH,
+    rebuild = function() build() end,
+  }
+
   -- ---------------------------------------------------------------- build ---
-  local function build()
+  build = function()
     rows, nextY = {}, 1
     local children = body:getChildren()
     for i = #children, 1, -1 do children[i]:destroy() end
 
     local cfg = app.cfg
+
+    -- profile ---------------------------------------------------------------
+    -- Applying one is destructive on purpose, so the only way in is the picker
+    -- rather than a toggle that could be hit by accident.
+    heading("PROFILE")
+
+    row("This station", function() return profiles.summary(cfg) end, function()
+      local entries = {}
+      for _, entry in ipairs(profiles.LIST) do
+        entries[#entries + 1] = {
+          label = entry.label .. " - " .. entry.hint,
+          value = entry.id,
+        }
+      end
+      openPicker("APPLY A PROFILE", entries, cfg.profile, function(value)
+        app:setProfile(value)
+        root:toast("Applied " .. profiles.label(value), "success")
+        build()
+      end)
+    end, function() return cfg.profile and theme.accent or theme.dim end)
+
+    note("Applying one OVERWRITES the settings it covers -")
+    note("tracking, the scope, poll rates and which modules")
+    note("are on. Everything stays editable afterwards.")
+    spacer()
+
+    -- modules ---------------------------------------------------------------
+    heading("MODULES")
+
+    for _, entry in ipairs(modules.all()) do
+      local id = entry.id
+      row(util.shorten(entry.title, LABEL_WIDTH - 1), function()
+        if entry.core then return "always on" end
+        return modules.isEnabled(cfg, id) and "ON" or "off"
+      end, function()
+        if entry.core then
+          root:toast(entry.title .. " cannot be switched off", "info")
+          return
+        end
+        app:toggleModule(id)
+        -- The tab strip, the terminal page and every monitor's rotation may
+        -- all have changed, so the page is rebuilt rather than refreshed.
+        build()
+        root:toast(entry.title .. (modules.isEnabled(cfg, id) and " on" or " off"),
+          "info")
+      end, function()
+        if entry.core then return theme.dim end
+        return modules.isEnabled(cfg, id) and theme.good or theme.dim
+      end)
+      if entry.summary then note("  " .. util.shorten(entry.summary, 46)) end
+    end
+
+    for _, failure in ipairs(modules.failures or {}) do
+      note("! " .. util.shorten(failure.id .. ": " .. failure.error, 46))
+    end
+
+    note("A module is one file in radar/modules/. Drop one in")
+    note("and it is a page here after a restart.")
+    spacer()
 
     -- tracking --------------------------------------------------------------
     heading("TRACKING")
@@ -583,10 +675,8 @@ function view.build(container, app, root)
     end)
 
     row("Mode", function()
-      for _, mode in ipairs(config.RS_MODES) do
-        if mode.id == cfg.rs.mode then return mode.label .. " - " .. mode.hint end
-      end
-      return cfg.rs.mode
+      local mode = config.redstoneMode(cfg)
+      return mode.label .. " - " .. mode.hint
     end, function()
       openPicker("OUTPUT MODE",
         entriesOf(config.RS_MODES,
@@ -634,6 +724,9 @@ function view.build(container, app, root)
       app:saveConfig()
     end, onOffColor(function() return cfg.rs.invert end))
 
+    note("Pulse, Hold and Analog read the contact list. A mode")
+    note("added by a module reads whatever that module measures.")
+
     action("Test pulse", function()
       basalt.schedule(function()
         local wasEnabled = cfg.rs.enabled
@@ -648,198 +741,30 @@ function view.build(container, app, root)
     end)
     spacer()
 
-    -- environment -----------------------------------------------------------
-    heading("ENVIRONMENT")
-
-    row("Detector", function()
-      return app.kit.env and ("attached: " .. app.kit.envName) or "not found"
-    end, function()
-      app:rescan()
-      root:toast(app.kit.env and "Environment Detector found"
-        or "Still no Environment Detector", app.kit.env and "success" or "warning")
-    end, function() return app.kit.env and theme.good or theme.warn end)
-
-    row("Polling", function() return onOff(cfg.env) end, function()
-      cfg.env = not cfg.env
-      app:saveConfig()
-      if cfg.env then app:pollEnvironment(true) end
-    end, onOffColor(function() return cfg.env end))
-
-    row("Poll every", function() return cfg.envSeconds .. " seconds" end, function()
-      openPicker("ENVIRONMENT POLL RATE",
-        entriesOf({ 1, 2, 5, 10, 30 },
-          function(v) return v .. " seconds" end, function(v) return v end),
-        cfg.envSeconds,
-        function(value)
-          cfg.envSeconds = value
-          app:saveConfig()
-          refreshRows()
-        end)
-    end)
-
-    row("Animation", function() return onOff(cfg.animate) end, function()
-      cfg.animate = not cfg.animate
-      app:saveConfig()
-    end, onOffColor(function() return cfg.animate end))
-
-    note("Animation drives the sky, clouds, rain and radar sweep.")
-
-    row("Scenery", function()
-      if cfg.biomeScene == "auto" then
-        local snap = app:snapshot()
-        local live = snap and snap.scene and snap.scene.groundLabel
-        return live and ("auto - " .. live) or "auto - follows the biome"
-      end
-      return "forced - " .. biomes.label(cfg.biomeScene)
-    end, function()
-      local entries = { { label = "Auto - follow the biome", value = "auto" } }
-      for _, id in ipairs(biomes.ids()) do
-        entries[#entries + 1] = { label = biomes.label(id), value = id }
-      end
-      openPicker("WEATHER PAGE SCENERY", entries, cfg.biomeScene, function(value)
-        cfg.biomeScene = value
-        app:saveConfig()
-        app:pollEnvironment(true)
-        refreshRows()
-      end)
-    end, function()
-      -- A chosen backdrop replaces the whole picture, so the live scenery
-      -- setting has nothing to act on until the page goes back to live.
-      if cfg.backdrop ~= "live" then return theme.line end
-      return cfg.biomeScene == "auto" and theme.text or theme.accent
-    end)
-
-    note("The ground the weather page draws. Force one if your pack")
-    note("reports a biome the station does not recognise.")
-    spacer()
-
-    -- backdrop --------------------------------------------------------------
-    -- A picture for the weather page chosen by hand rather than read off the
-    -- detector. On a pack where every dimension is floating islands -- and on
-    -- a ship, where a detector riding a contraption reports nothing at all --
-    -- the live sky is often either wrong or missing.
-    heading("BACKDROP")
-
-    row("Picture", function()
-      if cfg.backdrop == "live" then return "live - draws the real sky" end
-      if cfg.backdrop == "cycle" then
-        local current = app:backdropId()
-        return ("cycle - %d, now %s"):format(#backdrops.rotation(cfg),
-          current and backdrops.label(current) or "?")
-      end
-      return backdrops.label(cfg.backdrop)
-    end, function()
-      local entries = {
-        { label = "Live - draw the real sky", value = "live" },
-        { label = "Cycle - change on a timer", value = "cycle" },
-      }
-      for _, id in ipairs(backdrops.ids()) do
-        entries[#entries + 1] = { label = backdrops.label(id), value = id }
-      end
-      openPicker("WEATHER PAGE BACKDROP", entries, cfg.backdrop, function(value)
-        app:setBackdrop(value)
-        refreshRows()
-      end)
-    end, function() return cfg.backdrop == "live" and theme.text or theme.accent end)
-
-    note("A picture that ignores the weather and the biome.")
-    note("Works with no Environment Detector at all.")
-
-    row("Sky", function() return config.backdropSkyLabel(cfg) end, function()
-      openPicker("BACKDROP SKY",
-        entriesOf(config.BACKDROP_SKIES,
-          function(s) return s.label .. " - " .. s.hint end,
-          function(s) return s.id end),
-        cfg.backdropSky,
-        function(value)
-          app:setBackdropSky(value)
-          refreshRows()
-        end)
-    end, function()
-      if cfg.backdrop == "live" then return theme.line end
-      return backdrops.isLiveSky(cfg) and theme.accent or theme.text
-    end)
-
-    note("Live keeps the picture but takes the hour, the weather")
-    note("and the sun from the detector - so the airships fly")
-    note("through the real dusk and the real rain.")
-
-    row("Change every", function()
-      local seconds = cfg.backdropSeconds
-      if seconds >= 60 then return ("%g minutes"):format(seconds / 60) end
-      return seconds .. " seconds"
-    end, function()
-      openPicker("BACKDROP CHANGE INTERVAL",
-        entriesOf(config.BACKDROP_INTERVALS, function(v)
-          if v >= 60 then return ("%g minutes"):format(v / 60) end
-          return v .. " seconds"
-        end, function(v) return v end),
-        cfg.backdropSeconds,
-        function(value)
-          cfg.backdropSeconds = value
-          app.backdropAt = os.clock()
-          app:saveConfig()
-          refreshRows()
-        end)
-    end, function() return cfg.backdrop == "cycle" and theme.text or theme.line end)
-
-    -- The cycle is a set rather than a single choice, so the picker toggles
-    -- one picture and opens itself again for the next.
-    local function editBackdrops()
-      local entries = {}
-      for _, id in ipairs(backdrops.ids()) do
-        entries[#entries + 1] = {
-          label = (cfg.backdropSkip[id] and "[ ] " or "[x] ") .. backdrops.label(id),
-          value = id,
-        }
-      end
-      entries[#entries + 1] = { label = "-- done --", value = false }
-      openPicker("PICTURES IN THE CYCLE", entries, nil, function(id)
-        if not id then refreshRows(); return end
-        local skip = cfg.backdropSkip
-        skip[id] = (not skip[id]) or nil
-        -- Refuse to empty the cycle: backdrops.rotation papers over an empty
-        -- set by handing back one picture, so the count has to be taken from
-        -- the skip list itself.
-        local remaining = 0
-        for _, other in ipairs(backdrops.ids()) do
-          if not skip[other] then remaining = remaining + 1 end
+    -- the modules' own sections ---------------------------------------------
+    -- In page order, so a section turns up where its tab does. A module that
+    -- throws while building loses its section rather than the whole page.
+    for _, entry in ipairs(modules.enabled(cfg)) do
+      if entry.id ~= view.id and type(entry.settings) == "function" then
+        local ok, err = pcall(entry.settings, ctx)
+        if not ok then
+          heading(entry.title)
+          note("This module's settings failed to build:")
+          note(util.shorten(tostring(err), 46))
+          spacer()
         end
-        if remaining == 0 then
-          skip[id] = nil
-          root:toast("At least one picture has to stay in the cycle", "warning")
-        end
-        app:saveConfig()
-        refreshRows()
-        editBackdrops()
-      end)
+      end
     end
-
-    row("In the cycle", function()
-      local rotation = backdrops.rotation(cfg)
-      if #rotation == backdrops.count() then
-        return ("all %d pictures"):format(#rotation)
-      end
-      return ("%d of %d pictures"):format(#rotation, backdrops.count())
-    end, editBackdrops,
-      function() return cfg.backdrop == "cycle" and theme.text or theme.line end)
-
-    action("Show the next picture now", function()
-      if cfg.backdrop ~= "cycle" then
-        root:toast("Set the picture to Cycle first", "info")
-        return
-      end
-      app:nextBackdrop()
-      root:toast(backdrops.label(app:backdropId()), "info")
-    end)
-    spacer()
 
     -- displays --------------------------------------------------------------
     heading("DISPLAYS")
 
+    local pages = config.pages(cfg)
+    local terminalPages = config.terminalPages(cfg)
+
     row("Terminal", function() return cfg.terminalPage end, function()
       openPicker("TERMINAL PAGE",
-        entriesOf(config.PAGES, function(p) return p end, function(p) return p end),
+        entriesOf(terminalPages, function(p) return p end, function(p) return p end),
         cfg.terminalPage,
         function(value)
           root:setPage(value)
@@ -863,7 +788,7 @@ function view.build(container, app, root)
         return ("%s   scale %.1f"):format(displayCfg.page, displayCfg.scale)
       end, function()
         openPicker("PAGE FOR " .. monitor.name,
-          entriesOf(config.PAGES, function(p) return p end, function(p) return p end),
+          entriesOf(pages, function(p) return p end, function(p) return p end),
           displayCfg.page,
           function(value)
             displayCfg.page = value
@@ -889,7 +814,7 @@ function view.build(container, app, root)
       row("  auto cycle", function()
         if not displayCfg.cycle then return "off" end
         return ("every %ds   %d pages"):format(
-          displayCfg.cycleSeconds, #config.cyclePages(displayCfg))
+          displayCfg.cycleSeconds, #config.cyclePages(cfg, displayCfg))
       end, function()
         displayCfg.cycle = not displayCfg.cycle
         app:saveConfig()
@@ -911,7 +836,7 @@ function view.build(container, app, root)
       -- toggles one page and opens itself again for the next.
       local function editRotation()
         local entries = {}
-        for _, page in ipairs(config.PAGES) do
+        for _, page in ipairs(pages) do
           local inRotation = not displayCfg.cycleSkip[page]
           entries[#entries + 1] = {
             label = (inRotation and "[x] " or "[ ] ") .. page,
@@ -927,7 +852,7 @@ function view.build(container, app, root)
           -- empty set by handing back one page, so the count has to be taken
           -- from the skip list itself.
           local remaining = 0
-          for _, id in ipairs(config.PAGES) do
+          for _, id in ipairs(pages) do
             if not skip[id] then remaining = remaining + 1 end
           end
           if remaining == 0 then
@@ -941,9 +866,9 @@ function view.build(container, app, root)
       end
 
       row("  cycle pages", function()
-        local pages = config.cyclePages(displayCfg)
-        if #pages == #config.PAGES then return "all pages" end
-        return table.concat(pages, " ")
+        local inRotation = config.cyclePages(cfg, displayCfg)
+        if #inRotation == #pages then return "all pages" end
+        return table.concat(inRotation, " ")
       end, editRotation)
     end
 
@@ -1005,19 +930,10 @@ function view.build(container, app, root)
     end)
     spacer()
 
-    -- log -------------------------------------------------------------------
-    heading("HISTORY")
-    row("Entries", function() return tostring(app.log:count()) end, function()
-      app:clearLog()
-      root:toast("Log cleared", "info")
-    end)
-    note("Press to clear. The C key does the same thing.")
-    spacer()
-
     -- help ------------------------------------------------------------------
     heading("KEYBOARD")
     local shortcuts = {
-      "1-6      jump to a page",
+      "1-9      jump to a page",
       "Lt / Rt  previous / next page",
       "Up / Dn  scan range up / down",
       "R        rotate the picture 45 deg",
@@ -1031,6 +947,9 @@ function view.build(container, app, root)
       "Q        quit",
     }
     for _, line in ipairs(shortcuts) do note(line) end
+    for _, entry in ipairs(modules.keys(cfg)) do
+      if entry.action and entry.action.hint then note(entry.action.hint) end
+    end
     note("Right-click a monitor to move it to the next page.")
     spacer()
 
@@ -1045,6 +964,7 @@ function view.build(container, app, root)
 
   build()
   app:on("hardware", build)
+  app:on("modules", build)
 
   return {
     refresh = refreshRows,

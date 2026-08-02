@@ -1,24 +1,33 @@
 -- Application state and the background loops that drive it.
 --
 -- The UI never talks to a peripheral directly. It reads the tables here and
--- subscribes to four events:
+-- subscribes to events:
 --
 --   "scan"    a sweep finished; contacts/centre/scanError are new
 --   "env"     the environment snapshot changed
 --   "anim"    animation frame; only fired while something animated is visible
 --   "config"  settings changed and were written to disk
+--   "hardware" peripherals were rediscovered
 --   "backdrop" the weather page's chosen picture changed
+--
+-- A module may emit events of its own -- the power module emits "power" -- and
+-- a view subscribing to one it does not recognise simply never hears from it.
 --
 -- A SHIP fills the same tables and fires the same events from what a base
 -- relays instead of from a detector, so no view can tell the difference.
 --
 -- Every loop runs as a Basalt schedule, so sleep() is legal inside them and
--- the UI stays responsive throughout.
+-- the UI stays responsive throughout. Modules add their own loops the same
+-- way, from their start() -- see radar/modules.lua.
+--
+-- What is HERE is what more than one page needs: the sweep, the environment,
+-- the heading, the link. Anything only one page cares about lives in that
+-- page's module and hangs its state off this table.
 
 local basalt      = require("basalt")
-local backdrops   = require("radar.backdrops")
 local config      = require("radar.config")
 local hardware    = require("radar.hardware")
+local modules     = require("radar.modules")
 local scan        = require("radar.scan")
 local logbook     = require("radar.logbook")
 local alertsLib   = require("radar.alerts")
@@ -37,15 +46,21 @@ local ANIM_FPS = 5
 local HEADING_EASE = 0.34
 
 function app.new()
-  local cfg, logEntries, ignore, imported = config.load()
+  -- Every module has to be registered before the settings are read, because
+  -- what a setting IS -- its default, its legal range, whether the page it
+  -- belongs to exists at all -- is a question only the registry can answer.
+  modules.load()
+
+  local cfg, logEntries, ignore, imported, fresh = config.load()
 
   local self = setmetatable({
     cfg = cfg,
     ignore = ignore,
     imported = imported,
+    fresh = fresh,
     log = logbook.new(logEntries),
 
-    kit = hardware.discover(),
+    kit = modules.discover(hardware.discover()),
 
     contacts = {},
     previous = {},        -- name -> true, from the previous sweep
@@ -62,9 +77,6 @@ function app.new()
     anim = 0,
     animWanted = 0,       -- number of visible views asking for frames
 
-    backdropIndex = 1,    -- position in the backdrop cycle
-    backdropAt = 0,       -- when the current picture went up
-
     listeners = {},
     running = true,
   }, app)
@@ -73,6 +85,10 @@ function app.new()
   self.alerts = alertsLib.new(cfg, self.kit)
   self.link = linkLib.new()
   self.link:attach(self.kit, cfg)
+
+  -- Last, so a module's attach() finds a fully built app: the kit, the
+  -- settings, the alert channels and the link are all in place by here.
+  modules.attach(self)
   return self
 end
 
@@ -119,7 +135,7 @@ function app:saveIgnore() config.saveIgnore(self.ignore) end
 -- -------------------------------------------------------------- hardware ---
 
 function app:rescan()
-  self.kit = hardware.discover()
+  self.kit = modules.discover(hardware.discover())
   self.alerts:setKit(self.kit)
   self.link:attach(self.kit, self.cfg)
   for _, monitor in ipairs(self.kit.monitors) do
@@ -127,6 +143,9 @@ function app:rescan()
       self.cfg.displays[monitor.name] = config.displayDefaults()
     end
   end
+  -- A module that claimed hardware has to be told the list has changed, or the
+  -- power page would keep polling an energy detector that has been mined.
+  modules.attach(self)
   self:saveConfig()
   self:emit("hardware")
 end
@@ -194,78 +213,6 @@ function app:easeHeading()
   end
   self.headingShown = util.approachAngle(
     self.headingShown or self.heading, self.heading, HEADING_EASE)
-end
-
--- -------------------------------------------------------------- backdrops ---
--- The weather page can draw a chosen picture instead of the live sky, and can
--- walk a set of them on a timer. Only the artwork is replaced: the readout
--- under it and the badge in the header keep reporting the real snapshot, so a
--- decorative sky never misrepresents the weather.
-
---- The backdrop that should be on screen, or nil while the page is live.
-function app:backdropId()
-  local choice = self.cfg.backdrop
-  if choice == "live" then return nil end
-  if choice ~= "cycle" then
-    return backdrops.byId(choice) and choice or nil
-  end
-  local rotation = backdrops.rotation(self.cfg)
-  return rotation[((self.backdropIndex or 1) - 1) % #rotation + 1]
-end
-
---- The scene the weather page paints: a backdrop when one is chosen, the live
---- sky otherwise, and nil when there is neither. A backdrop set to a live sky
---- keeps only its ground and takes the hour and the weather from the detector.
-function app:paintedScene()
-  local id = self:backdropId()
-  if id then
-    return backdrops.scene(id, self.env.snapshot, backdrops.isLiveSky(self.cfg))
-  end
-  local snap = self.env.snapshot
-  return (snap and snap.available) and snap.scene or nil
-end
-
---- Moves the cycle on by one and gives the new picture a full interval.
----@return boolean changed
-function app:nextBackdrop(now)
-  if self.cfg.backdrop ~= "cycle" then return false end
-  local rotation = backdrops.rotation(self.cfg)
-  self.backdropIndex = ((self.backdropIndex or 1) % #rotation) + 1
-  self.backdropAt = now or os.clock()
-  self:emit("backdrop")
-  return true
-end
-
---- Checks whether the interval has elapsed. The deadline is compared rather
---- than slept on, so shortening the interval takes effect straight away.
----@return boolean changed
-function app:tickBackdrop(now)
-  if self.cfg.backdrop ~= "cycle" then
-    self.backdropAt = now
-    return false
-  end
-  if now - (self.backdropAt or 0) < self.cfg.backdropSeconds then return false end
-  return self:nextBackdrop(now)
-end
-
-function app:setBackdrop(choice)
-  self.cfg.backdrop = choice
-  self.backdropAt = os.clock()
-  if choice ~= "cycle" then self.backdropIndex = 1 end
-  self:saveConfig()
-  self:emit("backdrop")
-end
-
---- Switches a backdrop between the sky it was drawn with and the real one.
---- The cycle is rewound with it: the two modes walk different rotations,
---- because under a live sky the presets that differ only by hour collapse
---- into one another.
-function app:setBackdropSky(mode)
-  self.cfg.backdropSky = mode
-  self.backdropIndex = 1
-  self.backdropAt = os.clock()
-  self:saveConfig()
-  self:emit("backdrop")
 end
 
 -- ------------------------------------------------------------------ sweep ---
@@ -399,16 +346,6 @@ function app:start()
     end
   end)
 
-  -- The weather page's backdrop cycle. Half-second granularity is ample for an
-  -- interval measured in tens of seconds, and it costs nothing at all while
-  -- the page is live or holding one picture.
-  basalt.schedule(function()
-    while self.running do
-      sleep(0.5)
-      pcall(self.tickBackdrop, self, os.clock())
-    end
-  end)
-
   -- Inbound traffic. rednet.receive blocks, so it gets a loop to itself; with
   -- no network role it idles without ever touching the modem.
   basalt.schedule(function()
@@ -431,6 +368,10 @@ function app:start()
       sleep(linkLib.ANNOUNCE_SECONDS)
     end
   end)
+
+  -- Whatever the modules want running. Last, so a module loop starting up
+  -- finds the station already sweeping and polling rather than half awake.
+  modules.start(self)
 end
 
 function app:stop()
@@ -467,6 +408,50 @@ function app:toggleOrientation()
   end
   self:saveConfig()
   return config.isUnlocked(self.cfg)
+end
+
+-- --------------------------------------------------------------- modules ---
+
+--- Switches a module on or off. Anything that changed as a result -- the tab
+--- strip, a monitor's page rotation, the terminal's own page -- is repaired by
+--- the sanitiser rather than by the caller.
+---@return boolean enabled The state it ended up in
+function app:toggleModule(id)
+  local entry = modules.byId(id)
+  if not entry or entry.core then return true end
+
+  local off = self.cfg.modulesOff or {}
+  off[id] = (not off[id]) or nil
+  self.cfg.modulesOff = off
+  config.sanitise(self.cfg)
+
+  -- A module switched on after boot has never had its loops started, so a
+  -- freshly enabled power page would draw a graph nothing was feeding. There
+  -- is no matching stop: the loops check whether their module is still on.
+  modules.startOne(self, id)
+
+  self:saveConfig()
+  self:emit("modules")
+  return modules.isEnabled(self.cfg, id)
+end
+
+--- Applies a device profile over the current settings. Destructive by design:
+--- the operator asked for a set of defaults, so they get the whole set rather
+--- than a merge that leaves the station in a state no profile describes.
+function app:setProfile(id)
+  local profiles = require("radar.profiles")
+  profiles.apply(self.cfg, id, self.kit)
+  config.sanitise(self.cfg)
+  self.link:attach(self.kit, self.cfg)
+  self.previous, self.firstScan = {}, true
+
+  -- A profile may have switched a module back on, and one that has never run
+  -- before needs its loops starting.
+  for _, entry in ipairs(modules.all()) do modules.startOne(self, entry.id) end
+
+  self:saveConfig()
+  self:emit("modules")
+  return self.cfg.profile
 end
 
 -- ------------------------------------------------------------------ link ---

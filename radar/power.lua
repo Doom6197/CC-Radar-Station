@@ -1,0 +1,465 @@
+-- Energy monitoring: what is flowing, what is stored, and what it did lately.
+--
+-- Two quite different kinds of peripheral answer questions about power, and
+-- the useful picture needs both:
+--
+--   a METER sits inline in a cable and reports a transfer RATE. The Advanced
+--   Peripherals Energy Detector is one, and it also carries a settable limit,
+--   so it doubles as a throttle. A meter knows nothing about storage.
+--
+--   a STORE is a battery wrapped directly -- an induction matrix, an energy
+--   cell, a flux point. It reports STORED and CAPACITY, which no meter can,
+--   and some of them report their own last input and output as well.
+--
+-- Everything here is matched on METHOD NAME rather than on peripheral type,
+-- exactly as radar/hardware.lua matches its detectors, because the mods that
+-- expose energy all spell it slightly differently and none of them are worth
+-- naming in code that has to run on a pack that may not have them installed.
+-- A block answering getEnergy() and getMaxEnergy() is a battery, whatever mod
+-- it came from and whatever this file was written before.
+--
+-- Nothing here touches the UI. The page reads these tables; the settings page
+-- writes the roles and thresholds; the alert path is handed a fraction.
+
+local util = require("radar.util")
+
+local power = {}
+power.__index = power
+
+local floor, max, min, abs = math.floor, math.max, math.min, math.abs
+
+-- Ticks per second, for turning a change in stored energy into a rate. The
+-- mods all quote rates per TICK, so a readout in FE/t has to match.
+local TICKS_PER_SECOND = 20
+
+-- How far the buffer has to climb back above the alarm threshold before the
+-- alarm re-arms. Without it a buffer sitting exactly on the line alarms on
+-- every single poll.
+power.ALARM_HYSTERESIS = 5
+
+-- ---------------------------------------------------------------- probing ---
+
+-- Probed in order; the first method that exists wins. Ordered most specific
+-- first, so a peripheral offering several spellings is read the way its own
+-- mod documents rather than through a generic alias.
+local STORED_METHODS = {
+  "getEnergy", "getEnergyStored", "getStoredEnergy", "getEnergyStorage",
+}
+local CAPACITY_METHODS = {
+  "getEnergyCapacity", "getMaxEnergy", "getMaxEnergyStored",
+  "getEnergyMaxStorage", "getCapacity",
+}
+local RATE_METHODS = {
+  "getTransferRate", "getEnergyTransfer", "getThroughput",
+}
+local INPUT_METHODS = {
+  "getLastInput", "getInput", "getInputRate", "getEnergyInput",
+}
+local OUTPUT_METHODS = {
+  "getLastOutput", "getOutput", "getOutputRate", "getEnergyOutput",
+}
+local LIMIT_GET = { "getTransferRateLimit" }
+local LIMIT_SET = { "setTransferRateLimit" }
+
+--- First method on `p` from `names`, or nil.
+local function pick(p, names)
+  for _, name in ipairs(names) do
+    if type(p[name]) == "function" then return p[name], name end
+  end
+  return nil
+end
+
+--- Calls a probed method and returns a number, or nil if it threw or answered
+--- with something that is not one. Every one of these is a server-thread call
+--- that a half-loaded chunk can refuse.
+local function readNumber(fn)
+  if not fn then return nil end
+  local ok, value = pcall(fn)
+  if not ok then return nil end
+  value = tonumber(value)
+  if not value or value ~= value then return nil end
+  return value
+end
+
+--- Whether a peripheral looks like anything this module can use.
+function power.looksLikeEnergy(p)
+  if type(p) ~= "table" then return false end
+  if pick(p, RATE_METHODS) then return true end
+  return pick(p, STORED_METHODS) ~= nil and pick(p, CAPACITY_METHODS) ~= nil
+end
+
+--- Builds a source descriptor from a wrapped peripheral, or nil.
+function power.describe(name, p, ptype)
+  if type(p) ~= "table" then return nil end
+
+  local rate     = pick(p, RATE_METHODS)
+  local stored   = pick(p, STORED_METHODS)
+  local capacity = pick(p, CAPACITY_METHODS)
+  local isStore  = stored ~= nil and capacity ~= nil
+
+  if not rate and not isStore then return nil end
+
+  return {
+    name = name,
+    dev  = p,
+    ptype = ptype,
+    meter = rate ~= nil,
+    store = isStore,
+
+    _rate     = rate,
+    _stored   = isStore and stored or nil,
+    _capacity = isStore and capacity or nil,
+    _input    = pick(p, INPUT_METHODS),
+    _output   = pick(p, OUTPUT_METHODS),
+    _limitGet = pick(p, LIMIT_GET),
+    _limitSet = pick(p, LIMIT_SET),
+
+    -- Last readings, kept per source so the settings page can show which one
+    -- is actually carrying the load.
+    rate = nil, stored = nil, capacity = nil,
+    input = nil, output = nil, limit = nil,
+    fault = nil,
+  }
+end
+
+-- --------------------------------------------------------------- history ---
+-- A ring of three parallel arrays rather than an array of sample tables: at
+-- one sample a second over fifteen minutes that is 900 entries, and 900 small
+-- tables is a lot of garbage for a computer with a modest memory budget.
+
+local History = {}
+History.__index = History
+
+local function newHistory(capacity)
+  return setmetatable({
+    cap = max(2, floor(capacity or 300)),
+    n = 0, head = 0,
+    ins = {}, outs = {}, pct = {},
+    _cache = nil,
+  }, History)
+end
+
+function History:push(input, output, percent)
+  self.head = (self.head % self.cap) + 1
+  self.ins[self.head]  = input
+  self.outs[self.head] = output
+  self.pct[self.head]  = percent
+  if self.n < self.cap then self.n = self.n + 1 end
+  self._cache = nil
+end
+
+function History:resize(capacity)
+  capacity = max(2, floor(capacity or self.cap))
+  if capacity == self.cap then return self end
+  -- Keep the most recent samples that still fit; anything older belongs to a
+  -- window the operator has just said they are not interested in.
+  local ins, outs, pct = self:series()
+  local keep = min(#ins, capacity)
+  local first = #ins - keep + 1
+
+  self.cap, self.n, self.head = capacity, 0, 0
+  self.ins, self.outs, self.pct, self._cache = {}, {}, {}, nil
+  for i = first, #ins do self:push(ins[i], outs[i], pct[i]) end
+  return self
+end
+
+function History:clear()
+  self.n, self.head = 0, 0
+  self.ins, self.outs, self.pct, self._cache = {}, {}, {}, nil
+  return self
+end
+
+--- Oldest first, as three plain arrays the chart can walk. Memoised, because
+--- a page with three series on it would otherwise rebuild the whole ring three
+--- times on every single frame.
+function History:series()
+  if self._cache then
+    return self._cache[1], self._cache[2], self._cache[3]
+  end
+  local ins, outs, pct = {}, {}, {}
+  local start = (self.n < self.cap) and 1 or (self.head % self.cap) + 1
+  for i = 0, self.n - 1 do
+    local index = ((start + i - 1) % self.cap) + 1
+    ins[i + 1]  = self.ins[index]
+    outs[i + 1] = self.outs[index]
+    pct[i + 1]  = self.pct[index]
+  end
+  self._cache = { ins, outs, pct }
+  return ins, outs, pct
+end
+
+power.newHistory = newHistory
+
+-- ------------------------------------------------------------------ model ---
+
+function power.new()
+  return setmetatable({
+    sources = {},          -- every energy peripheral found
+
+    available = false,     -- anything at all attached
+    hasRate = false,       -- a real rate, rather than one inferred from storage
+    hasStore = false,
+
+    input = 0, output = 0, net = 0,
+    stored = nil, capacity = nil, percent = nil,
+
+    history = newHistory(300),
+    lastAt = nil,
+    lastStored = nil,
+
+    low = false,           -- the buffer is under the alarm threshold
+    lowSince = nil,
+    error = nil,
+  }, power)
+end
+
+--- Rebuilds the source list from the hardware kit.
+function power:attach(kit, cfg)
+  local sources = {}
+  for _, entry in ipairs(kit.energy or {}) do
+    sources[#sources + 1] = entry
+  end
+  self.sources = sources
+  self.available = #sources > 0
+  if cfg then self:applyWindow(cfg) end
+  return self
+end
+
+--- Resizes the history to match the configured window and sample rate.
+function power:applyWindow(cfg)
+  local settings = cfg.power or {}
+  local window = tonumber(settings.windowSeconds) or 300
+  local every  = tonumber(settings.sampleSeconds) or 1
+  self.history:resize(floor(window / max(0.5, every)) + 1)
+  return self
+end
+
+--- What role a source plays. Meters are inbound by default: one detector on
+--- the main bus is measuring supply, which is the common case.
+function power.roleOf(cfg, source)
+  local roles = (cfg.power or {}).roles or {}
+  local role = roles[source.name]
+  if role == "in" or role == "out" or role == "off" then return role end
+  return source.meter and "in" or "off"
+end
+
+-- ---------------------------------------------------------------- polling ---
+
+--- Reads every source once and recomputes the totals.
+---@param cfg table Settings
+---@param now? number os.clock(), injectable so the maths can be tested
+function power:poll(cfg, now)
+  now = now or os.clock()
+
+  local settings = cfg.power or {}
+  local input, output = 0, 0
+  local stored, capacity = nil, nil
+  local sawRate, sawStore = false, false
+  local faults = 0
+
+  for _, source in ipairs(self.sources) do
+    source.fault = nil
+
+    if source.meter then
+      local rate = readNumber(source._rate)
+      source.rate = rate
+      if rate then
+        sawRate = true
+        local role = power.roleOf(cfg, source)
+        if role == "in" then input = input + abs(rate)
+        elseif role == "out" then output = output + abs(rate) end
+      else
+        source.fault = "no rate"
+        faults = faults + 1
+      end
+      source.limit = readNumber(source._limitGet)
+    end
+
+    if source.store then
+      local held = readNumber(source._stored)
+      local total = readNumber(source._capacity)
+      source.stored, source.capacity = held, total
+      if held and total and total > 0 then
+        sawStore = true
+        stored = (stored or 0) + held
+        capacity = (capacity or 0) + total
+      elseif not source.fault then
+        source.fault = "no reading"
+        faults = faults + 1
+      end
+
+      -- A battery that reports its own throughput is better than anything
+      -- inferred, so it contributes whatever role the meters did not.
+      local ownIn  = readNumber(source._input)
+      local ownOut = readNumber(source._output)
+      source.input, source.output = ownIn, ownOut
+      if ownIn or ownOut then
+        sawRate = true
+        input = input + abs(ownIn or 0)
+        output = output + abs(ownOut or 0)
+      end
+    end
+  end
+
+  self.hasRate  = sawRate
+  self.hasStore = sawStore
+  self.stored   = stored
+  self.capacity = capacity
+  self.percent  = (stored and capacity and capacity > 0)
+    and util.clamp(stored / capacity * 100, 0, 100) or nil
+
+  -- With no meter anywhere, the change in stored energy IS the net rate. It is
+  -- coarser than a detector -- it cannot separate supply from demand, only the
+  -- balance of the two -- but it is the difference between a useful page and
+  -- an empty one on a base whose only energy peripheral is its battery.
+  if not sawRate and stored then
+    local elapsed = self.lastAt and (now - self.lastAt) or 0
+    if self.lastStored and elapsed > 0.05 then
+      local perTick = (stored - self.lastStored) / (elapsed * TICKS_PER_SECOND)
+      if perTick >= 0 then input, output = perTick, 0
+      else input, output = 0, -perTick end
+    end
+  end
+
+  self.input, self.output = input, output
+  self.net = input - output
+  self.lastAt, self.lastStored = now, stored
+
+  self.error = nil
+  if not self.available then
+    self.error = "No energy peripheral attached"
+  elseif faults > 0 and not sawRate and not sawStore then
+    self.error = "Energy peripherals are not answering"
+  end
+
+  self:sample(settings)
+  return self
+end
+
+--- Pushes the current reading into the rolling history.
+function power:sample()
+  self.history:push(self.input, self.output, self.percent)
+  return self
+end
+
+-- ----------------------------------------------------------------- alarms ---
+
+--- Whether the buffer has just crossed below the alarm threshold.
+---
+--- Returns true exactly once per crossing, so the caller can fire the sound,
+--- flash and redstone without a rearming rule of its own.
+---@return boolean crossed
+function power:checkAlarm(cfg, now)
+  local settings = cfg.power or {}
+  local percent = self.percent
+
+  if not settings.alarm or not percent then
+    self.low, self.lowSince = false, nil
+    return false
+  end
+
+  local threshold = tonumber(settings.lowPercent) or 20
+  if self.low then
+    if percent >= threshold + power.ALARM_HYSTERESIS then
+      self.low, self.lowSince = false, nil
+    end
+    return false
+  end
+
+  if percent <= threshold then
+    self.low = true
+    self.lowSince = now or os.clock()
+    return true
+  end
+  return false
+end
+
+--- Buffer fullness as 0..1, for the analog redstone output. Nil when there is
+--- no buffer to report, so the redstone line can tell "empty" from "unknown"
+--- and hold rather than dropping a fuel gate open.
+function power:fraction()
+  if not self.percent then return nil end
+  return self.percent / 100
+end
+
+-- ------------------------------------------------------------- the limit ---
+
+--- Writes an Energy Detector's transfer limit. This is the one thing in the
+--- station that changes the world rather than reporting on it, so it is a
+--- deliberate call from a settings row and never happens on a poll.
+---@return boolean ok
+---@return string message
+function power:setLimit(source, value)
+  if not source or not source._limitSet then
+    return false, "That device has no settable limit"
+  end
+  value = tonumber(value)
+  if not value or value < 0 then return false, "Not a valid limit" end
+  local ok, err = pcall(source._limitSet, floor(value))
+  if not ok then return false, "Refused: " .. tostring(err) end
+  source.limit = readNumber(source._limitGet)
+  return true, ("Limit set to %s/t"):format(power.format(value))
+end
+
+function power:sourceByName(name)
+  for _, source in ipairs(self.sources) do
+    if source.name == name then return source end
+  end
+  return nil
+end
+
+-- --------------------------------------------------------------- printing ---
+
+--- Compact energy figure: 940, 12.3k, 4.56M, 1.2G.
+--- Energy numbers span ten orders of magnitude on a modded server, so a raw
+--- figure is unreadable and a fixed unit is wrong somewhere.
+function power.format(value)
+  if type(value) ~= "number" or value ~= value then return "-" end
+  local sign = value < 0 and "-" or ""
+  local n = abs(value)
+  if n < 1000 then
+    return sign .. tostring(floor(n + 0.5))
+  elseif n < 1e6 then
+    return ("%s%.1fk"):format(sign, n / 1e3)
+  elseif n < 1e9 then
+    return ("%s%.2fM"):format(sign, n / 1e6)
+  elseif n < 1e12 then
+    return ("%s%.2fG"):format(sign, n / 1e9)
+  end
+  return ("%s%.2fT"):format(sign, n / 1e12)
+end
+
+--- The same, signed even when positive, for a net figure where the sign is
+--- the whole point.
+function power.formatSigned(value)
+  if type(value) ~= "number" then return "-" end
+  if value > 0 then return "+" .. power.format(value) end
+  return power.format(value)
+end
+
+--- "5 minutes", "90 seconds" -- for the graph window and the time to empty.
+function power.duration(seconds)
+  if type(seconds) ~= "number" or seconds ~= seconds or seconds < 0 then return "-" end
+  if seconds < 90 then return ("%ds"):format(floor(seconds + 0.5)) end
+  if seconds < 5400 then return ("%.0fm"):format(seconds / 60) end
+  if seconds < 86400 then return ("%.1fh"):format(seconds / 3600) end
+  return ("%.1fd"):format(seconds / 86400)
+end
+
+--- How long until the buffer empties at the current net rate, or fills. Nil
+--- when it is not going anywhere, which is the healthy steady state.
+---@return number|nil seconds
+---@return string direction "empty" or "full"
+function power:timeToLimit()
+  if not self.stored or not self.capacity or self.capacity <= 0 then return nil end
+  local perSecond = self.net * TICKS_PER_SECOND
+  if abs(perSecond) < 1e-6 then return nil end
+  if perSecond < 0 then
+    return self.stored / -perSecond, "empty"
+  end
+  return (self.capacity - self.stored) / perSecond, "full"
+end
+
+power.TICKS_PER_SECOND = TICKS_PER_SECOND
+
+return power

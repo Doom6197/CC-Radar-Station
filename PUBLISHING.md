@@ -1,115 +1,105 @@
-# Publishing this to GitHub
+# Publishing
 
-One-time setup so `wget` works in game. Nothing here needs git installed.
+How this repository gets from a folder on disk to a `wget run` line in game.
 
----
-
-## 1. Create the repository
-
-Go to **<https://github.com/new>** and set:
-
-| Field | Value |
-|---|---|
-| Repository name | `cc-radar-station` |
-| Visibility | **Public** — required, see below |
-| Initialize with README | **leave unticked** — this folder already has one |
-
-Click **Create repository**.
-
-> **Why public?** `raw.githubusercontent.com` only serves files without
-> authentication for public repositories. A private repo would force the in-game
-> installer to carry a GitHub token in plaintext on the computer, where anyone
-> with access to that computer could read it.
+The repository is **<https://github.com/Doom6197/CC-Radar-Station>**, and it has
+to stay **public**: `raw.githubusercontent.com` only serves files without
+authentication for public repositories, and a private one would force the
+in-game installer to carry a GitHub token in plaintext on a computer anyone
+could read it off.
 
 ---
 
-## 2. Upload the files
-
-On the empty repository page, click **uploading an existing file**, then drag
-in **the entire contents** of
+## Installing in game
 
 ```
-C:\Users\JeffD\Documents\AI\MineCraft ComputerCraft\Basalt
+wget run https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/install.lua
 ```
-
-Select everything inside the folder — `radar.lua`, `install.lua`,
-`manifest.txt`, `README.md`, `PUBLISHING.md`, and the `radar` and `preview`
-folders. GitHub's uploader walks subfolders, so `radar/views/weather.lua` keeps
-its path.
-
-Scroll down, leave the commit message as-is, and click **Commit changes**.
-
-### Check it worked
-
-The repository root should list exactly this:
-
-```
-preview/     radar/     README.md     PUBLISHING.md
-install.lua  manifest.txt   radar.lua
-```
-
-Open `radar/views/` in the browser and confirm the six view files are there. If
-`radar/` came out flat, or the `views` folder is missing, the drag picked up
-files rather than folders — delete and re-upload by dragging the folders
-themselves.
-
----
-
-## 3. Check the branch name
-
-GitHub names the default branch `main` for new repositories, which is what the
-installer expects. Confirm it at the top-left of the file list. If it says
-`master`, either rename it (**Settings → Branches → the pencil icon**) or pass
-the branch when installing:
-
-```
-wget run <url> master
-```
-
----
-
-## 4. Install in game
-
-```
-wget run https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/install.lua
-```
-
-**If your GitHub username is not `Doom6197`**, substitute it in that URL and
-also pass it as an argument, because the installer has the default baked in for
-the files it fetches afterwards:
-
-```
-wget run https://raw.githubusercontent.com/YOURNAME/cc-radar-station/main/install.lua YOURNAME/cc-radar-station
-```
-
-To avoid typing that every time, edit the `DEFAULT_REPO` line near the top of
-`install.lua` (line 27) to your own `owner/repo` and re-upload that one file.
-
----
-
-## Updating later
-
-Edit files locally, then on the repository page use **Add file → Upload files**
-and drag the changed ones in — GitHub replaces same-named files. In game, run
-the same `wget run` command again; it overwrites the old install.
 
 The installer adds a cache-busting query string to every request, so an update
 lands immediately instead of waiting out `raw.githubusercontent.com`'s
-five-minute cache.
+five-minute cache. Running it again overwrites the old install.
 
-**If you add a new module**, add its path to `manifest.txt` as well, or the
-installer will not download it. `preview/install-test.lua` checks the manifest
-against the files on disk.
+**From a fork**, pass the repository as an argument too — the installer has the
+default baked in for the files it fetches afterwards:
+
+```
+wget run https://raw.githubusercontent.com/YOURNAME/CC-Radar-Station/main/install.lua YOURNAME/CC-Radar-Station
+```
+
+To avoid typing that every time, edit `DEFAULT_REPO` near the top of
+`install.lua` and push that one file.
 
 ---
 
-## Optional polish
+## Before you push
 
-- **Description** — "Player radar with a live weather display for CC: Tweaked +
-  Advanced Peripherals (MC 1.21.1)"
+Both suites run on a desktop Lua 5.x with no Minecraft and no network:
+
+```
+lua preview/smoke-test.lua .        # 104 checks
+lua preview/install-test.lua .      # 15 checks
+```
+
+`install-test.lua` runs the real `install.lua` against a mocked CC: Tweaked,
+serving this repository off disk — so a manifest that has drifted from what is
+actually here fails there rather than in game.
+
+**If you added a module or any other file, add its path to `manifest.txt`.**
+The installer downloads exactly what that file lists; anything missing from it
+simply never reaches the computer, and a page that does not exist is a
+confusing thing to debug in game. `install-test.lua` checks the manifest three
+ways: every listed path exists, every built-in module named in
+`radar/modules.lua` is listed, and every module file on disk is listed.
+
+---
+
+## Pushing
+
+```
+git add -A
+git commit -m "..."
+git push
+```
+
+Or use **Add file → Upload files** on the repository page and drag the changed
+files in; GitHub replaces same-named files and its uploader walks subfolders, so
+`radar/modules/weather.lua` keeps its path.
+
+The default branch is `main`, which is what the installer expects. Installing
+from another branch:
+
+```
+wget run <url> dev
+```
+
+---
+
+## Preview images
+
+`preview/*.png` are rendered from the real drawing code, not screenshotted:
+
+```
+lua preview/render-preview.lua . preview
+```
+
+`render-preview.lua` compiles the pixel grid into teletext cells exactly as the
+game will, then expands each cell back into the two colours that survived, and
+writes a PNG with its own CRC32, Adler32 and deflate encoder. There is no
+conversion step and no image library involved.
+
+The images render on the repository page, so the README shows what the station
+looks like without anyone installing it. Regenerate them whenever the drawing
+code changes — but only commit the ones that actually differ, since every sheet
+is rewritten on each run.
+
+---
+
+## Repository settings worth having
+
+- **Description** — "Player radar, weather display and power monitor for
+  CC: Tweaked + Advanced Peripherals (MC 1.21.1). Modular pages."
 - **Topics** — `computercraft`, `cc-tweaked`, `minecraft`, `lua`, `basalt`,
   `advanced-peripherals`
 - **Licence** — *Add file → Create new file*, name it `LICENSE`, and GitHub
   offers a template picker. MIT matches Basalt's own licence.
-- The images in `preview/` render on the repository page, so the README shows
-  what the weather display looks like without anyone installing it.

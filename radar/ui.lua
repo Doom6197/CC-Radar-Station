@@ -8,34 +8,25 @@
 
 local basalt  = require("basalt")
 local config  = require("radar.config")
+local modules = require("radar.modules")
 local theme   = require("radar.theme")
 local util    = require("radar.util")
 local sky     = require("radar.sky")
 
 local ui = {}
 
-local VIEWS = {
-  radar    = require("radar.views.radar"),
-  contacts = require("radar.views.contacts"),
-  weather  = require("radar.views.weather"),
-  log      = require("radar.views.log"),
-  status   = require("radar.views.status"),
-  settings = require("radar.views.settings"),
-}
-
-local PAGE_META = {
-  radar    = { title = "RADAR",    short = "RDR" },
-  contacts = { title = "CONTACTS", short = "CON" },
-  weather  = { title = "WEATHER",  short = "WX" },
-  log      = { title = "LOG",      short = "LOG" },
-  status   = { title = "STATUS",   short = "SYS" },
-  settings = { title = "SETTINGS", short = "SET" },
-}
-
-local TERMINAL_PAGES = { "status", "radar", "contacts", "weather", "log", "settings" }
-
 -- Elements that swallow typing, so global shortcuts must stand down.
 local TYPING = { Input = true, TextBox = true, ComboBox = true }
+
+--- Tab labels for a page. Falls back to the id rather than erroring, so a page
+--- id left behind in a settings file by a module that has since been removed
+--- degrades to a dull tab instead of taking the header down.
+local function metaOf(id)
+  local entry = modules.byId(id)
+  if entry then return entry.title, entry.short end
+  local upper = tostring(id):upper()
+  return upper, upper:sub(1, 3)
+end
 
 -- --------------------------------------------------------------- controller ---
 
@@ -50,16 +41,23 @@ local function pageIndex(pages, id)
 end
 
 --- Chooses between full titles and three-letter codes, and lays out the spans.
+--- With enough modules enabled even the short codes overflow a narrow screen,
+--- so anything past the edge is dropped rather than wrapped: the tabs that fit
+--- stay pressable, and the rest are still reachable with the arrow keys.
 local function tabLayout(pages, width)
   local full = 0
-  for _, id in ipairs(pages) do full = full + #PAGE_META[id].title + 2 end
+  for _, id in ipairs(pages) do
+    local title = metaOf(id)
+    full = full + #title + 2
+  end
 
   local useShort = full > width
   local spans, x = {}, 1
-  for i, id in ipairs(pages) do
-    local meta = PAGE_META[id]
-    local label = " " .. (useShort and meta.short or meta.title) .. " "
-    spans[i] = { x1 = x, x2 = x + #label - 1, label = label, id = id }
+  for _, id in ipairs(pages) do
+    local title, short = metaOf(id)
+    local label = " " .. (useShort and short or title) .. " "
+    if x + #label - 1 > width then break end
+    spans[#spans + 1] = { x1 = x, x2 = x + #label - 1, label = label, id = id }
     x = x + #label
   end
   return spans
@@ -71,7 +69,8 @@ end
 
 function Root:setPage(id, remember)
   if not self.views[id] then
-    local builder = VIEWS[id]
+    local entry = modules.byId(id)
+    local builder = entry and entry.page and entry or nil
     if not builder then return end
     local container = self.content:addFrame({
       x = 1, y = 1,
@@ -138,7 +137,7 @@ function Root:tickCycle(now)
   if now - (self.cycleAt or 0) < entry.cycleSeconds then return end
   self.cycleAt = now
 
-  local pages = config.cyclePages(entry)
+  local pages = config.cyclePages(self.app.cfg, entry)
   if #pages < 2 then
     if pages[1] ~= self.page then self:setPage(pages[1], false) end
     return
@@ -359,12 +358,28 @@ function ui.registerKeys(app, roots, terminalRoot)
     terminal():toast(message, ok and "success" or "error")
   end
 
-  local pageKeys = {
-    [keys.one] = "status", [keys.two] = "radar", [keys.three] = "contacts",
-    [keys.four] = "weather", [keys.five] = "log", [keys.six] = "settings",
+  -- The number keys follow the tab strip rather than a fixed table, so a page
+  -- switched off does not leave a hole in the numbering and a module added
+  -- later gets a shortcut without anyone assigning it one.
+  local NUMBER_KEYS = {
+    keys.one, keys.two, keys.three, keys.four, keys.five,
+    keys.six, keys.seven, keys.eight, keys.nine,
   }
-  for key, page in pairs(pageKeys) do
-    KEY_ACTIONS[key] = function() terminal():setPage(page) end
+  for index, key in ipairs(NUMBER_KEYS) do
+    if key then
+      KEY_ACTIONS[key] = function()
+        local page = terminal().pages[index]
+        if page then terminal():setPage(page) end
+      end
+    end
+  end
+
+  -- A module's own keys go on last and win, so a module can deliberately take
+  -- over a letter it has a better use for.
+  for _, entry in ipairs(modules.keys(app.cfg)) do
+    if entry.key and type(entry.action.run) == "function" then
+      KEY_ACTIONS[entry.key] = function() entry.action.run(app, terminal()) end
+    end
   end
 
   basalt.schedule(function()
@@ -392,15 +407,17 @@ end
 function ui.build(app)
   local roots = {}
 
-  local terminalRoot = buildRoot(app, basalt.getMainFrame(), { pages = TERMINAL_PAGES })
+  local terminalRoot = buildRoot(app, basalt.getMainFrame(),
+    { pages = config.terminalPages(app.cfg) })
   roots[#roots + 1] = terminalRoot
 
+  local monitorPages = config.pages(app.cfg)
   for _, monitor in ipairs(app.kit.monitors) do
     local displayCfg = app:displayConfig(monitor.name)
     pcall(monitor.dev.setTextScale, displayCfg.scale)
     local ok, frame = pcall(basalt.createFrame, monitor.dev, monitor.name)
     if ok and frame then
-      local controller = buildRoot(app, frame, { pages = config.PAGES, monitor = monitor })
+      local controller = buildRoot(app, frame, { pages = monitorPages, monitor = monitor })
       controller:setPage(displayCfg.page, false)
       roots[#roots + 1] = controller
     end
@@ -425,6 +442,41 @@ function ui.build(app)
   -- only thing that will ever move the scope.
   app:on("heading", refreshAll)
 
+  -- Whatever events the modules say they redraw on. A module emitting an event
+  -- of its own therefore does not need a line adding here.
+  local wired = {}
+  for _, entry in ipairs(modules.enabled(app.cfg)) do
+    for _, event in ipairs(entry.events or {}) do
+      if not wired[event] then
+        wired[event] = true
+        app:on(event, refreshAll)
+      end
+    end
+  end
+
+  -- Switching a module on or off changes what the tab strip contains on every
+  -- screen at once, so the strip is rebuilt rather than left describing a set
+  -- of pages that no longer matches. A screen sitting on a page that has just
+  -- gone is moved to one that still exists.
+  app:on("modules", function()
+    local terminalPages = config.terminalPages(app.cfg)
+    local monitorPages = config.pages(app.cfg)
+    for _, root in ipairs(roots) do
+      root.pages = root.monitor and monitorPages or terminalPages
+
+      local stillThere = false
+      for _, id in ipairs(root.pages) do
+        if id == root.page then stillThere = true end
+      end
+      if not stillThere and root.pages[1] then
+        root:setPage(root.pages[1])
+      else
+        root.tabs:markRenderDirty()
+        root:refreshChrome()
+      end
+    end
+  end)
+
   app:on("anim", function()
     for _, root in ipairs(roots) do
       local view = root.views[root.page]
@@ -441,7 +493,14 @@ function ui.build(app)
       first.dir, extra), "warning")
   end)
 
-  app.alerts.onFlash = function()
+  app.alerts.onFlash = function(_, reason)
+    -- An alarm raised by a module -- a power buffer running low -- carries a
+    -- reason rather than a contact list, and gets said out loud on the banner
+    -- as well as flashed, because there is no page listing it the way the
+    -- contacts table lists an arrival.
+    if reason and app.cfg.toast then
+      terminalRoot:toast(reason, "error")
+    end
     if not app.cfg.flash then return end
     basalt.schedule(function()
       for _ = 1, 2 do
@@ -470,6 +529,7 @@ function ui.build(app)
   return roots, terminalRoot
 end
 
-ui.PAGE_META = PAGE_META
+ui.metaOf = metaOf
+ui.tabLayout = tabLayout
 
 return ui

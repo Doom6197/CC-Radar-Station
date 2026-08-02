@@ -4,6 +4,11 @@
 -- so a Player Detector works whether it is bolted to the side of the computer,
 -- built into a pocket computer or turtle, or sitting somewhere on a wired
 -- modem network.
+--
+-- The kit also carries `peripherals`: every device found, with its name, its
+-- wrapper and its type. That is what a module claims its own hardware from --
+-- see radar/modules.lua -- so adding a page that needs a new kind of device
+-- costs nothing here.
 
 local hardware = {}
 
@@ -32,7 +37,7 @@ hardware.looksLikeEnvironmentDetector = looksLikeEnvironmentDetector
 hardware.looksLikeModem = looksLikeModem
 
 --- Scans every side and every network name.
----@return table kit { detector, detectorName, env, envName, speakers, monitors, modems, modem }
+---@return table kit { detector, detectorName, env, envName, speakers, monitors, modems, modem, peripherals }
 function hardware.discover()
   local kit = {
     detector = nil, detectorName = nil,
@@ -41,9 +46,18 @@ function hardware.discover()
     monitors = {},          -- { { name = , dev = , scale = } , ... }
     modems = {},            -- { { name = , dev = , wireless = } , ... }
     modem = nil, modemName = nil,
+    peripherals = {},       -- { { name = , dev = , type = } , ... } everything
   }
 
   local seenModem = {}
+  local seenName = {}
+
+  --- Records a device on the kit's full list, once per name.
+  local function collect(name, p, ptype)
+    if not p or seenName[name] then return end
+    seenName[name] = true
+    kit.peripherals[#kit.peripherals + 1] = { name = name, dev = p, type = ptype }
+  end
 
   local function consider(name, p)
     if not p then return end
@@ -67,24 +81,30 @@ function hardware.discover()
   -- and are not returned by peripheral.getNames().
   for _, side in ipairs(SIDES) do
     if peripheral.isPresent(side) then
-      consider(side, peripheral.wrap(side))
+      local p = peripheral.wrap(side)
+      local ok, ptype = pcall(peripheral.getType, side)
+      collect(side, p, ok and ptype or "unknown")
+      consider(side, p)
     end
   end
 
   for _, name in ipairs(peripheral.getNames()) do
     local ptype = peripheral.getType(name)
+    local p = peripheral.wrap(name)
+    collect(name, p, ptype)
     if ptype == "monitor" then
-      kit.monitors[#kit.monitors + 1] = { name = name, dev = peripheral.wrap(name) }
+      kit.monitors[#kit.monitors + 1] = { name = name, dev = p }
     elseif ptype == "speaker" then
-      kit.speakers[#kit.speakers + 1] = peripheral.wrap(name)
+      kit.speakers[#kit.speakers + 1] = p
     else
-      consider(name, peripheral.wrap(name))
+      consider(name, p)
     end
   end
 
   -- Stable ordering, so "monitor 1" stays monitor 1 across rescans and the
   -- per-monitor page settings keep pointing at the same screen.
   table.sort(kit.monitors, function(a, b) return a.name < b.name end)
+  table.sort(kit.peripherals, function(a, b) return a.name < b.name end)
 
   -- A wireless or ender modem is what a flying ship needs, so it wins over a
   -- wired one even if the wired one was found first.

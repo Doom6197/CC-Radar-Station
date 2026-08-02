@@ -1,10 +1,19 @@
--- Detection history, plus the visitor tally derived from it.
+-- LOG module: detection history, plus the visitor tally derived from it.
 -- Wide displays get both side by side; narrow ones get the history only.
+--
+-- The module also owns the HISTORY section of the settings page, since
+-- clearing the log is the only thing there is to configure about it.
 
 local theme = require("radar.theme")
 local util  = require("radar.util")
 
-local view = {}
+local view = {
+  id = "log",
+  title = "LOG",
+  short = "LOG",
+  order = 60,
+  summary = "arrival history and a visitor tally",
+}
 
 local ZONE_COLORS = {
   CLOSE   = theme.alarm,
@@ -78,6 +87,18 @@ function view.build(container, app)
   end
 
   return { refresh = function() canvas:markRenderDirty() end }
+end
+
+-- ---------------------------------------------------------------- settings ---
+
+function view.settings(ctx)
+  ctx.heading("HISTORY")
+  ctx.row("Entries", function() return tostring(ctx.app.log:count()) end, function()
+    ctx.app:clearLog()
+    ctx.root:toast("Log cleared", "info")
+  end)
+  ctx.note("Press to clear. The C key does the same thing.")
+  ctx.spacer()
 end
 
 return view

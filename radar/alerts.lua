@@ -3,6 +3,13 @@
 -- Sound repeats and redstone pulses are paced by tick(), which the app calls
 -- roughly ten times a second. That keeps pulse lengths honest regardless of
 -- how slow the scan interval is set.
+--
+-- Nothing in here knows what an alert is ABOUT. A contact arriving fires the
+-- same three channels a power buffer running low does, so a module wanting to
+-- raise the alarm calls fire() and gets the operator's sound, their flash
+-- setting and their redstone side without reimplementing any of it. The same
+-- goes for the analog output: a module registers a level provider and its
+-- redstone mode drives the one output line the computer has.
 
 local config = require("radar.config")
 
@@ -16,6 +23,7 @@ function alerts.new(cfg, kit)
     sound = { left = 0, nextAt = 0 },
     rs = { pulseUntil = 0, last = -1 },
     contacts = {},        -- live set, for hold/analog redstone
+    providers = {},       -- redstone mode id -> function() -> 0..1 or nil
     onFlash = nil,        -- set by the UI
   }, alerts)
 end
@@ -68,9 +76,35 @@ function alerts:pulse()
   self.rs.pulseUntil = os.clock() + (self.cfg.rs.pulse or 1)
 end
 
---- Recomputes the output level from the current contact list.
+--- Registers a level source for a redstone mode a module has added.
+---
+--- The provider returns a fraction from 0 to 1, or nil when it has nothing to
+--- say -- which is not the same as zero. A power module with no battery
+--- attached returns nil, and the line HOLDS its last level rather than
+--- dropping, because a fuel gate that opens the moment a peripheral is
+--- unloaded is worse than one that does not move.
+---@param mode string A config.RS_MODES id
+---@param provider function() -> number|nil
+function alerts:provideLevel(mode, provider)
+  self.providers[mode] = provider
+  return self
+end
+
+--- Recomputes the output level from whatever the current mode reads.
 function alerts:updateRedstone()
   if not self.cfg.rs.enabled then return self:setLevel(0) end
+
+  local mode = self.cfg.rs.mode
+
+  -- A module's mode wins, so a contact-shaped mode name can never be shadowed.
+  local provider = self.providers[mode]
+  if provider then
+    local ok, fraction = pcall(provider)
+    if not ok or type(fraction) ~= "number" then return end
+    -- 1 at empty rather than 0, so "the provider is reading and it is nearly
+    -- nothing" stays distinguishable from "the output is off".
+    return self:setLevel(math.max(1, math.floor(15 * math.max(0, math.min(1, fraction)) + 0.5)))
+  end
 
   local trigger = config.RANGES[self.cfg.rs.rangeIndex].value
   local nearest = nil
@@ -78,7 +112,6 @@ function alerts:updateRedstone()
     if contact.dist <= trigger then nearest = contact break end
   end
 
-  local mode = self.cfg.rs.mode
   if mode == "pulse" then
     self:setLevel(os.clock() < self.rs.pulseUntil and 15 or 0)
   elseif mode == "hold" then
@@ -114,6 +147,18 @@ function alerts:tick()
 end
 
 -- ------------------------------------------------------------------- fire ---
+
+--- Fires every enabled alert channel, whatever the reason. The master mute
+--- covers this too: an operator who has muted the station has muted all of it.
+---@param reason? string Passed through to the flash handler for the banner
+---@return boolean fired
+function alerts:fire(reason)
+  if not self.cfg.alert then return false end
+  self:pulse()
+  self:queue()
+  if self.onFlash then self.onFlash(nil, reason) end
+  return true
+end
 
 --- Fires every enabled alert channel for a set of newly arrived contacts.
 function alerts:trigger(newContacts)

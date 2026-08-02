@@ -1,12 +1,18 @@
--- Contact list: every detected player, nearest first.
+-- CONTACTS module: every detected player, nearest first.
 --
 -- Columns are added as the display gets wider rather than truncated, so the
--- same view is readable on a 15-cell pocket screen and on a 5x5 monitor.
+-- same page is readable on a 15-cell pocket screen and on a 5x5 monitor.
 
 local theme = require("radar.theme")
 local util  = require("radar.util")
 
-local view = {}
+local view = {
+  id = "contacts",
+  title = "CONTACTS",
+  short = "CON",
+  order = 30,
+  summary = "the contact table: distance, bearing, altitude, health",
+}
 
 local max = math.max
 

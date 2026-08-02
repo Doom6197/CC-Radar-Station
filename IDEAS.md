@@ -2,13 +2,15 @@
 
 Where Radar Station could go next, given what is actually in the pack.
 
-The station is already built the right shape for this. A page is a file in
-`radar/views/` that gets a container and the `app` table and subscribes to
-events; it never touches a peripheral itself. Hardware discovery in
-`radar/hardware.lua` matches on *capability* rather than on peripheral type, so
-a new device is a `looksLikeX()` predicate and a field on the kit. Alerts,
-redstone output, the log and the sub-pixel drawing surface are all generic
-already. Most of what follows is a new view plus a poller.
+Since v7 the station is the right shape for all of this. **A page is one file
+in `radar/modules/`** that declares its settings, claims its own hardware, runs
+its own loops and builds its own settings section — see *Modules* in the README
+for the descriptor. Hardware discovery matches on *capability* rather than on
+peripheral type, alerts and the redstone output take providers from any module,
+and the sub-pixel drawing surface and chart library are generic already.
+
+So most of what follows is **one new file**. Nothing on this list needs the core
+touched.
 
 **A note on confidence.** Everything marked ✅ uses an API I am sure exists.
 Items marked ❓ depend on a peripheral method I have not verified against this
@@ -17,7 +19,24 @@ pack's exact mod versions — check them in game with `lua` and
 
 ---
 
-## The one to build first
+## Shipped
+
+### ⚡ Power — Energy Detector ✅ + any wrappable battery ✅
+
+**Done in v7.** `radar/modules/power.lua` plus `radar/power.lua` and
+`radar/chart.lua`: input, output and net, a buffer gauge, a rolling line chart,
+a low-power alarm on the shared alert channels, and a `Buffer` redstone mode
+mapping 1–15 to how full the bank is.
+
+Worth knowing for anything similar: batteries are matched on **method name**
+(`getEnergy` / `getMaxEnergy` / `getEnergyStored` / …), never on peripheral
+type, so Flux Networks, Powah and the Mekanism induction matrix are all covered
+without naming a single mod in code that has to run on a pack that may not have
+them installed. Do the same for whatever comes next.
+
+---
+
+## The one to build next
 
 ### ✈️ Fleet tracking — Create: Aeronautics ❓
 
@@ -37,12 +56,9 @@ trick is to make each ship report itself:
 - the station listens on that protocol and plots them as a second class of
   contact — a different blip shape, its own colour band, its own tally
 
-Everything downstream already works: `radar/views/radar.lua` plots anything
-with `dx/dz/dist/bearing`, the contacts table just gets more rows, and the
-alert plumbing can warn you when a ship strays outside a set radius of home.
-
-It also justifies the **unlocked orientation** that v4 just gained — a monitor
-on a moving ship wants heading-up, not north-up.
+Everything downstream already works: `radar/modules/radar.lua` plots anything
+with `dx/dz/dist/bearing`, the contacts table just gets more rows, and
+`alerts:fire()` can warn you when a ship strays outside a set radius of home.
 
 **Needs:** a GPS constellation (4 computers with wireless modems at known
 coordinates). On a skyblock that is a small build, and it unlocks waypoints
@@ -51,28 +67,6 @@ below as well.
 ---
 
 ## High value, low effort
-
-### ⚡ Power page — Energy Detector ✅ + Flux Networks / Powah / Mekanism ❓
-
-The Advanced Peripherals **Energy Detector** sits inline in a cable and reports
-transfer rate, with a settable limit. Wrap one on the main bus and you have a
-live FE/t readout for free.
-
-A `POWER` page could show:
-
-- input and output rate, and the net
-- buffer percentage as a bar
-- a **rolling graph** of the last few minutes — `radar/pixel.lua` already draws
-  at 2×3 sub-pixels, so a genuine line chart costs almost nothing
-- a low-power alarm reusing the existing sound/flash/redstone alert path
-
-The existing analog redstone mode maps 1–15 to *how close a contact is*; the
-same code mapping 1–15 to *how full the buffer is* is a one-line change and
-drives a fuel-gate or a backup generator.
-
-Flux Networks, Powah reactors and the Mekanism induction matrix are usually
-directly wrappable as peripherals — worth checking, because a direct wrap gives
-you stored/capacity, which the Energy Detector alone does not.
 
 ### 📦 Storage page — ME Bridge (AE2) / RS Bridge (Refined Storage) ✅
 
@@ -85,20 +79,20 @@ They expose the item list, crafting CPUs and energy.
 - reuse `radar/logbook.lua` verbatim for a stock history
 
 The watchlist maps neatly onto the ignore-list UI that already exists: a picker
-that adds names to a persisted table.
+that adds names to a persisted table. The chart from the power page draws stock
+levels over time with no changes at all.
 
 ### 🌙 Ritual clock — Environment Detector ✅
 
-The station already polls the Environment Detector every two seconds and knows
-the tick, the day, the moon phase and the weather. It currently only draws
-them.
+The station already polls the Environment Detector and knows the tick, the day,
+the moon phase and the weather. It currently only draws them.
 
 Ars Nouveau, Malum, NeoVitae and Roots all have timing that cares about night,
-moon phase or weather. A small panel answering *"how long until night?"*,
-*"when is the next full moon?"*, *"is it raining?"* is nearly free — the data is
-already in `app.env.snapshot`.
+moon phase or weather. A module answering *"how long until night?"*, *"when is
+the next full moon?"*, *"is it raining?"* is nearly free — the data is already
+in `app.env.snapshot`, so this needs no `discover` and no `start` at all.
 
-Pair it with the redstone output and you have an automatic ritual gate.
+Pair it with a redstone level provider and you have an automatic ritual gate.
 
 ### 💡 Remote redstone — Redstone Integrator ✅
 
@@ -110,8 +104,8 @@ over it, so the station could:
 - open a hangar door on arrival
 - run a beacon that says "someone who is not you just landed"
 
-This is a small change to `radar/alerts.lua` — a side becomes a
-`{ peripheral, side }` pair — and a picker in settings.
+A side becomes a `{ peripheral, side }` pair in `radar/alerts.lua`, plus a
+picker in settings.
 
 ---
 
@@ -123,13 +117,12 @@ The **Geo Scanner** returns every block in a radius as a list with relative
 coordinates. That is a point cloud, and the station already has a polar plot
 that draws point clouds.
 
-A `SCAN` page could render a top-down ore map, coloured by ore type, with the
-same range rings and the same rotation logic as the radar. On a pack with
-**Geores** deposits this is genuinely useful rather than decorative.
+A `SCAN` module could render a top-down ore map, coloured by ore type, with the
+same range rings and the same rotation logic as the radar.
 
 **Watch out:** Geo Scanner has an energy cost and a cooldown, and a large radius
-returns a *lot* of entries. This wants its own slow poller — every 15 seconds,
-not every sweep — and a hard cap on how many blocks get plotted.
+returns a *lot* of entries. Give it a slow `start` loop — every 15 seconds, not
+every sweep — and a hard cap on how many blocks get plotted.
 
 ### 🥽 Heads-up display — AR Controller ❓
 
@@ -138,8 +131,9 @@ bearing to home and a compass strip as an overlay while you fly is the single
 most useful thing on this list for actually playing the pack, because it does
 not require you to be standing at a monitor.
 
-The drawing is a different API from Basalt canvases, so this is a new renderer
-rather than a new view — but it consumes exactly the same `app.contacts`.
+The drawing is a different API from Basalt canvases, so this is a **service**
+module — one with `start` and no `build` — rather than a page. It consumes
+exactly the same `app.contacts`.
 
 ### 🧭 Waypoints ✅
 
@@ -149,15 +143,15 @@ can be drawn on the scope as a distinct marker, with bearing and distance in the
 contacts table.
 
 On a skyblock where every destination is a separate island in the void, this
-turns the radar from a security tool into a navigation instrument. It reuses
-the config-persistence pattern in `radar/config.lua` almost unchanged.
+turns the radar from a security tool into a navigation instrument. A module's
+`defaults` and `sanitise` hooks persist the list with no changes to
+`radar/config.lua`.
 
 ### 🎒 Operator panel — Inventory Manager ✅
 
-The **Inventory Manager** reads the bound player's inventory and armour. A
-strip on the status page showing armour durability, with a warning before a
-piece breaks, is worth having before a **Cataclysm** or **Apothic** boss fight.
-It also lets the station show what you are carrying without opening anything.
+The **Inventory Manager** reads the bound player's inventory and armour. A strip
+showing armour durability, with a warning before a piece breaks, is worth having
+before a **Cataclysm** or **Apothic** boss fight.
 
 ### 💬 Chat control — Chat Box ✅
 
@@ -167,8 +161,8 @@ The **Chat Box** both sends messages and receives them, so the station can:
 - take commands: `$radar range 500`, `$radar status`, `$radar mute`
 
 The command handlers already exist as methods on `app` (`setRangeIndex`,
-`toggleAlerts`, `clearLog`) — this is a parser and a new event loop, not new
-logic.
+`toggleAlerts`, `clearLog`, `toggleModule`, `setProfile`) — this is a parser and
+an event loop in a service module, not new logic.
 
 ---
 
@@ -177,10 +171,10 @@ logic.
 | Idea | Mod / peripheral | Notes |
 |---|---|---|
 | Show each contact's dimension instead of hiding it | none needed | `cfg.dimFilter` already knows; make it a three-way filter with a per-dimension tally |
-| Machine-health panel | Create stress, PneumaticCraft, Modern Industrialization ❓ | Block Reader on key machines; warn on stalled |
-| Factory alarm on the existing speaker | none needed | The whole sound/redstone path is generic; point it at a non-player trigger |
-| Nether and End scenery already vary by biome | v4 | Crimson, warped, soul sand and basalt deltas each draw differently — see `preview/biomes-dimensions.png` |
+| Machine-health panel | Create stress, PneumaticCraft, Modern Industrialization ❓ | Block Reader on key machines; warn on stalled. The power page's chart draws stress over time unchanged |
+| Factory alarm on the existing speaker | none needed | `alerts:fire(reason)` is already generic; point it at a non-player trigger |
 | Boss-arena proximity warning | Soaring Structures, Cataclysm | Waypoints plus the existing alert-range check; no new peripheral |
+| A profile for a turtle or a mining rig | none needed | `radar/profiles.lua` is a list; a fourth entry is a few lines |
 
 ---
 

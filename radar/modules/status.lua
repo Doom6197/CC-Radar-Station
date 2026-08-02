@@ -1,12 +1,23 @@
--- The dashboard: station configuration, hardware, environment and traffic on
--- one screen. This is the default terminal page.
+-- STATUS module: the dashboard. Station configuration, hardware, environment
+-- and traffic on one screen. The default terminal page.
+--
+-- Core, so it cannot be switched off: it is the page that tells you why
+-- anything else is not working, which makes it a poor candidate for being
+-- turned off by accident.
 
 local config = require("radar.config")
 local sky    = require("radar.sky")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
 
-local view = {}
+local view = {
+  id = "status",
+  title = "STATUS",
+  short = "SYS",
+  order = 10,
+  core = true,
+  summary = "everything at a glance; always available",
+}
 
 local max, floor = math.max, math.floor
 
@@ -46,6 +57,9 @@ function view.build(container, app)
 
     -- ------------------------------------------------------------ station ---
     ly = heading(leftX, ly, "STATION")
+
+    ly = row(leftX, ly, "Profile", config.profileLabel(app.cfg),
+      app.cfg.profile and theme.text or theme.dim)
 
     if app.cfg.mode == "fixed" and app.cfg.baseX then
       ly = row(leftX, ly, "Base", ("%d, %d, %d"):format(
@@ -95,6 +109,20 @@ function view.build(container, app)
     if config.usesNetwork(app.cfg) then
       local summary, healthy = app.link:summary(app.cfg)
       ly = row(leftX, ly, "Link", summary, healthy and theme.good or theme.warn)
+    end
+
+    -- The power module hangs its state here when it is enabled. Reading it
+    -- through a plain nil check rather than requiring the module keeps this
+    -- page working on an install where power has been switched off, or where
+    -- the file was never downloaded at all.
+    if app.power and app.power.available then
+      local net = app.power.formatSigned(app.power.net) .. "/t"
+      ly = row(leftX, ly, "Power",
+        app.power.percent
+          and ("%d%%   %s"):format(util.round(app.power.percent), net)
+          or net,
+        app.power.low and theme.alarm
+        or (app.power.net < 0 and theme.warn or theme.good))
     end
 
     if app.scanError then

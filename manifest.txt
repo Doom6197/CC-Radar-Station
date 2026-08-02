@@ -1,27 +1,37 @@
-# Radar Station v6 - files the in-game installer downloads.
+# Radar Station v7 - files the in-game installer downloads.
 # One path per line, relative to the repository root.
 # Blank lines and lines starting with # are ignored.
+#
+# Every module in radar/modules/ has to be listed here, or the installer will
+# not fetch it and the page simply will not exist on the computer.
+# preview/install-test.lua checks this file against what is on disk.
 
 radar.lua
 radar/alerts.lua
 radar/app.lua
 radar/backdrops.lua
 radar/biomes.lua
+radar/chart.lua
 radar/config.lua
 radar/environment.lua
 radar/glyphs.lua
 radar/hardware.lua
 radar/link.lua
 radar/logbook.lua
+radar/modules.lua
 radar/pixel.lua
+radar/power.lua
+radar/profiles.lua
 radar/scan.lua
+radar/setup.lua
 radar/sky.lua
 radar/theme.lua
 radar/ui.lua
 radar/util.lua
-radar/views/contacts.lua
-radar/views/log.lua
-radar/views/radar.lua
-radar/views/settings.lua
-radar/views/status.lua
-radar/views/weather.lua
+radar/modules/contacts.lua
+radar/modules/log.lua
+radar/modules/power.lua
+radar/modules/radar.lua
+radar/modules/settings.lua
+radar/modules/status.lua
+radar/modules/weather.lua

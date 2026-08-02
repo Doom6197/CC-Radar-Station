@@ -1,4 +1,4 @@
--- The scope: a sweeping polar plot of every contact.
+-- RADAR module: the scope, a sweeping polar plot of every contact.
 --
 -- Drawn at sub-pixel resolution, so the range rings are genuinely round and a
 -- blip lands within a third of a character cell of its true bearing. The whole
@@ -9,7 +9,13 @@ local theme = require("radar.theme")
 local util  = require("radar.util")
 local config = require("radar.config")
 
-local view = {}
+local view = {
+  id = "radar",
+  title = "RADAR",
+  short = "RDR",
+  order = 20,
+  summary = "the polar scope, with range rings and a live sweep",
+}
 
 -- Palette indices for the scope.
 local BG, RING, TRAIL, SWEEP, CLOSE, MEDIUM, FAINT, HIGH, BRIGHT = 1, 2, 3, 4, 5, 6, 7, 8, 9

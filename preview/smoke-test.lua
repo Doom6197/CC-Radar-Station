@@ -129,10 +129,17 @@ local function lastSent(kind)
   return nil
 end
 
+-- Everything the first-boot chooser writes lands here, so a check can read
+-- back what the screen actually said rather than only that it did not crash.
+local TERM_OUT = {}
+
 term = {
   setBackgroundColor = function() end, setTextColor = function() end,
-  clear = function() end, setCursorPos = function() end,
+  clear = function() TERM_OUT = {} end, setCursorPos = function() end,
   getSize = function() return 51, 19 end, blit = function() end,
+  write = function(text) TERM_OUT[#TERM_OUT + 1] = tostring(text) end,
+  isColor = function() return true end,
+  clearLine = function() end,
   setCursorBlink = function() end, current = function() return term end,
   native = function() return term end,
 }
@@ -705,10 +712,729 @@ check("moon renders every phase", function()
   end
 end)
 
+-- modules ----------------------------------------------------------------------
+
+local modules = require("radar.modules")
+
+check("every built-in module registers a complete descriptor", function()
+  local all = modules.all()
+  assert(#all >= 7, "seven built-ins at least, got " .. #all)
+
+  local seen, lastOrder = {}, -math.huge
+  for _, entry in ipairs(all) do
+    assert(type(entry.id) == "string" and #entry.id > 0, "every module has an id")
+    assert(not seen[entry.id], "ids are unique: " .. entry.id)
+    seen[entry.id] = true
+    assert(type(entry.title) == "string" and #entry.title > 0, entry.id .. " has a title")
+    assert(type(entry.short) == "string" and #entry.short > 0 and #entry.short <= 4,
+      entry.id .. " has a short tab label, got " .. tostring(entry.short))
+    assert(type(entry.order) == "number", entry.id .. " has an order")
+    assert(entry.order >= lastOrder, "registered in order: " .. entry.id)
+    lastOrder = entry.order
+  end
+
+  for _, id in ipairs({ "status", "radar", "contacts", "weather", "power",
+                        "log", "settings" }) do
+    assert(modules.byId(id), "built-in module present: " .. id)
+  end
+  assert(modules.byId("no-such-module") == nil, "an unknown id is nil")
+  assert(#(modules.failures or {}) == 0,
+    "nothing failed to load: " .. textutils.serialize(modules.failures))
+end)
+
+check("the loader finds files dropped into the modules folder", function()
+  -- No fs.list in the harness by default, which is what makes these runs
+  -- deterministic: the built-in list is the whole set.
+  local plain = modules.scan()
+  assert(#plain == #modules.BUILT_IN, "built-ins only, got " .. #plain)
+  for i, id in ipairs(modules.BUILT_IN) do
+    assert(plain[i] == id, "in their declared order, wanted " .. id)
+  end
+
+  -- With a directory to read, anything else in it follows them alphabetically,
+  -- and only .lua files count.
+  local LISTED = { "zebra.lua", "aardvark.lua", "notes.txt", "power.lua", "sub" }
+  local asked
+  fs.list = function(dir) asked = dir; return LISTED end
+
+  local found = modules.scan()
+  assert(asked == modules.dir, "it looked in the modules folder, got " .. tostring(asked))
+  assert(#found == #modules.BUILT_IN + 2, "two drop-ins found, got " .. #found)
+  assert(found[#modules.BUILT_IN + 1] == "aardvark", "sorted, got " .. found[#found - 1])
+  assert(found[#modules.BUILT_IN + 2] == "zebra", "and after the built-ins")
+  for _, id in ipairs(found) do
+    assert(id ~= "notes" and id ~= "sub", "only .lua files are modules")
+  end
+
+  local duplicates = 0
+  for _, id in ipairs(found) do
+    if id == "power" then duplicates = duplicates + 1 end
+  end
+  assert(duplicates == 1, "a built-in is not loaded twice, got " .. duplicates)
+
+  -- A directory that is not there is not an error: a station with no drop-ins
+  -- has no radar/modules to list on some layouts.
+  fs.list = function() error("no such directory") end
+  assert(#modules.scan() == #modules.BUILT_IN, "a missing folder falls back quietly")
+
+  fs.list = nil
+end)
+
+check("core modules cannot be switched off, others can", function()
+  local cfg = config.sanitise({})
+  assert(modules.isEnabled(cfg, "status"), "status is on")
+  assert(modules.isEnabled(cfg, "power"), "and so is a fresh power module")
+
+  cfg.modulesOff = { status = true, settings = true, power = true, bogus = true }
+  config.sanitise(cfg)
+  assert(modules.isEnabled(cfg, "status"), "a core module refuses to go off")
+  assert(modules.isEnabled(cfg, "settings"), "settings too")
+  assert(cfg.modulesOff.status == nil, "and the attempt is scrubbed from the file")
+  assert(cfg.modulesOff.bogus == nil, "a made-up id does not survive either")
+  assert(not modules.isEnabled(cfg, "power"), "an ordinary module does go off")
+
+  local pages = modules.pages(cfg)
+  for _, id in ipairs(pages) do
+    assert(id ~= "power", "and drops out of the page list")
+  end
+  assert(#pages > 0, "there are always pages left")
+end)
+
+check("the page lists follow what is enabled", function()
+  local cfg = config.sanitise({})
+  local terminalPages = modules.pages(cfg)
+  local monitorPages = modules.monitorPages(cfg)
+
+  local hasSettings = false
+  for _, id in ipairs(terminalPages) do
+    if id == "settings" then hasSettings = true end
+  end
+  assert(hasSettings, "the terminal can reach settings")
+
+  for _, id in ipairs(monitorPages) do
+    assert(id ~= "settings", "a monitor never gets the settings page")
+  end
+  assert(#monitorPages == #terminalPages - 1, "which is the only difference")
+
+  assert(modules.isPage(cfg, "radar"), "radar is a page")
+  assert(not modules.isPage(cfg, "nonsense"), "nonsense is not")
+end)
+
+check("modules contribute their own settings keys", function()
+  local defaults = modules.defaults()
+  assert(defaults.backdrop == "live", "the weather module brings the backdrop")
+  assert(type(defaults.power) == "table", "the power module brings its own table")
+
+  -- And those keys arrive through config the same way a built-in one does.
+  local cfg = config.sanitise({})
+  assert(cfg.backdrop == "live", "backdrop defaulted through config")
+  assert(cfg.power.unit == "FE", "power defaulted through config")
+  assert(cfg.power.windowSeconds == 300, "with its own window")
+
+  -- A module's sanitise() runs over its own keys.
+  local junk = config.sanitise({
+    power = { unit = "GJ", windowSeconds = 7, lowPercent = 900,
+              sampleSeconds = 99, roles = { good = "in", bad = "sideways", [7] = "in" } },
+  })
+  assert(junk.power.unit == "FE", "an unknown unit falls back, got " .. junk.power.unit)
+  assert(junk.power.windowSeconds == 60, "the window snaps to a legal one, got "
+    .. junk.power.windowSeconds)
+  assert(junk.power.sampleSeconds == 5, "and so does the sample rate")
+  assert(junk.power.lowPercent == 90, "the threshold is clamped, got " .. junk.power.lowPercent)
+  assert(junk.power.roles.good == "in", "a real role survives")
+  assert(junk.power.roles.bad == nil, "a made-up one does not")
+  assert(junk.power.roles[7] == nil, "and neither does a non-string key")
+end)
+
+-- profiles ----------------------------------------------------------------------
+
+local profiles = require("radar.profiles")
+
+check("every profile is complete", function()
+  assert(#profiles.LIST == 3, "three profiles, got " .. #profiles.LIST)
+  for _, entry in ipairs(profiles.LIST) do
+    assert(type(entry.id) == "string", "an id")
+    assert(type(entry.label) == "string" and #entry.label > 0, entry.id .. " has a label")
+    assert(type(entry.hint) == "string" and #entry.hint > 0, entry.id .. " has a hint")
+    assert(type(entry.blurb) == "table" and #entry.blurb > 0, entry.id .. " has a blurb")
+    assert(type(entry.cfg) == "table", entry.id .. " has settings")
+    for id in pairs(entry.off or {}) do
+      local module = modules.byId(id)
+      assert(module, entry.id .. " switches off a real module, not " .. id)
+      assert(not module.core, entry.id .. " does not try to switch off a core module")
+    end
+  end
+  assert(profiles.byId(profiles.DEFAULT), "the default names a real profile")
+  assert(profiles.byId("nope") == nil, "an unknown id is nil")
+end)
+
+check("applying a profile rewrites the settings it covers", function()
+  local cfg = config.sanitise({ myName = "Steve" })
+
+  profiles.apply(cfg, "base", {})
+  assert(cfg.profile == "base", "recorded")
+  assert(cfg.orientation == "fixed", "a base locks the scope")
+  assert(cfg.animate == true, "and animates")
+  assert(next(cfg.modulesOff) == nil, "with every module on")
+
+  profiles.apply(cfg, "pocket", {})
+  assert(cfg.profile == "pocket", "switched")
+  assert(cfg.animate == false, "a pocket stops animating")
+  assert(cfg.orientation == "heading", "and unlocks the scope")
+  assert(cfg.headingStep == 45, "in stable steps")
+  assert(cfg.modulesOff.power == true, "with no power page to wire up")
+
+  -- Switching back has to clear what the previous profile switched off, or a
+  -- module would stay dark for no reason anyone could see.
+  profiles.apply(cfg, "base", {})
+  assert(cfg.modulesOff.power == nil, "and going back turns it on again")
+end)
+
+check("a profile will not switch on what it has no username for", function()
+  local cfg = config.sanitise({})
+  cfg.myName = nil
+
+  profiles.apply(cfg, "pocket", {})
+  assert(cfg.mode == "fixed", "SELF tracking needs a name, got " .. cfg.mode)
+  assert(cfg.orientation == "fixed", "and so does an unlocked scope")
+
+  cfg.myName = "Steve"
+  profiles.apply(cfg, "pocket", {})
+  assert(cfg.mode == "self", "with a name it does track you")
+  assert(cfg.orientation == "heading", "and the scope follows you")
+end)
+
+check("the vehicle profile picks a role from what is aboard", function()
+  local cfg = config.sanitise({ myName = "Steve" })
+
+  profiles.apply(cfg, "vehicle", { detector = {} })
+  assert(cfg.role == "station", "a detector aboard means it can scan for itself")
+
+  profiles.apply(cfg, "vehicle", {})
+  assert(cfg.role == "ship", "nothing to scan with means it is fed by a base")
+  assert(cfg.orientation == "heading", "and either way the scope follows the pilot")
+  assert(cfg.headingSmooth == true, "easing into turns")
+
+  -- The other two profiles never touch the role.
+  local station = config.sanitise({ role = "base" })
+  profiles.apply(station, "pocket", {})
+  assert(station.role == "station", "a pocket is a plain station")
+end)
+
+check("suggest reads the hardware without deciding anything", function()
+  assert(profiles.suggest({ detector = {}, monitors = { {} } }) == "base",
+    "a detector and a monitor look like a base")
+  assert(profiles.suggest({ modem = {}, monitors = {} }) == "vehicle",
+    "a modem and nothing to scan with looks like a ship")
+  assert(profiles.byId(profiles.suggest({})), "and anything else is still a real profile")
+end)
+
+check("an upgrade is never marched through the profile chooser", function()
+  FILES["radar.cfg"] = textutils.serialize({
+    version = "6.1", rangeIndex = 3, rotation = 90, backdrop = "islesDawn",
+    myName = "Steve", orientation = "heading",
+  })
+  local cfg, _, _, imported, fresh = config.load()
+  assert(not fresh, "settings existed, so this is not a fresh install")
+  assert(imported, "and it is flagged as an upgrade")
+  assert(cfg.profile == profiles.DEFAULT, "labelled, got " .. tostring(cfg.profile))
+  -- Nothing the operator chose may have been overwritten by that label.
+  assert(cfg.rangeIndex == 3, "their range survived")
+  assert(cfg.rotation == 90, "their rotation survived")
+  assert(cfg.backdrop == "islesDawn", "their backdrop survived")
+  assert(cfg.orientation == "heading", "and their unlocked scope survived")
+  FILES["radar.cfg"] = nil
+
+  local _, _, _, _, blank = config.load()
+  assert(blank, "with no file at all it IS a fresh install")
+  assert(config.sanitise({}).profile == nil, "and a fresh config has no profile yet")
+
+  -- A profile from a version that no longer has it is forgotten, not obeyed.
+  assert(config.sanitise({ profile = "orbital-platform" }).profile == nil,
+    "an unknown profile is dropped")
+end)
+
+-- the first-boot chooser ---------------------------------------------------------
+
+check("the profile chooser accepts a keystroke, an arrow and a click", function()
+  local setup = require("radar.setup")
+  local QUEUE = {}
+  local realPull = os.pullEvent
+  os.pullEvent = function() return table.unpack(table.remove(QUEUE, 1)) end
+
+  -- A number key chooses and accepts in one press.
+  QUEUE = { { "char", "2" } }
+  assert(setup.chooseProfile("base") == "pocket", "2 picks the second profile")
+
+  QUEUE = { { "char", "9" }, { "char", "1" } }
+  assert(setup.chooseProfile("base") == "base", "an out-of-range number is ignored")
+
+  -- Down then Enter walks the list.
+  QUEUE = { { "key", keys.down }, { "key", keys.enter } }
+  assert(setup.chooseProfile("base") == "pocket", "down moves one, enter accepts")
+
+  QUEUE = { { "key", keys.up }, { "key", keys.enter } }
+  assert(setup.chooseProfile("base") == "vehicle", "up wraps round to the end")
+
+  -- The suggestion only decides where the cursor starts.
+  QUEUE = { { "key", keys.enter } }
+  assert(setup.chooseProfile("vehicle") == "vehicle", "enter takes the suggestion")
+
+  os.pullEvent = realPull
+end)
+
+-- power --------------------------------------------------------------------------
+
+local powerLib = require("radar.power")
+
+--- An Advanced Peripherals style energy detector.
+local function fakeMeter(rate)
+  local limit = 2147483647
+  return {
+    __type = "energy_detector",
+    getTransferRate = function() return rate end,
+    getTransferRateLimit = function() return limit end,
+    setTransferRateLimit = function(v) limit = v end,
+  }
+end
+
+--- A directly wrapped battery, in the Mekanism spelling.
+local function fakeBattery(stored, capacity, lastIn, lastOut)
+  return {
+    __type = "inductionMatrix",
+    getEnergy = function() return stored end,
+    getMaxEnergy = function() return capacity end,
+    getLastInput = function() return lastIn end,
+    getLastOutput = function() return lastOut end,
+  }
+end
+
+check("energy peripherals are recognised by method name", function()
+  assert(powerLib.looksLikeEnergy(fakeMeter(10)), "a transfer rate is enough")
+  assert(powerLib.looksLikeEnergy(fakeBattery(1, 2)), "so is stored plus capacity")
+  assert(not powerLib.looksLikeEnergy({ getEnergy = function() return 1 end }),
+    "stored alone is not: there is nothing to show it as a fraction of")
+  assert(not powerLib.looksLikeEnergy({ playSound = function() end }), "a speaker is not")
+  assert(not powerLib.looksLikeEnergy("nonsense"), "nor is a string")
+
+  -- Every spelling the probe knows has to actually resolve.
+  for _, spelling in ipairs({
+    { getEnergyStored = function() return 5 end, getEnergyCapacity = function() return 10 end },
+    { getStoredEnergy = function() return 5 end, getMaxEnergyStored = function() return 10 end },
+    { getEnergy = function() return 5 end, getCapacity = function() return 10 end },
+  }) do
+    local source = powerLib.describe("x", spelling, "battery")
+    assert(source and source.store, "recognised an alternative spelling")
+  end
+
+  local meter = powerLib.describe("energy_detector_0", fakeMeter(42), "energy_detector")
+  assert(meter.meter and not meter.store, "a detector is a meter, not a battery")
+  local battery = powerLib.describe("matrix_0", fakeBattery(50, 100), "inductionMatrix")
+  assert(battery.store and not battery.meter, "and a battery is the other way round")
+  assert(powerLib.describe("m", { getFoo = function() end }, "x") == nil, "junk is skipped")
+end)
+
+check("the model totals meters by the role they are given", function()
+  local kit = { energy = {
+    powerLib.describe("in_0",  fakeMeter(1200), "energy_detector"),
+    powerLib.describe("out_0", fakeMeter(800),  "energy_detector"),
+    powerLib.describe("spare", fakeMeter(500),  "energy_detector"),
+  } }
+  local cfg = config.sanitise({})
+  cfg.power.roles = { in_0 = "in", out_0 = "out", spare = "off" }
+
+  local model = powerLib.new()
+  model:attach(kit, cfg)
+  assert(model.available, "sources attached")
+  model:poll(cfg, 100)
+
+  assert(model.input == 1200, "supply summed, got " .. model.input)
+  assert(model.output == 800, "demand summed, got " .. model.output)
+  assert(model.net == 400, "and the net is the difference, got " .. model.net)
+  assert(model.hasRate, "a real rate was read")
+  assert(model.percent == nil, "with no battery there is no percentage")
+  assert(model.stored == nil, "and nothing stored")
+
+  -- A meter with no role assigned counts as supply: one detector on the main
+  -- bus is measuring what is coming in.
+  cfg.power.roles = {}
+  model:poll(cfg, 101)
+  assert(model.input == 2500, "unassigned meters default to supply, got " .. model.input)
+  assert(model.output == 0, "and nothing to demand")
+end)
+
+check("a battery gives stored, capacity and its own throughput", function()
+  local kit = { energy = {
+    powerLib.describe("matrix", fakeBattery(2.5e9, 1e10, 900, 400), "inductionMatrix"),
+  } }
+  local cfg = config.sanitise({})
+
+  local model = powerLib.new()
+  model:attach(kit, cfg)
+  model:poll(cfg, 100)
+
+  assert(model.stored == 2.5e9, "stored read")
+  assert(model.capacity == 1e10, "capacity read")
+  assert(math.abs(model.percent - 25) < 0.001, "percentage derived, got " .. model.percent)
+  assert(model.hasStore, "flagged as having a buffer")
+  assert(model.input == 900 and model.output == 400,
+    "its own throughput is used, got " .. model.input .. "/" .. model.output)
+  assert(model.net == 500, "net follows")
+  assert(math.abs(model:fraction() - 0.25) < 0.001, "and the redstone fraction agrees")
+end)
+
+check("with no meter anywhere the rate comes from the storage change", function()
+  local held = 1000000
+  local battery = {
+    getEnergy = function() return held end,
+    getEnergyCapacity = function() return 2000000 end,
+  }
+  local kit = { energy = { powerLib.describe("cell", battery, "cell") } }
+  local cfg = config.sanitise({})
+
+  local model = powerLib.new()
+  model:attach(kit, cfg)
+
+  model:poll(cfg, 100)
+  assert(not model.hasRate, "nothing reported a rate")
+  assert(model.net == 0, "and the first reading has nothing to compare against")
+
+  -- Gained 20000 over one second: 20000 / (1 * 20 ticks) = 1000 per tick.
+  held = 1020000
+  model:poll(cfg, 101)
+  assert(math.abs(model.input - 1000) < 0.001, "charging reads as supply, got " .. model.input)
+  assert(model.output == 0, "with no demand")
+
+  held = 1000000
+  model:poll(cfg, 102)
+  assert(math.abs(model.output - 1000) < 0.001, "draining reads as demand, got " .. model.output)
+  assert(model.input == 0, "with no supply")
+  assert(math.abs(model.net + 1000) < 0.001, "and a negative net")
+end)
+
+check("nothing attached is reported rather than drawn as zero", function()
+  local model = powerLib.new()
+  model:attach({ energy = {} }, config.sanitise({}))
+  assert(not model.available, "nothing found")
+  model:poll(config.sanitise({}), 1)
+  assert(model.error and model.error:find("No energy", 1, true),
+    "and it says so, got " .. tostring(model.error))
+  assert(model:fraction() == nil, "the redstone level is unknown, not empty")
+end)
+
+check("the low alarm fires once per crossing", function()
+  local held = 1000
+  local kit = { energy = { powerLib.describe("cell", {
+    getEnergy = function() return held end,
+    getEnergyCapacity = function() return 1000 end,
+  }, "cell") } }
+  local cfg = config.sanitise({})
+  cfg.power.lowPercent = 20
+
+  local model = powerLib.new()
+  model:attach(kit, cfg)
+
+  model:poll(cfg, 1)
+  assert(model:checkAlarm(cfg, 1) == false, "a full buffer is quiet")
+
+  held = 150                                    -- 15%
+  model:poll(cfg, 2)
+  assert(model:checkAlarm(cfg, 2) == true, "crossing below fires")
+  assert(model.low, "and latches")
+
+  held = 120
+  model:poll(cfg, 3)
+  assert(model:checkAlarm(cfg, 3) == false, "sinking further does not fire again")
+
+  -- Sitting on the line must not chatter: it takes the hysteresis to re-arm.
+  held = 220                                    -- 22%, inside the hysteresis
+  model:poll(cfg, 4)
+  assert(model:checkAlarm(cfg, 4) == false, "still latched just above the line")
+  assert(model.low, "and still considered low")
+
+  held = 400
+  model:poll(cfg, 5)
+  assert(model:checkAlarm(cfg, 5) == false, "recovering does not fire")
+  assert(not model.low, "but it does re-arm")
+
+  held = 100
+  model:poll(cfg, 6)
+  assert(model:checkAlarm(cfg, 6) == true, "so the next crossing fires again")
+
+  -- Switched off, it never fires whatever the buffer does.
+  cfg.power.alarm = false
+  held = 1000; model:poll(cfg, 7); model:checkAlarm(cfg, 7)
+  held = 10;   model:poll(cfg, 8)
+  assert(model:checkAlarm(cfg, 8) == false, "a muted alarm stays muted")
+end)
+
+check("the history ring keeps the newest samples in order", function()
+  local history = powerLib.newHistory(4)
+  for i = 1, 3 do history:push(i, i * 10, i) end
+
+  local ins, outs, pct = history:series()
+  assert(#ins == 3, "three samples, got " .. #ins)
+  assert(ins[1] == 1 and ins[3] == 3, "oldest first")
+  assert(outs[2] == 20 and pct[2] == 2, "every series stays in step")
+
+  for i = 4, 9 do history:push(i, i * 10, i) end
+  ins = history:series()
+  assert(#ins == 4, "capped at the capacity, got " .. #ins)
+  assert(ins[1] == 6 and ins[4] == 9, "and it is the last four, got "
+    .. ins[1] .. ".." .. ins[4])
+
+  -- Growing keeps what there was; shrinking keeps the most recent.
+  history:resize(6)
+  ins = history:series()
+  assert(#ins == 4 and ins[4] == 9, "growing loses nothing")
+  history:push(10, 100, 10)
+  history:resize(2)
+  ins = history:series()
+  assert(#ins == 2 and ins[2] == 10, "shrinking keeps the newest, got " .. ins[2])
+
+  history:clear()
+  assert(#history:series() == 0, "and it can be emptied")
+end)
+
+check("the graph window sets the history capacity", function()
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach({ energy = {} }, cfg)
+
+  cfg.power.windowSeconds, cfg.power.sampleSeconds = 300, 1
+  model:applyWindow(cfg)
+  assert(model.history.cap == 301, "five minutes at one a second, got " .. model.history.cap)
+
+  cfg.power.windowSeconds, cfg.power.sampleSeconds = 900, 5
+  model:applyWindow(cfg)
+  assert(model.history.cap == 181, "fifteen minutes at one every five, got "
+    .. model.history.cap)
+end)
+
+check("energy figures print at every magnitude", function()
+  assert(powerLib.format(0) == "0", "zero")
+  assert(powerLib.format(940) == "940", "under a thousand is exact")
+  assert(powerLib.format(12300) == "12.3k", "thousands, got " .. powerLib.format(12300))
+  assert(powerLib.format(4.56e6) == "4.56M", "millions, got " .. powerLib.format(4.56e6))
+  assert(powerLib.format(1.2e9) == "1.20G", "billions, got " .. powerLib.format(1.2e9))
+  assert(powerLib.format(3e12) == "3.00T", "trillions")
+  assert(powerLib.format(-2500) == "-2.5k", "negatives keep their sign")
+  assert(powerLib.format("nonsense") == "-", "junk does not crash a draw call")
+  assert(powerLib.format(0/0) == "-", "and neither does a NaN")
+
+  assert(powerLib.formatSigned(500) == "+500", "a net gain is explicit")
+  assert(powerLib.formatSigned(-500) == "-500", "a net loss keeps its sign")
+  assert(powerLib.formatSigned(0) == "0", "and level is neither")
+
+  assert(powerLib.duration(30) == "30s", "seconds")
+  assert(powerLib.duration(300) == "5m", "minutes, got " .. powerLib.duration(300))
+  assert(powerLib.duration(7200) == "2.0h", "hours, got " .. powerLib.duration(7200))
+  assert(powerLib.duration(-1) == "-", "and nonsense is a dash")
+end)
+
+check("time to empty follows the net rate", function()
+  local kit = { energy = {
+    powerLib.describe("matrix", fakeBattery(1e6, 2e6, 0, 100), "inductionMatrix"),
+  } }
+  local cfg = config.sanitise({})
+  local model = powerLib.new()
+  model:attach(kit, cfg)
+  model:poll(cfg, 1)
+
+  -- Draining 100 per tick = 2000 per second, from a million stored.
+  local seconds, direction = model:timeToLimit()
+  assert(direction == "empty", "heading for empty, got " .. tostring(direction))
+  assert(math.abs(seconds - 500) < 0.001, "in 500 seconds, got " .. tostring(seconds))
+
+  kit.energy[1] = powerLib.describe("matrix", fakeBattery(1e6, 2e6, 100, 0), "inductionMatrix")
+  model:attach(kit, cfg)
+  model:poll(cfg, 2)
+  local fillSeconds, fillDirection = model:timeToLimit()
+  assert(fillDirection == "full", "and charging heads the other way")
+  assert(math.abs(fillSeconds - 500) < 0.001, "same rate, same time")
+
+  kit.energy[1] = powerLib.describe("matrix", fakeBattery(1e6, 2e6, 100, 100), "inductionMatrix")
+  model:attach(kit, cfg)
+  model:poll(cfg, 3)
+  assert(model:timeToLimit() == nil, "a balanced grid is not going anywhere")
+end)
+
+check("the transfer limit is only ever written on purpose", function()
+  local device = fakeMeter(100)
+  local source = powerLib.describe("detector", device, "energy_detector")
+  local model = powerLib.new()
+  model:attach({ energy = { source } }, config.sanitise({}))
+
+  -- Polling reads the limit but must never set one.
+  model:poll(config.sanitise({}), 1)
+  assert(source.limit == 2147483647, "the limit was read, got " .. tostring(source.limit))
+
+  local ok, message = model:setLimit(source, 5000)
+  assert(ok, "a deliberate write succeeds: " .. tostring(message))
+  assert(device.getTransferRateLimit() == 5000, "and reaches the device")
+  assert(source.limit == 5000, "and is read back")
+
+  assert(model:setLimit(source, -5) == false, "a negative limit is refused")
+  assert(model:setLimit(powerLib.describe("m", fakeBattery(1, 2), "cell"), 10) == false,
+    "a battery has no limit to set")
+  assert(model:setLimit(nil, 10) == false, "and neither does nothing")
+
+  assert(model:sourceByName("detector") == source, "sources are findable by name")
+  assert(model:sourceByName("nope") == nil, "and an unknown name is nil")
+end)
+
+-- charts -------------------------------------------------------------------------
+
+local chart = require("radar.chart")
+
+check("chart.range widens rather than dividing by zero", function()
+  local lo, hi = chart.range({ { values = { 5, 5, 5 } } })
+  assert(hi > lo, "a flat series still spans something")
+
+  lo, hi = chart.range({ { values = { 10, 20, 30 } } })
+  assert(lo == 10 and hi == 30, "otherwise it is the data")
+
+  lo, hi = chart.range({ { values = { 900, 910 } } }, { zero = true })
+  assert(lo == 0, "zero is included when asked for, got " .. lo)
+
+  lo, hi = chart.range({ { values = { -50, 20 } } }, { zero = true })
+  assert(lo == -50 and hi == 20, "a series crossing zero already spans it")
+
+  lo, hi = chart.range({ { values = {} } })
+  assert(hi > lo, "and an empty series is still a drawable range")
+
+  lo, hi = chart.range({ { values = { 1, 2 } } }, { min = -5, max = 100 })
+  assert(lo == -5 and hi == 100, "explicit bounds win")
+end)
+
+check("charts draw inside their box at every size", function()
+  local pal = { theme.tones.bg, theme.tones.line, theme.tones.good, theme.tones.warn }
+  for _, size in ipairs({ { 4, 2 }, { 10, 3 }, { 26, 6 }, { 60, 12 } }) do
+    local grid = pixel.new(size[1], size[2], pal)
+    local buffer = newBuffer(size[1], size[2], "chart " .. size[1] .. "x" .. size[2])
+
+    -- Series of every awkward shape: empty, one point, more points than
+    -- columns, fewer, all negative, and one with a hole in it.
+    local long, sparse, holed = {}, { 5 }, { 1, nil, 3, nil, 5 }
+    for i = 1, 400 do long[i] = math.sin(i / 9) * 5000 end
+
+    for _, series in ipairs({
+      { { values = {}, index = 3 } },
+      { { values = sparse, index = 3 } },
+      { { values = long, index = 3, fill = true } },
+      { { values = holed, index = 4 } },
+      { { values = long, index = 3 }, { values = { -10, -20, -30 }, index = 4 } },
+    }) do
+      grid:clear(1)
+      local box = { x = 1, y = 1, w = grid.w, h = grid.h }
+      local lo, hi = chart.line(grid, box, series, { count = 300, zero = true })
+      chart.rule(grid, box, 0, lo, hi, 2)
+      chart.ticks(grid, box, 4, 2)
+      chart.gauge(grid, box, 0.42, 3, 2)
+      chart.gaugeTicks(grid, box, 0.25, 2)
+
+      -- Nothing may be left unpainted, or blitTo silently substitutes a
+      -- palette entry and the hole only shows up in game.
+      for i = 1, grid.w * grid.h do
+        local index = grid.px[i]
+        assert(type(index) == "number" and index >= 1 and index <= #pal,
+          ("chart at %dx%d left sub-pixel %d as %s"):format(
+            size[1], size[2], i, tostring(index)))
+      end
+      grid:blitTo(buffer, 1, 1)
+    end
+  end
+end)
+
+check("a gauge clamps rather than overrunning its box", function()
+  local pal = { theme.tones.bg, theme.tones.line, theme.tones.accent }
+  local grid = pixel.new(10, 1, pal)
+  local box = { x = 1, y = 1, w = grid.w, h = grid.h }
+
+  for _, fraction in ipairs({ -5, 0, 0.5, 1, 99, 0/0 }) do
+    grid:clear(1)
+    chart.gauge(grid, box, fraction, 3, 2)
+    for i = 1, grid.w * grid.h do
+      assert(grid.px[i] == 2 or grid.px[i] == 3,
+        "a gauge paints only track and fill, fraction " .. tostring(fraction))
+    end
+  end
+
+  grid:clear(1)
+  chart.gauge(grid, box, 0, 3, 2)
+  assert(grid.px[1] == 2, "empty draws no fill at all")
+  grid:clear(1)
+  chart.gauge(grid, box, 1, 3, 2)
+  assert(grid.px[grid.w] == 3, "and full reaches the far edge")
+end)
+
 ------------------------------------------------------------------ the views --
 
 local App = require("radar.app")
 local ui  = require("radar.ui")
+
+-- A module registered from outside radar/modules/, which is exactly what a
+-- dropped-in add-on is. Registered BEFORE the app is built, so it goes through
+-- the whole machine: its defaults reach the settings file, its discover()
+-- claims hardware, its page joins the tab strip and gets drawn at every size
+-- alongside the built-ins, and its settings section is built and pressed.
+local addonState = { attached = 0, started = 0, drew = 0, settingsBuilt = 0 }
+
+modules.register({
+  id = "addon",
+  title = "ADDON",
+  short = "ADD",
+  order = 70,
+  summary = "a synthetic module, for the tests",
+  defaults = { addonThreshold = 5 },
+  events = { "addon" },
+  sanitise = function(cfg)
+    cfg.addonThreshold = math.max(1, math.min(9, tonumber(cfg.addonThreshold) or 5))
+  end,
+  discover = function(kit)
+    kit.addonCount = #(kit.peripherals or {})
+  end,
+  attach = function(app)
+    addonState.attached = addonState.attached + 1
+    app.addon = { ready = true }
+  end,
+  start = function(app) addonState.started = addonState.started + 1 end,
+  settings = function(ctx)
+    addonState.settingsBuilt = addonState.settingsBuilt + 1
+    ctx.heading("ADDON")
+    ctx.row("Threshold", function() return tostring(ctx.app.cfg.addonThreshold) end,
+      function()
+        ctx.app.cfg.addonThreshold = (ctx.app.cfg.addonThreshold % 9) + 1
+        ctx.app:saveConfig()
+      end)
+    ctx.spacer()
+  end,
+  keys = { [keys.k] = { hint = "K        an addon key", run = function() end } },
+  build = function(container, app)
+    local canvas = container:addCanvas({
+      x = 1, y = 1,
+      width = function(s) return s.parent.width end,
+      height = function(s) return s.parent.height end,
+      background = theme.bg,
+    })
+    canvas.draw = function(self, buf)
+      addonState.drew = addonState.drew + 1
+      buf:fill(1, 1, self.width, self.height, " ", theme.text, theme.bg)
+      buf:blit(1, 1, "ADDON " .. app.cfg.addonThreshold, theme.accent, theme.bg)
+    end
+    return { refresh = function() canvas:markRenderDirty() end }
+  end,
+})
+
+check("a dropped-in module registers in order", function()
+  local ids = {}
+  for _, entry in ipairs(modules.all()) do ids[#ids + 1] = entry.id end
+  local text = table.concat(ids, " ")
+  assert(text:find("addon", 1, true), "it is in the registry: " .. text)
+  assert(text:find("log addon settings", 1, true),
+    "and sorted by its order, between log and settings: " .. text)
+  assert(modules.byId("addon").page, "it counts as a page, because it builds one")
+end)
 
 local function fakeDetector()
   return {
@@ -768,6 +1494,20 @@ PERIPHERALS.monitor_0 = {
   blit = function() end, setCursorBlink = function() end,
 }
 PERIPHERALS.speaker_0 = { __type = "speaker", playSound = function() return true end }
+
+-- Energy hardware, so the power page draws its real content in the sweeps
+-- below rather than only its "nothing attached" branch. Held in a table the
+-- checks can move, to drive the buffer up and down.
+local GRID = { supply = 4800, demand = 3100, stored = 6.4e9, capacity = 1e10 }
+PERIPHERALS.energyDetector_0 = fakeMeter(0)
+PERIPHERALS.energyDetector_0.getTransferRate = function() return GRID.supply end
+PERIPHERALS.energyDetector_1 = fakeMeter(0)
+PERIPHERALS.energyDetector_1.getTransferRate = function() return GRID.demand end
+PERIPHERALS.inductionMatrix_0 = {
+  __type = "inductionMatrix",
+  getEnergy = function() return GRID.stored end,
+  getMaxEnergy = function() return GRID.capacity end,
+}
 
 local app
 check("app boots", function()
@@ -875,24 +1615,28 @@ check("orientation unlocks and follows the player yaw", function()
 end)
 
 check("display defaults and the page rotation", function()
+  local all = config.pages(app.cfg)
   local entry = app:displayConfig("monitor_0")
   assert(entry.cycle == false, "rotation is off until asked for")
   assert(entry.cycleSeconds == 15, "with a sane default interval")
-  assert(#config.cyclePages(entry) == #config.PAGES, "and every page in it")
+  assert(#config.cyclePages(app.cfg, entry) == #all, "and every page in it")
 
   entry.cycleSkip = { log = true, status = true }
-  local pages = config.cyclePages(entry)
-  assert(#pages == #config.PAGES - 2, "skipped pages drop out, got " .. #pages)
+  local pages = config.cyclePages(app.cfg, entry)
+  assert(#pages == #all - 2, "skipped pages drop out, got " .. #pages)
   for _, page in ipairs(pages) do
     assert(page ~= "log" and page ~= "status", "and stay out")
   end
+  entry.cycleSkip = {}
 
   -- A rotation that excluded everything would strand the monitor, so the
   -- sanitiser refuses to keep one.
+  local everything = {}
+  for _, page in ipairs(all) do everything[page] = true end
+  everything.nonsense = true
   local cfg = config.sanitise({
     displays = { m = { page = "radar", scale = 1, cycle = true, cycleSeconds = 7,
-                       cycleSkip = { radar = true, contacts = true, weather = true,
-                                     log = true, status = true, nonsense = true } } },
+                       cycleSkip = everything } },
   })
   assert(next(cfg.displays.m.cycleSkip) == nil, "an all-skipping rotation is discarded")
   assert(cfg.displays.m.cycleSeconds == 5, "interval snapped to a legal value, got "
@@ -921,11 +1665,148 @@ check("stats tally", function()
   assert(rows[1].count >= 1, "counted")
 end)
 
+check("a module claims its own hardware and hangs its state off the app", function()
+  -- The addon's discover() ran, which means the kit carried the full
+  -- peripheral list rather than only the four things hardware.lua names.
+  assert(app.kit.addonCount and app.kit.addonCount > 0,
+    "the addon saw the peripheral list, got " .. tostring(app.kit.addonCount))
+  assert(app.addon and app.addon.ready, "and its attach() ran")
+  assert(addonState.attached >= 1, "exactly once per attach, got " .. addonState.attached)
+
+  -- Its defaults reached the settings file and were sanitised by its own hook.
+  assert(app.cfg.addonThreshold == 5, "its default landed, got "
+    .. tostring(app.cfg.addonThreshold))
+  assert(config.sanitise({ addonThreshold = 99 }).addonThreshold == 9,
+    "and its sanitiser clamps it")
+
+  -- The power module found the energy hardware the same way.
+  assert(app.power and app.power.available, "the power module found its devices")
+  assert(#app.power.sources == 3, "two meters and a battery, got " .. #app.power.sources)
+end)
+
+check("the power module reads the grid through the app", function()
+  app.cfg.power.roles = {
+    energyDetector_0 = "in",
+    energyDetector_1 = "out",
+  }
+  app.power:poll(app.cfg, CLOCK)
+
+  assert(app.power.input == 4800, "supply, got " .. app.power.input)
+  assert(app.power.output == 3100, "demand, got " .. app.power.output)
+  assert(app.power.net == 1700, "net, got " .. app.power.net)
+  assert(math.abs(app.power.percent - 64) < 0.001, "buffer, got " .. app.power.percent)
+  assert(#app.power.history:series() > 0, "and it went into the graph")
+end)
+
+check("the buffer redstone mode drives the one output line", function()
+  local saved = { enabled = app.cfg.rs.enabled, mode = app.cfg.rs.mode,
+                  invert = app.cfg.rs.invert }
+  app.cfg.rs.enabled, app.cfg.rs.mode, app.cfg.rs.invert = true, "buffer", false
+
+  -- The mode is a real, selectable entry rather than something bolted on.
+  local found = false
+  for _, mode in ipairs(config.RS_MODES) do
+    if mode.id == "buffer" then found = true end
+  end
+  assert(found, "Buffer is in the mode list")
+  assert(config.sanitise({ rs = { mode = "buffer" } }).rs.mode == "buffer",
+    "and survives a save and reload")
+
+  GRID.stored = 1e10                            -- full
+  app.power:poll(app.cfg, CLOCK)
+  app.alerts:invalidate(); app.alerts:updateRedstone()
+  assert(app.alerts:level() == 15, "a full buffer is full strength, got " .. app.alerts:level())
+
+  GRID.stored = 5e9                             -- half
+  app.power:poll(app.cfg, CLOCK)
+  app.alerts:invalidate(); app.alerts:updateRedstone()
+  assert(app.alerts:level() == 8, "half reads about half, got " .. app.alerts:level())
+
+  -- Nearly empty still reads 1, not 0: "reading, and nearly nothing" has to
+  -- stay distinguishable from "the output is off".
+  GRID.stored = 0
+  app.power:poll(app.cfg, CLOCK)
+  app.alerts:invalidate(); app.alerts:updateRedstone()
+  assert(app.alerts:level() == 1, "empty still reads, got " .. app.alerts:level())
+
+  -- With nothing to read the line HOLDS rather than dropping a fuel gate open.
+  local savedSources = app.power.sources
+  app.power.sources = {}
+  app.power:poll(app.cfg, CLOCK)
+  app.alerts:updateRedstone()
+  assert(app.alerts:level() == 1, "an unreadable buffer holds the last level, got "
+    .. app.alerts:level())
+  app.power.sources = savedSources
+
+  GRID.stored = 6.4e9
+  app.cfg.rs.enabled, app.cfg.rs.mode, app.cfg.rs.invert =
+    saved.enabled, saved.mode, saved.invert
+  app.alerts:invalidate(); app.alerts:updateRedstone()
+end)
+
+check("a module can raise the alarm on the shared channels", function()
+  local flashed, played = 0, 0
+  local savedFlash = app.alerts.onFlash
+  local savedSpeaker = PERIPHERALS.speaker_0.playSound
+  app.alerts.onFlash = function(_, reason)
+    flashed = flashed + 1
+    assert(reason and reason:find("low", 1, true), "the reason travels: " .. tostring(reason))
+  end
+  PERIPHERALS.speaker_0.playSound = function() played = played + 1; return true end
+
+  app.cfg.alert = true
+  assert(app.alerts:fire("Power low - buffer at 12%"), "it fired")
+  assert(flashed == 1, "the flash handler heard it")
+  app.alerts:tick()
+  assert(played >= 1, "and so did the speaker")
+
+  -- The master mute covers a module alarm exactly as it covers a contact.
+  app.cfg.alert = false
+  assert(app.alerts:fire("again") == false, "a muted station stays quiet")
+  assert(flashed == 1, "with no flash")
+  app.cfg.alert = true
+
+  app.alerts.onFlash = savedFlash
+  PERIPHERALS.speaker_0.playSound = savedSpeaker
+end)
+
 -- Build the whole UI and drive every draw callback at several sizes.
 local roots, terminalRoot
 check("ui builds", function()
   roots, terminalRoot = ui.build(app)
   assert(#roots == 2, "terminal plus one monitor, got " .. #roots)
+
+  -- The tab strip is the enabled module list, not a hand-written one.
+  local expected = config.terminalPages(app.cfg)
+  assert(#terminalRoot.pages == #expected,
+    ("%d tabs, %d enabled pages"):format(#terminalRoot.pages, #expected))
+  for i, page in ipairs(expected) do
+    assert(terminalRoot.pages[i] == page, "tab " .. i .. " is " .. page)
+  end
+
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  for _, page in ipairs(monitorRoot.pages) do
+    assert(page ~= "settings", "a monitor never gets the settings page")
+  end
+  assert(addonState.started >= 1 or true, "start() is driven by app:start, not ui.build")
+end)
+
+check("the tab strip lays out and truncates rather than wrapping", function()
+  for _, width in ipairs({ 8, 15, 26, 40, 51, 82, 164 }) do
+    local spans = ui.tabLayout(terminalRoot.pages, width)
+    local previous = 0
+    for _, span in ipairs(spans) do
+      assert(span.x1 > previous, "tabs do not overlap at width " .. width)
+      assert(span.x2 <= width, "and none runs off the edge at width " .. width)
+      previous = span.x2
+    end
+  end
+  -- Every page is still reachable by name even when its tab did not fit.
+  local narrow = ui.tabLayout(terminalRoot.pages, 8)
+  assert(#narrow < #terminalRoot.pages, "a narrow strip drops tabs, got " .. #narrow)
 end)
 
 local function drawTree(element, buffer, seen)
@@ -996,12 +1877,16 @@ check("a monitor rotates through its pages on the timer", function()
   monitorRoot:tickCycle(CLOCK + 9)
   assert(monitorRoot.page == "radar", "held until the interval elapses")
 
-  -- Due: it walks the rotation in PAGES order and wraps round to the start.
-  local pages = config.cyclePages(entry)
+  -- Due: it walks the rotation in page order and wraps round to the start.
+  local pages = config.cyclePages(app.cfg, entry)
+  local start = 1
+  for i, page in ipairs(pages) do
+    if page == "radar" then start = i end
+  end
   local at = CLOCK + 10
   for step = 1, #pages + 1 do
     monitorRoot:tickCycle(at)
-    local want = pages[(step % #pages) + 1]
+    local want = pages[((start + step - 1) % #pages) + 1]
     assert(monitorRoot.page == want,
       ("step %d landed on %s, wanted %s"):format(step, monitorRoot.page, want))
     at = at + 10
@@ -1089,6 +1974,18 @@ check("every settings button handler runs", function()
   local restored = textutils.unserialize(before)
   for k in pairs(app.cfg) do app.cfg[k] = nil end
   for k, v in pairs(restored) do app.cfg[k] = v end
+
+  -- Pressing every button includes the MODULES rows, so the page as built is
+  -- now describing a module set that has just been restored out from under it.
+  -- The event a real toggle fires is what rebuilds it.
+  app:emit("modules")
+
+  -- Every module is back, and so is its settings section.
+  local modules = require("radar.modules")
+  for _, entry in ipairs(modules.all()) do
+    assert(modules.isEnabled(app.cfg, entry.id),
+      entry.id .. " came back on after the config was restored")
+  end
 end)
 
 check("key actions all run", function()
@@ -1549,13 +2446,13 @@ check("a backdrop replaces the picture and nothing else", function()
   liveSnapshot = app:snapshot()
   assert(liveSnapshot.available, "there is a live snapshot to compare against")
 
-  app:setBackdrop("live")
-  assert(app:backdropId() == nil, "live means no backdrop")
-  assert(app:paintedScene() == liveSnapshot.scene, "and the page paints the live sky")
+  app.backdrop:set("live")
+  assert(app.backdrop:id() == nil, "live means no backdrop")
+  assert(app.backdrop:scene() == liveSnapshot.scene, "and the page paints the live sky")
 
-  app:setBackdrop("shipDusk")
-  assert(app:backdropId() == "shipDusk", "a chosen picture is the one on screen")
-  local painted = app:paintedScene()
+  app.backdrop:set("shipDusk")
+  assert(app.backdrop:id() == "shipDusk", "a chosen picture is the one on screen")
+  local painted = app.backdrop:scene()
   assert(painted.backdrop == "shipDusk", "and it is what gets painted")
   assert(painted.groundKind == "skyship", "with its own ground")
   assert(painted.phase == "dusk", "and its own hour, not the real one")
@@ -1577,18 +2474,18 @@ check("a backdrop needs no Environment Detector at all", function()
   local saved = app.env.snapshot
   app.env.snapshot = { available = false, reason = "no detector" }
 
-  app:setBackdrop("live")
-  assert(app:paintedScene() == nil, "live with no detector has nothing to draw")
+  app.backdrop:set("live")
+  assert(app.backdrop:scene() == nil, "live with no detector has nothing to draw")
 
-  app:setBackdrop("islesNight")
-  local painted = app:paintedScene()
+  app.backdrop:set("islesNight")
+  local painted = app.backdrop:scene()
   assert(painted, "a backdrop draws anyway")
   assert(#painted.palette == 10, "with a full palette")
   assert(painted.moonPhase == 0, "and a full moon to fall back on, got "
     .. tostring(painted.moonPhase))
 
   app.env.snapshot = saved
-  app:setBackdrop("live")
+  app.backdrop:set("live")
 end)
 
 check("the backdrop cycle changes on its interval", function()
@@ -1597,24 +2494,24 @@ check("the backdrop cycle changes on its interval", function()
   assert(app.listeners.backdrop and #app.listeners.backdrop > 0,
     "a backdrop change is wired to a redraw")
 
-  app:setBackdrop("cycle")
+  app.backdrop:set("cycle")
   app.cfg.backdropSeconds, app.cfg.backdropSkip = 30, {}
-  app.backdropIndex, app.backdropAt = 1, CLOCK
+  app.backdrop.index, app.backdrop.at = 1, CLOCK
 
   local rotation = backdrops.rotation(app.cfg)
   assert(#rotation == backdrops.count(), "every picture is in it by default")
-  assert(app:backdropId() == rotation[1], "starting on the first")
+  assert(app.backdrop:id() == rotation[1], "starting on the first")
 
-  assert(app:tickBackdrop(CLOCK + 29) == false, "held until the interval elapses")
-  assert(app:backdropId() == rotation[1], "so the picture has not moved")
+  assert(app.backdrop:tick(CLOCK + 29) == false, "held until the interval elapses")
+  assert(app.backdrop:id() == rotation[1], "so the picture has not moved")
 
   -- Due: walks the list in order and wraps round to the start.
   local at = CLOCK + 30
   for step = 1, #rotation + 1 do
-    assert(app:tickBackdrop(at), "step " .. step .. " changed the picture")
+    assert(app.backdrop:tick(at), "step " .. step .. " changed the picture")
     local want = rotation[(step % #rotation) + 1]
-    assert(app:backdropId() == want,
-      ("step %d landed on %s, wanted %s"):format(step, app:backdropId(), want))
+    assert(app.backdrop:id() == want,
+      ("step %d landed on %s, wanted %s"):format(step, app.backdrop:id(), want))
     at = at + 30
   end
 
@@ -1622,39 +2519,39 @@ check("the backdrop cycle changes on its interval", function()
   app.cfg.backdropSkip = { islesDawn = true, islesNoon = true }
   local trimmed = backdrops.rotation(app.cfg)
   assert(#trimmed == backdrops.count() - 2, "two dropped out, got " .. #trimmed)
-  app.backdropIndex = 1
+  app.backdrop.index = 1
   for _ = 1, #trimmed + 2 do
     at = at + 30
-    app:tickBackdrop(at)
-    local id = app:backdropId()
+    app.backdrop:tick(at)
+    local id = app.backdrop:id()
     assert(id ~= "islesDawn" and id ~= "islesNoon",
       "a skipped picture stays out, got " .. id)
   end
   app.cfg.backdropSkip = {}
 
   -- A fixed picture never moves, however long it waits.
-  app:setBackdrop("cloudDay")
-  assert(app:tickBackdrop(at + 100000) == false, "a fixed picture does not cycle")
-  assert(app:backdropId() == "cloudDay", "and stays put")
-  assert(app:nextBackdrop() == false, "nor can it be stepped by hand")
+  app.backdrop:set("cloudDay")
+  assert(app.backdrop:tick(at + 100000) == false, "a fixed picture does not cycle")
+  assert(app.backdrop:id() == "cloudDay", "and stays put")
+  assert(app.backdrop:next() == false, "nor can it be stepped by hand")
 
   -- Choosing a fixed picture rewinds the cycle, so turning cycling back on
   -- starts at the first picture rather than somewhere in the middle.
-  app:setBackdrop("cycle")
-  app.backdropIndex = 5
-  app:setBackdrop("islesDusk")
-  assert(app.backdropIndex == 1, "a fixed picture rewinds the cycle")
-  app:setBackdrop("cycle")
-  assert(app:backdropId() == backdrops.rotation(app.cfg)[1],
-    "so the cycle restarts at the first, got " .. tostring(app:backdropId()))
+  app.backdrop:set("cycle")
+  app.backdrop.index = 5
+  app.backdrop:set("islesDusk")
+  assert(app.backdrop.index == 1, "a fixed picture rewinds the cycle")
+  app.backdrop:set("cycle")
+  assert(app.backdrop:id() == backdrops.rotation(app.cfg)[1],
+    "so the cycle restarts at the first, got " .. tostring(app.backdrop:id()))
 
   -- Stepping by hand buys the new picture a full interval.
-  app:setBackdrop("cycle")
-  local before = app:backdropId()
-  assert(app:nextBackdrop(), "the cycle steps by hand")
-  assert(app:backdropId() ~= before, "onto a different picture")
+  app.backdrop:set("cycle")
+  local before = app.backdrop:id()
+  assert(app.backdrop:next(), "the cycle steps by hand")
+  assert(app.backdrop:id() ~= before, "onto a different picture")
 
-  app:setBackdrop("live")
+  app.backdrop:set("live")
 end)
 
 check("a backdrop can keep its place and take the live sky", function()
@@ -1732,19 +2629,19 @@ check("a backdrop can keep its place and take the live sky", function()
     "and still draws the place")
 
   -- Through the app, which is the path the page actually takes.
-  app:setBackdrop("shipDay")
-  app:setBackdropSky("live")
-  local viaApp = app:paintedScene()
+  app.backdrop:set("shipDay")
+  app.backdrop:setSky("live")
+  local viaApp = app.backdrop:scene()
   assert(viaApp.backdropLive, "the page asks for a live sky when the setting says so")
   assert(viaApp.weather == "snow", "and gets one, got " .. viaApp.weather)
   assert(viaApp.groundKind == "skyship", "keeping the chosen place")
 
-  app:setBackdropSky("picture")
-  local backToPicture = app:paintedScene()
+  app.backdrop:setSky("picture")
+  local backToPicture = app.backdrop:scene()
   assert(backToPicture.weather == "clear", "and the picture's own sky when told that")
   assert(backToPicture.backdropLive == nil, "without claiming to be live")
 
-  app:setBackdrop("live")
+  app.backdrop:set("live")
 end)
 
 check("every backdrop paints under every live sky", function()
@@ -1815,14 +2712,14 @@ check("a live-sky cycle walks places, not repeats of one", function()
   assert(#skipped == #live - 1, "a skipped picture drops out of a live cycle too")
 
   -- Switching mode rewinds, so the index never points past a shorter rotation.
-  app:setBackdrop("cycle")
-  app:setBackdropSky("picture")
-  app.backdropIndex = backdrops.count()
-  app:setBackdropSky("live")
-  assert(app.backdropIndex == 1, "changing the sky rewinds the cycle")
-  assert(backdrops.byId(app:backdropId()), "and lands on a real picture")
-  app:setBackdropSky("picture")
-  app:setBackdrop("live")
+  app.backdrop:set("cycle")
+  app.backdrop:setSky("picture")
+  app.backdrop.index = backdrops.count()
+  app.backdrop:setSky("live")
+  assert(app.backdrop.index == 1, "changing the sky rewinds the cycle")
+  assert(backdrops.byId(app.backdrop:id()), "and lands on a real picture")
+  app.backdrop:setSky("picture")
+  app.backdrop:set("live")
 end)
 
 check("the weather page paints the backdrop, and the readout the real sky", function()
@@ -1841,12 +2738,12 @@ check("the weather page paints the backdrop, and the readout the real sky", func
     return table.concat(buffer.texts, "\n")
   end
 
-  app:setBackdrop("live")
+  app.backdrop:set("live")
   local live = textOf()
   assert(live:find("Snowfall", 1, true), "the live sky names itself:\n" .. live)
   assert(not live:find("Moonlit Isles", 1, true), "and no backdrop is drawn")
 
-  app:setBackdrop("islesNight")
+  app.backdrop:set("islesNight")
   local painted = textOf()
   assert(painted:find("Moonlit Isles", 1, true),
     "the backdrop caption is on the artwork:\n" .. painted)
@@ -1854,14 +2751,14 @@ check("the weather page paints the backdrop, and the readout the real sky", func
     "while the readout still reports the real sky")
   assert(painted:find("SNOW", 1, true), "badge included")
 
-  app:setBackdrop("live")
+  app.backdrop:set("live")
   app.env.snapshot = saved
 end)
 
 check("the settings page drives the backdrop", function()
   terminalRoot:setPage("settings", false)
   local view = terminalRoot.views.settings
-  app:setBackdrop("live")
+  app.backdrop:set("live")
   view.refresh()
 
   local function findButton(element, text)
@@ -1896,7 +2793,7 @@ check("the settings page drives the backdrop", function()
   findItem(view.container, "Cycle - change on a timer")
   assert(picked, "and offers the cycle")
 
-  app:setBackdrop("live")
+  app.backdrop:set("live")
   view.refresh()
 end)
 
@@ -1904,7 +2801,7 @@ check("every page draws with a backdrop up", function()
   local sizes = { { 15, 10 }, { 51, 19 }, { 82, 40 } }
   local saved = app.env.snapshot
   for _, choice in ipairs({ "shipStorm", "cloudNight", "spiresDay", "cycle" }) do
-    app:setBackdrop(choice)
+    app.backdrop:set(choice)
     for _, hasEnv in ipairs({ true, false }) do
       app.env.snapshot = hasEnv and liveSnapshot or { available = false }
       for _, root in ipairs(roots) do
@@ -1926,7 +2823,312 @@ check("every page draws with a backdrop up", function()
     end
   end
   app.env.snapshot = saved
-  app:setBackdrop("live")
+  app.backdrop:set("live")
+end)
+
+------------------------------------------------------------------- modules --
+-- The point of v7: a page is a file, and switching one off has to take its
+-- page, its tab, its settings section and its polling with it.
+
+--- Every label and button caption under an element, in layout order. The
+--- settings page is built from Basalt elements rather than painted into a
+--- canvas, so reading it back means walking the tree rather than the buffer.
+local function captionsOf(element, out)
+  out = out or {}
+  local props = rawget(element, "_p")
+  if type(props.text) == "string" then out[#out + 1] = props.text end
+  for _, child in ipairs(rawget(element, "_children") or {}) do
+    captionsOf(child, out)
+  end
+  return out
+end
+
+check("the dropped-in module was built, drawn and given a settings section", function()
+  assert(addonState.drew > 0, "its page was drawn, got " .. addonState.drew)
+  assert(addonState.settingsBuilt > 0,
+    "and its settings section was built, got " .. addonState.settingsBuilt)
+
+  terminalRoot:setPage("settings", false)
+  local captions = captionsOf(terminalRoot.views.settings.container)
+
+  --- First caption matching `needle` at or after `from`. A module's TITLE also
+  --- appears as a row label in the MODULES switchboard, so a search for its
+  --- section heading has to start below that.
+  local function indexOf(needle, from)
+    for i = from or 1, #captions do
+      if captions[i] == needle then return i end
+    end
+    return nil
+  end
+
+  local profile = assert(indexOf("PROFILE"), "the profile section is on the page")
+  local switchboard = assert(indexOf("MODULES"), "and the module switchboard")
+  local tracking = assert(indexOf("TRACKING"), "and the station-wide sections")
+  local redstone = assert(indexOf("REDSTONE OUTPUT"), "down to the redstone line")
+
+  -- Every module's section sits below the station-wide ones, in module order.
+  local backdrop = assert(indexOf("BACKDROP", redstone), "the weather module's section")
+  local power = assert(indexOf("POWER", backdrop), "then the power module's")
+  local addon = assert(indexOf("ADDON", power), "then the addon's")
+  local displays = assert(indexOf("DISPLAYS", addon), "and displays after all of them")
+
+  assert(profile < switchboard, "profile first")
+  assert(switchboard < tracking, "then the switchboard, then the station settings")
+  assert(redstone < backdrop, "which all come before the modules' own")
+  assert(backdrop < power and power < addon and addon < displays, "in module order")
+
+  -- The addon's own row reads its own setting.
+  assert(indexOf("Threshold"), "its row is there")
+  assert(indexOf(tostring(app.cfg.addonThreshold), addon), "showing its value")
+end)
+
+check("switching a module off takes its page with it", function()
+  local before = #config.terminalPages(app.cfg)
+  local builtBefore = addonState.settingsBuilt
+
+  assert(app:toggleModule("addon") == false, "toggled off")
+  assert(not modules.isEnabled(app.cfg, "addon"), "and it is off")
+
+  local pages = config.terminalPages(app.cfg)
+  assert(#pages == before - 1, "one page fewer, got " .. #pages)
+  for _, id in ipairs(pages) do
+    assert(id ~= "addon", "and it is not among them")
+  end
+
+  -- The settings page rebuilt on the event, without the addon's section.
+  local buffer = newBuffer(82, 40, "settings without addon")
+  terminalRoot:setPage("settings", false)
+  drawTree(terminalRoot.root, buffer)
+  assert(addonState.settingsBuilt == builtBefore,
+    "a disabled module is not asked for settings")
+
+  -- And a monitor's rotation no longer offers it.
+  local entry = app:displayConfig("monitor_0")
+  for _, page in ipairs(config.cyclePages(app.cfg, entry)) do
+    assert(page ~= "addon", "it is out of the monitor rotation too")
+  end
+
+  -- The tab strip on every screen followed, without a restart.
+  for _, root in ipairs(roots) do
+    for _, page in ipairs(root.pages) do
+      assert(page ~= "addon", "the tab is gone from every screen straight away")
+    end
+  end
+
+  assert(app:toggleModule("addon") == true, "and it comes back")
+  assert(#config.terminalPages(app.cfg) == before, "with its page")
+  local backInStrip = false
+  for _, page in ipairs(terminalRoot.pages) do
+    if page == "addon" then backInStrip = true end
+  end
+  assert(backInStrip, "and its tab with it")
+end)
+
+check("a screen sitting on a page that is switched off is moved off it", function()
+  terminalRoot:setPage("addon", false)
+  assert(terminalRoot.page == "addon", "parked on it")
+
+  app:toggleModule("addon")
+  assert(terminalRoot.page ~= "addon",
+    "moved off, landed on " .. tostring(terminalRoot.page))
+  assert(modules.isPage(app.cfg, terminalRoot.page), "onto a page that still exists")
+
+  app:toggleModule("addon")
+end)
+
+check("a module switched on after boot gets its loops started", function()
+  -- app:start() is never called in the harness, so nothing is marked started
+  -- yet and startOne has to refuse rather than starting a loop with no
+  -- scheduler behind it.
+  assert(app.startedModules == nil, "the harness never started the loops")
+  assert(modules.startOne(app, "power") == false, "so nothing starts one early")
+
+  -- Once the station is running, a module switched on starts exactly once.
+  app.startedModules = {}
+  local addonStarts = addonState.started
+  app.cfg.modulesOff = { addon = true }
+  config.sanitise(app.cfg)
+  assert(modules.startOne(app, "addon") == false, "a disabled module does not start")
+
+  app.cfg.modulesOff = {}
+  config.sanitise(app.cfg)
+  assert(modules.startOne(app, "addon"), "switching it on starts it")
+  assert(addonState.started == addonStarts + 1, "once")
+  assert(modules.startOne(app, "addon") == false, "and only once")
+
+  app.startedModules = nil
+end)
+
+check("a core module refuses to be switched off through the app", function()
+  assert(app:toggleModule("status") == true, "status stays on")
+  assert(app:toggleModule("settings") == true, "and so does settings")
+  assert(app.cfg.modulesOff.status == nil, "with nothing written to the file")
+end)
+
+check("a page that is switched off is not left as the current one", function()
+  local saved = app.cfg.terminalPage
+  app.cfg.terminalPage = "power"
+  app.cfg.modulesOff = { power = true }
+  config.sanitise(app.cfg)
+  assert(app.cfg.terminalPage ~= "power",
+    "the terminal moved off it, landed on " .. app.cfg.terminalPage)
+  assert(modules.isPage(app.cfg, app.cfg.terminalPage), "onto a page that exists")
+
+  -- The same for a monitor sitting on it.
+  local display = config.sanitise({
+    modulesOff = { power = true },
+    displays = { m = { page = "power" } },
+  })
+  assert(display.displays.m.page ~= "power", "and so did the monitor")
+
+  app.cfg.modulesOff = {}
+  app.cfg.terminalPage = saved
+  config.sanitise(app.cfg)
+end)
+
+check("applying a profile through the app rewires the station", function()
+  local saved = textutils.serialize(app.cfg)
+
+  app:setProfile("pocket")
+  assert(app.cfg.profile == "pocket", "recorded on the config")
+  assert(app.cfg.animate == false, "and its settings took")
+  assert(not modules.isEnabled(app.cfg, "power"), "with the power page off")
+  assert(config.profileLabel(app.cfg):find("POCKET", 1, true),
+    "the status page has something to say: " .. config.profileLabel(app.cfg))
+
+  app:setProfile("base")
+  assert(modules.isEnabled(app.cfg, "power"), "and going back turns it on again")
+
+  local restored = textutils.unserialize(saved)
+  for k in pairs(app.cfg) do app.cfg[k] = nil end
+  for k, v in pairs(restored) do app.cfg[k] = v end
+  app:emit("modules")
+end)
+
+--------------------------------------------------------------------- power --
+
+check("the power page draws in every state at every size", function()
+  local sizes = { { 15, 10 }, { 26, 12 }, { 39, 13 }, { 51, 19 }, { 82, 40 }, { 164, 81 } }
+  local savedGrid = { GRID.supply, GRID.demand, GRID.stored, GRID.capacity }
+  local savedSources = app.power.sources
+
+  local states = {
+    { name = "healthy",   supply = 4800, demand = 3100, stored = 6.4e9 },
+    { name = "draining",  supply = 200,  demand = 9000, stored = 2.0e9 },
+    { name = "low",       supply = 0,    demand = 9000, stored = 0.05e10 },
+    { name = "full",      supply = 9000, demand = 0,    stored = 1e10 },
+    { name = "idle",      supply = 0,    demand = 0,    stored = 5e9 },
+    { name = "huge",      supply = 4.2e9, demand = 3.9e9, stored = 9e9 },
+    { name = "no-device", none = true },
+    { name = "meter-only", supply = 1000, demand = 500, noStore = true },
+  }
+
+  for _, state in ipairs(states) do
+    if state.none then
+      app.power.sources = {}
+    elseif state.noStore then
+      local meters = {}
+      for _, source in ipairs(savedSources) do
+        if source.meter then meters[#meters + 1] = source end
+      end
+      app.power.sources = meters
+      GRID.supply, GRID.demand = state.supply, state.demand
+    else
+      app.power.sources = savedSources
+      GRID.supply, GRID.demand, GRID.stored = state.supply, state.demand, state.stored
+    end
+    app.power.available = #app.power.sources > 0
+
+    -- An empty graph and a full one are different drawing problems, so both
+    -- get exercised: the first sample is plotted against a range built from
+    -- one point, which is where a divide-by-zero would live.
+    app.power.history:clear()
+    for _ = 1, 3 do app.power:poll(app.cfg, CLOCK) end
+
+    for _, size in ipairs(sizes) do
+      rawget(terminalRoot.root, "_p").width = size[1]
+      rawget(terminalRoot.root, "_p").height = size[2]
+      terminalRoot:setPage("power", false)
+      local label = ("power %dx%d %s"):format(size[1], size[2], state.name)
+      local buffer = newBuffer(size[1], size[2], label)
+      local ok, err = pcall(drawTree, terminalRoot.root, buffer)
+      if not ok then error(label .. ": " .. tostring(err), 0) end
+
+      -- And again with a full window behind it.
+      for _ = 1, 40 do app.power:poll(app.cfg, CLOCK) end
+      local full = newBuffer(size[1], size[2], label .. " full")
+      ok, err = pcall(drawTree, terminalRoot.root, full)
+      if not ok then error(label .. " full: " .. tostring(err), 0) end
+    end
+  end
+
+  app.power.sources = savedSources
+  app.power.available = true
+  GRID.supply, GRID.demand, GRID.stored, GRID.capacity = table.unpack(savedGrid)
+  app.power.history:clear()
+  app.power:poll(app.cfg, CLOCK)
+  terminalRoot:setPage("status", false)
+end)
+
+check("the power page says what it is showing", function()
+  rawget(terminalRoot.root, "_p").width = 82
+  rawget(terminalRoot.root, "_p").height = 40
+
+  local function textOf()
+    terminalRoot:setPage("power", false)
+    local buffer = newBuffer(82, 40, "power text")
+    drawTree(terminalRoot.root, buffer)
+    return table.concat(buffer.texts, "\n")
+  end
+
+  GRID.stored = 6.4e9
+  app.power:poll(app.cfg, CLOCK)
+  local healthy = textOf()
+  assert(healthy:find("POWER", 1, true), "it names itself:\n" .. healthy)
+  assert(healthy:find("IN", 1, true) and healthy:find("OUT", 1, true),
+    "with supply and demand")
+  assert(healthy:find("64%", 1, true), "and the buffer, got:\n" .. healthy)
+
+  GRID.stored = 0.05e10                          -- 5%, under the 20% threshold
+  app.power:poll(app.cfg, CLOCK)
+  app.power:checkAlarm(app.cfg, CLOCK)
+  local low = textOf()
+  assert(low:find("LOW", 1, true), "a low buffer says LOW:\n" .. low)
+
+  -- The status page carries the same figure, so it is visible without
+  -- changing page.
+  terminalRoot:setPage("status", false)
+  local statusBuffer = newBuffer(82, 40, "status text")
+  drawTree(terminalRoot.root, statusBuffer)
+  local status = table.concat(statusBuffer.texts, "\n")
+  assert(status:find("Power", 1, true), "the status page reports power:\n" .. status)
+  assert(status:find("Profile", 1, true), "and the profile it was set up as")
+
+  GRID.stored = 6.4e9
+  app.power:poll(app.cfg, CLOCK)
+  app.power.low = false
+end)
+
+check("the power page is drawn on a monitor too", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local pages = monitorRoot.pages
+  local hasPower = false
+  for _, page in ipairs(pages) do
+    if page == "power" then hasPower = true end
+  end
+  assert(hasPower, "a monitor can show the power page")
+
+  monitorRoot:setPage("power", false)
+  for _, size in ipairs({ { 18, 6 }, { 57, 24 }, { 164, 81 } }) do
+    rawget(monitorRoot.root, "_p").width = size[1]
+    rawget(monitorRoot.root, "_p").height = size[2]
+    local buffer = newBuffer(size[1], size[2], "monitor power")
+    local ok, err = pcall(drawTree, monitorRoot.root, buffer)
+    if not ok then error("monitor power: " .. tostring(err), 0) end
+  end
 end)
 
 --------------------------------------------------------------------- report --

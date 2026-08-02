@@ -3,14 +3,26 @@
 -- Files live next to the program. Settings from Radar Station v3 (and from
 -- the older pocket version it grew out of) are imported on first run, so an
 -- existing station keeps its base coordinates, ignore list and history.
+--
+-- What lives here is what the whole station shares: who you are, where it is
+-- pointing, how often it sweeps, and how it shouts. Anything belonging to one
+-- page belongs to that page's module instead -- the weather module owns the
+-- backdrop settings, the power module owns its thresholds -- and arrives here
+-- through modules.defaults(). Adding a page therefore never means editing this
+-- file, which is the whole point of the module registry.
+--
+-- radar.modules is required lazily, inside the functions that need it, rather
+-- than at the top. A module file requires this one, so requiring it back at
+-- load time would be a cycle; by the time any of these functions is called the
+-- registry is fully loaded.
 
-local util      = require("radar.util")
-local biomes    = require("radar.biomes")
-local backdrops = require("radar.backdrops")
+local util = require("radar.util")
+
+local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "6.1"
+config.VERSION = "7.0"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -46,9 +58,18 @@ config.MAX_RANGE_INDEX = #config.RANGES
 
 config.SCAN_INTERVALS = { 0.5, 1, 2, 3, 5 }
 
--- Page ids a display can show. "settings" is deliberately absent: it is
--- reachable from the terminal only, since monitors have no keyboard.
-config.PAGES = { "radar", "contacts", "weather", "log", "status" }
+-- ------------------------------------------------------------------- pages ---
+-- The page list is whatever modules are registered and enabled, so it changes
+-- with the settings rather than being a constant. A monitor never gets the
+-- settings page: monitors have no keyboard, and that page is mostly typing.
+
+--- Page ids a monitor may show.
+function config.pages(cfg) return modules().monitorPages(cfg) end
+
+--- Page ids the terminal may show, which is every enabled page.
+function config.terminalPages(cfg) return modules().pages(cfg) end
+
+function config.isPage(cfg, id) return modules().isPage(cfg, id) end
 
 -- ------------------------------------------------------------ orientation ---
 -- FIXED keeps a chosen bearing at the top of the scope for a monitor bolted to
@@ -85,26 +106,31 @@ config.ROLES = {
 -- How long a monitor rests on a page before the rotation moves it along.
 config.CYCLE_INTERVALS = { 5, 10, 15, 20, 30, 45, 60, 120, 300 }
 
--- How long the weather page holds a backdrop before changing to the next. Kept
--- separate from CYCLE_INTERVALS, and slower at the top end: a picture you are
--- looking at wants longer than a page you are glancing at.
-config.BACKDROP_INTERVALS = { 10, 15, 30, 60, 120, 300, 600, 900, 1800 }
-
--- A backdrop is a place plus a sky, and the two are chosen separately: keep
--- the place and let the sky run live, and the picture follows the real hour
--- and the real weather.
-config.BACKDROP_SKIES = {
-  { id = "picture", label = "From the picture",
-    hint = "the hour and weather it was drawn with" },
-  { id = "live",    label = "Live",
-    hint = "the real hour, weather and sun" },
-}
-
+-- The redstone line. The first three read the contact list; anything past them
+-- is registered by a module -- see alerts:provideLevel -- which is how the
+-- power page drives a fuel gate off the same one output.
 config.RS_MODES = {
   { id = "pulse",  label = "Pulse",  hint = "brief blip on each new contact" },
   { id = "hold",   label = "Hold",   hint = "on while anyone is in range" },
   { id = "analog", label = "Analog", hint = "strength 1-15 by how close" },
 }
+
+--- Lets a module add a redstone mode of its own.
+---@param entry table { id = , label = , hint = , level = function(app) -> 0..1 }
+function config.addRedstoneMode(entry)
+  for _, mode in ipairs(config.RS_MODES) do
+    if mode.id == entry.id then return mode end
+  end
+  config.RS_MODES[#config.RS_MODES + 1] = entry
+  return entry
+end
+
+function config.redstoneMode(cfg)
+  for _, mode in ipairs(config.RS_MODES) do
+    if mode.id == cfg.rs.mode then return mode end
+  end
+  return config.RS_MODES[1]
+end
 
 config.RS_PULSE_OPTIONS = { 0.2, 0.5, 1, 2, 5, 10 }
 
@@ -186,8 +212,17 @@ function config.defaultStationName()
 end
 
 function config.defaults()
-  return {
+  local defaults = {
     version = config.VERSION,
+
+    -- Which kind of installation this is. nil means the profile chooser has
+    -- never run, which is what makes a fresh computer offer it on first boot
+    -- and an upgrade from v6 not.
+    profile = nil,
+
+    -- Modules left OUT, stored as a set of exclusions so a module added in a
+    -- later version turns up rather than silently staying dark.
+    modulesOff = {},
 
     role          = "station",         -- see config.ROLES
     stationName   = nil,               -- filled in by sanitise
@@ -217,14 +252,6 @@ function config.defaults()
     env        = true,                   -- poll the environment detector
     envSeconds = 2,                      -- how often, in seconds
     animate    = true,                   -- animate the sky and radar sweep
-    biomeScene = "auto",                 -- weather-page scenery, or a forced one
-
-    -- The weather page's picture. "live" draws the real sky, "cycle" walks the
-    -- chosen set on a timer, anything else is one radar.backdrops id.
-    backdrop        = "live",
-    backdropSky     = "picture",         -- or "live": follow the real sky
-    backdropSeconds = 60,
-    backdropSkip    = {},                -- backdrops left OUT of the cycle
 
     terminalPage = "status",
     tapCycle     = true,                 -- tapping a monitor moves it on a page
@@ -248,6 +275,14 @@ function config.defaults()
 
     displays = {},                       -- [peripheralName] = displayDefaults()
   }
+
+  -- Whatever every registered module wants stored. A key a module claims here
+  -- is loaded, sanitised and saved exactly like one written above.
+  for key, value in pairs(modules().defaults()) do
+    if defaults[key] == nil then defaults[key] = value end
+  end
+
+  return defaults
 end
 
 --- Per-monitor settings. `cycleSkip` holds the pages left OUT of the automatic
@@ -263,15 +298,16 @@ function config.displayDefaults()
   }
 end
 
---- Pages a display rotates through, in PAGES order. Never returns an empty
+--- Pages a display rotates through, in page order. Never returns an empty
 --- list: a rotation that excluded everything would strand the monitor.
-function config.cyclePages(entry)
+function config.cyclePages(cfg, entry)
   local skip = type(entry) == "table" and entry.cycleSkip or {}
+  local all = config.pages(cfg)
   local pages = {}
-  for _, page in ipairs(config.PAGES) do
+  for _, page in ipairs(all) do
     if not skip[page] then pages[#pages + 1] = page end
   end
-  if #pages == 0 then return { config.PAGES[1] } end
+  if #pages == 0 then return { all[1] or "radar" } end
   return pages
 end
 
@@ -364,36 +400,30 @@ function config.sanitise(cfg)
     cfg.pairedBaseName = nil
   end
 
-  if not config.isPage(cfg.terminalPage) then cfg.terminalPage = "status" end
   cfg.tapCycle = cfg.tapCycle ~= false
 
-  if cfg.biomeScene ~= "auto" and not biomes.PROFILES[cfg.biomeScene] then
-    cfg.biomeScene = "auto"
+  -- A profile that no longer exists -- an install rolled back, or a file
+  -- carried over from a fork -- is forgotten rather than obeyed. The station
+  -- keeps every setting it had; only the label goes.
+  if cfg.profile ~= nil then
+    local profiles = require("radar.profiles")
+    if not profiles.byId(cfg.profile) then cfg.profile = nil end
   end
 
-  -- A settings file written before v6 has no backdrop at all, and must come
-  -- out of here drawing the live sky exactly as it did.
-  if cfg.backdrop ~= "live" and cfg.backdrop ~= "cycle"
-     and not backdrops.byId(cfg.backdrop) then
-    cfg.backdrop = "live"
-  end
-  cfg.backdropSeconds = snapToNumber(config.BACKDROP_INTERVALS, cfg.backdropSeconds, 60)
-  if not indexOfId(config.BACKDROP_SKIES, cfg.backdropSky) then
-    cfg.backdropSky = "picture"
+  -- Every module gets to repair its own keys, and the disabled-module set is
+  -- filtered down to ids that actually exist.
+  modules().sanitise(cfg)
+
+  -- Done after the module pass, because which pages exist depends on which
+  -- modules survived it.
+  local terminalPages = config.terminalPages(cfg)
+  if not config.isPage(cfg, cfg.terminalPage) then
+    cfg.terminalPage = terminalPages[1] or "status"
   end
 
-  -- Only real backdrop ids may sit in the skip set, and it may never cover
-  -- every picture: a cycle with nothing in it would leave the page blank.
-  local skipped, keptPictures = {}, 0
-  if type(cfg.backdropSkip) == "table" then
-    for id, on in pairs(cfg.backdropSkip) do
-      if on and backdrops.byId(id) then skipped[id] = true end
-    end
-  end
-  for _, id in ipairs(backdrops.ids()) do
-    if not skipped[id] then keptPictures = keptPictures + 1 end
-  end
-  cfg.backdropSkip = keptPictures > 0 and skipped or {}
+  local monitorPages = config.pages(cfg)
+  local monitorSet = {}
+  for _, page in ipairs(monitorPages) do monitorSet[page] = true end
 
   if type(cfg.displays) ~= "table" then cfg.displays = {} end
   for name, entry in pairs(cfg.displays) do
@@ -403,7 +433,7 @@ function config.sanitise(cfg)
       for key, value in pairs(config.displayDefaults()) do
         if entry[key] == nil then entry[key] = value end
       end
-      if not config.isPage(entry.page) then entry.page = "radar" end
+      if not monitorSet[entry.page] then entry.page = monitorPages[1] or "radar" end
       entry.scale = clamp(tonumber(entry.scale) or 0.5, 0.5, 5)
       entry.cycle = entry.cycle == true
       entry.cycleSeconds = snapToNumber(config.CYCLE_INTERVALS, entry.cycleSeconds, 15)
@@ -413,11 +443,11 @@ function config.sanitise(cfg)
       local skip = {}
       if type(entry.cycleSkip) == "table" then
         for page, on in pairs(entry.cycleSkip) do
-          if on and config.isPage(page) then skip[page] = true end
+          if on and monitorSet[page] then skip[page] = true end
         end
       end
       local kept = 0
-      for _, page in ipairs(config.PAGES) do
+      for _, page in ipairs(monitorPages) do
         if not skip[page] then kept = kept + 1 end
       end
       entry.cycleSkip = kept > 0 and skip or {}
@@ -428,20 +458,13 @@ function config.sanitise(cfg)
   return cfg
 end
 
-function config.isPage(id)
-  for _, page in ipairs(config.PAGES) do
-    if page == id then return true end
-  end
-  return false
-end
-
 -- --------------------------------------------------------------- migration ---
 
 -- v3 stored a display style index into { radar, grid, list, log, status }.
 local V3_STYLE_TO_PAGE = { "radar", "radar", "contacts", "log", "status" }
 
 local function migrate(cfg)
-  if cfg.termStyleIndex and not config.isPage(cfg.terminalPage) then
+  if cfg.termStyleIndex and not config.isPage(cfg, cfg.terminalPage) then
     cfg.terminalPage = V3_STYLE_TO_PAGE[tonumber(cfg.termStyleIndex) or 5] or "status"
   end
   -- The pocket build called it styleIndex.
@@ -467,19 +490,28 @@ end
 ---@return table cfg
 ---@return table log
 ---@return table ignore
----@return boolean imported
+---@return boolean imported  Came from an older file or an older version
+---@return boolean fresh     No settings of any vintage existed
 function config.load()
   local raw, importedCfg = loadWithLegacy(config.FILES.cfg, config.LEGACY.cfg)
   -- Settings written by v3 carry no version field; anything from a legacy
   -- filename obviously predates v4 too.
   local upgraded = raw ~= nil and raw.version ~= config.VERSION
+  local fresh = raw == nil
   local cfg = config.sanitise(migrate(raw or config.defaults()))
+
+  -- An upgrade already has the operator's own answers in it, so it is given
+  -- the label that matches how the station has always behaved rather than
+  -- being marched through the profile chooser and overwritten.
+  if not fresh and cfg.profile == nil then
+    cfg.profile = require("radar.profiles").DEFAULT
+  end
 
   local logData, importedLog = loadWithLegacy(config.FILES.log, config.LEGACY.log)
   local ignore, importedIgnore = loadWithLegacy(config.FILES.ignore, config.LEGACY.ignore)
 
   local imported = importedCfg or importedLog or importedIgnore or upgraded
-  return cfg, logData or {}, ignore or {}, imported
+  return cfg, logData or {}, ignore or {}, imported, fresh
 end
 
 function config.saveConfig(cfg) return saveTable(config.FILES.cfg, cfg) end
@@ -514,12 +546,13 @@ end
 
 function config.isUnlocked(cfg) return cfg.orientation == "heading" end
 
---- One line describing where a backdrop's sky comes from.
-function config.backdropSkyLabel(cfg)
-  for _, entry in ipairs(config.BACKDROP_SKIES) do
-    if entry.id == cfg.backdropSky then return entry.label .. " - " .. entry.hint end
-  end
-  return cfg.backdropSky
+-- --------------------------------------------------------------- profiles ---
+
+--- One line naming the profile this station was set up as. A setting changed
+--- afterwards does not clear it: the profile is a record of where you started,
+--- not a claim about every value still matching it.
+function config.profileLabel(cfg)
+  return require("radar.profiles").summary(cfg)
 end
 
 -- ------------------------------------------------------------------ roles ---

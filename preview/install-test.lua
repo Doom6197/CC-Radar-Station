@@ -89,7 +89,7 @@ shell = {
 
 -- HTTP, serving the repository off disk ---------------------------------------
 
-local SERVE_PREFIX = "https://raw.githubusercontent.com/Doom6197/cc-radar-station/main/"
+local SERVE_PREFIX = "https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/"
 local MISSING = {}
 
 http = {
@@ -158,13 +158,58 @@ check("every project lua file is in the manifest", function()
     "radar/app.lua", "radar/ui.lua", "radar/config.lua", "radar/hardware.lua",
     "radar/scan.lua", "radar/environment.lua", "radar/alerts.lua",
     "radar/backdrops.lua", "radar/link.lua", "radar/logbook.lua",
-    "radar/theme.lua", "radar/pixel.lua",
+    "radar/theme.lua", "radar/pixel.lua", "radar/chart.lua",
     "radar/glyphs.lua", "radar/sky.lua", "radar/util.lua",
-    "radar/views/status.lua", "radar/views/radar.lua", "radar/views/contacts.lua",
-    "radar/views/weather.lua", "radar/views/log.lua", "radar/views/settings.lua",
+    "radar/modules.lua", "radar/power.lua", "radar/profiles.lua",
+    "radar/setup.lua",
+    "radar/modules/status.lua", "radar/modules/radar.lua",
+    "radar/modules/contacts.lua", "radar/modules/weather.lua",
+    "radar/modules/log.lua", "radar/modules/settings.lua",
+    "radar/modules/power.lua",
   }
   for _, path in ipairs(expected) do
     assert(listed[path], "manifest is missing " .. path)
+  end
+end)
+
+-- A module the installer does not fetch is a page that silently does not
+-- exist, which is the single easiest thing to get wrong when adding one --
+-- so the registry's own built-in list is checked against the manifest rather
+-- than against a second hand-written list that could drift from it.
+check("every built-in module is in the manifest", function()
+  local listed = {}
+  for _, path in ipairs(PATHS) do listed[path] = true end
+
+  local source = assert(io.open(PROJ .. "/radar/modules.lua", "r"))
+  local text = source:read("*a")
+  source:close()
+
+  local block = text:match("BUILT_IN%s*=%s*{(.-)}")
+  assert(block, "modules.lua declares a BUILT_IN list")
+
+  local count = 0
+  for id in block:gmatch('"([%w_%-]+)"') do
+    count = count + 1
+    assert(listed["radar/modules/" .. id .. ".lua"],
+      "manifest is missing built-in module " .. id)
+  end
+  assert(count >= 7, "found the whole built-in list, got " .. count)
+end)
+
+check("every module file on disk is in the manifest", function()
+  local listed = {}
+  for _, path in ipairs(PATHS) do listed[path] = true end
+
+  -- No directory listing in plain Lua, so the shipped set is walked by name:
+  -- anything present on disk but unlisted would never reach the computer.
+  local names = { "status", "radar", "contacts", "weather", "power", "log", "settings" }
+  for _, name in ipairs(names) do
+    local path = "radar/modules/" .. name .. ".lua"
+    local file = io.open(PROJ .. "/" .. path, "r")
+    if file then
+      file:close()
+      assert(listed[path], path .. " exists but is not in the manifest")
+    end
   end
 end)
 
@@ -190,7 +235,7 @@ check("--dir installs into a subdirectory", function()
   local ok, err = runInstaller("--dir", "apps/radar")
   assert(ok, "installer ran: " .. tostring(err))
   assert(DISK["apps/radar/radar.lua"], "entry point placed under the target dir")
-  assert(DISK["apps/radar/radar/views/weather.lua"], "nested files follow the target dir")
+  assert(DISK["apps/radar/radar/modules/weather.lua"], "nested files follow the target dir")
   assert(DISK["radar.lua"] == nil, "nothing written at the root")
 end)
 
@@ -257,7 +302,7 @@ check("a missing manifest explains itself", function()
   assert(not ok, "installer aborted")
   local text = table.concat(OUTPUT, "\n")
   assert(text:find("manifest.txt", 1, true), "mentioned the manifest")
-  assert(text:find("yourname/cc%-radar%-station"), "explained the owner override")
+  assert(text:find("yourname/CC%-Radar%-Station"), "explained the owner override")
 end)
 
 check("an unknown repository fails clearly", function()
@@ -271,9 +316,9 @@ end)
 check("branch and repo arguments are parsed", function()
   reset()
   READ_ANSWERS = { "n" }
-  -- The mock only serves main from Doom6197/cc-radar-station, so passing them
+  -- The mock only serves main from Doom6197/CC-Radar-Station, so passing them
   -- explicitly must resolve to exactly the same URLs as the defaults.
-  local ok, err = runInstaller("Doom6197/cc-radar-station", "main")
+  local ok, err = runInstaller("Doom6197/CC-Radar-Station", "main")
   assert(ok, "explicit repo and branch install: " .. tostring(err))
   assert(DISK["radar.lua"], "installed")
 end)
