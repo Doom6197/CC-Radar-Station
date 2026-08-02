@@ -5,7 +5,10 @@
 -- clearing the log is the only thing there is to configure about it.
 
 local theme = require("radar.theme")
+local ui    = require("radar.ui")
 local util  = require("radar.util")
+
+local max = math.max
 
 local view = {
   id = "log",
@@ -35,6 +38,30 @@ function view.build(container, app)
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
 
     local entries = app.log.entries
+
+    -- A 1x1 monitor gets who and when, with no heading and no rule: nine rows
+    -- of history beats seven rows plus a title bar that repeats the tab.
+    if ui.isTiny(w) then
+      if #entries == 0 then
+        buf:blit(1, 1, "Nothing yet.", theme.dim, theme.bg)
+        if h >= 3 then
+          buf:blit(1, 3, "Arrivals", theme.line, theme.bg)
+          buf:blit(1, 4, "log here.", theme.line, theme.bg)
+        end
+        return
+      end
+      for index, entry in ipairs(entries) do
+        if index > h then break end
+        -- A timestamp is "D142 09:31"; the clock alone places an arrival well
+        -- enough, and the day was costing five characters of the name.
+        local stamp = tostring(entry.time or "")
+        local when = stamp:match("(%d%d:%d%d)") or stamp:sub(1, 5)
+        buf:blit(1, index, when, theme.line, theme.bg)
+        buf:blit(7, index, util.shorten(entry.name, max(1, w - 7)),
+          theme.text, theme.bg)
+      end
+      return
+    end
     local twoPane = w >= 52
     local historyWidth = twoPane and (w - 24) or w
 

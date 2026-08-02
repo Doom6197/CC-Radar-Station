@@ -37,7 +37,7 @@ To avoid typing that every time, edit `DEFAULT_REPO` near the top of
 Both suites run on a desktop Lua 5.x with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 127 checks
+lua preview/smoke-test.lua .        # 135 checks
 lua preview/install-test.lua .      # 16 checks
 ```
 

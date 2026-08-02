@@ -25,6 +25,7 @@ over rednet — along with energy readings collected from any number of
 - [Profiles](#profiles) — base, pocket, airship
 - [Pages](#pages)
 - [Modules](#modules) — the plugin system, and how to write one
+- [Flight](#flight) — speed, climb and course from the pilot's position
 - [Power](#power) — and the power clients that feed it
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
@@ -44,7 +45,7 @@ On the computer in game:
 wget run https://raw.githubusercontent.com/Doom6197/CC-Radar-Station/main/install.lua
 ```
 
-That pulls down all 30 files and offers to install Basalt 2.5 for you. Then:
+That pulls down all 32 files and offers to install Basalt 2.5 for you. Then:
 
 ```
 radar
@@ -171,15 +172,46 @@ that is hard to read.
 |---|---|---|
 | `1` | **Status** | Everything at a glance: profile, base, your position, ranges, alerts, sound, redstone, power, hardware, environment, contacts, recent log |
 | `2` | **Radar** | Polar scope with range rings, a rotating sweep, and colour-coded blips |
-| `3` | **Contacts** | Table of every contact — distance, bearing, altitude, band, position, health |
-| `4` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
-| `5` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
-| `6` | **Log** | Detection history, plus a visitor tally on wide screens |
-| `7` | **Settings** | Everything configurable, on one scrolling page — starting with the version and the profile |
+| `3` | **Flight** | Speed, climb rate, heading, course, altitude and the way home |
+| `4` | **Contacts** | Table of every contact — distance, bearing, altitude, band, position, health |
+| `5` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
+| `6` | **Power** | Supply, demand and net, a buffer gauge, and a rolling graph |
+| `7` | **Log** | Detection history, plus a visitor tally on wide screens |
+| `8` | **Settings** | Everything configurable, on one scrolling page — starting with the version and the profile |
 
 The number keys follow the tab strip rather than a fixed table, so switching a
 module off does not leave a hole in the numbering. Monitors can show any page
 except Settings — a monitor has no keyboard, and that page is mostly typing.
+
+### On a 1×1 monitor
+
+A 1×1 advanced monitor at text scale 0.5 is **fifteen cells across and ten
+down**, and there is no room for a tab strip — so nine rows of content. Below
+twenty cells wide every page stops being a smaller version of the big one and
+draws a **different, shorter thing**: no heading of its own (the header carries
+the page name instead), no separator rule, short labels, and only what is worth
+a glance.
+
+| Page | What a 1×1 gets |
+|---|---|
+| **Status** | link, contacts, speed, altitude, power, time, alerts — the things that change on their own. The range, tracking mode and bearing-up are settings, and settings do not surprise you |
+| **Flight** | all eight instruments; it is designed for this size first |
+| **Contacts** | names and distances, hard against both edges |
+| **Weather** | six rows of sky, then clock, conditions and biome |
+| **Power** | percentage, gauge, net rate, and the rest given to the graph |
+| **Log** | clock and name, nine arrivals deep |
+
+```
+      SYS          2        FLT          2
+      LINK    Hangar        SPD       15.2
+      CONTACT      2        VS        +3.0
+      SPD       15.2        HDG        210
+      ALT       3204        CRS        067
+      PWR        30%        ALT       3204
+      TIME     11:12        HOME      142m
+      ALERTS      on        BRG         SW
+                            ETA         9s
+```
 
 ---
 
@@ -285,6 +317,47 @@ downstream can tell which it is looking at.
 **Add a module, add its path to `manifest.txt`**, or the installer will not
 fetch it and the page will silently not exist. `preview/install-test.lua`
 checks for exactly that.
+
+---
+
+## Flight
+
+An instrument panel worked out from one thing: **where the pilot is, sampled
+over time**. Every sweep already produces a position — read locally, or relayed
+by the main base — so differentiating that against the clock gives ground
+speed, climb rate and course over ground for nothing. No extra peripheral, no
+extra server calls, and a full panel on a computer carrying only a modem.
+
+| | |
+|---|---|
+| `SPD` | ground speed, blocks per second |
+| `VS` | vertical speed — climb positive, descent negative |
+| `HDG` | **heading**: the way you are looking |
+| `CRS` | **course**: the way you are actually going |
+| `DFT` | the angle between them, on screens with room for it |
+| `ALT` | altitude |
+| `HOME` `BRG` `ETA` | distance, compass bearing and time back to the base coordinates |
+
+Showing both `HDG` and `CRS` is the point of it: on an airship being pushed
+sideways they differ, and the gap is the drift.
+
+### What it cannot know
+
+- **It is the pilot's position, not the ship's.** Walking the deck reads as a
+  couple of blocks a second; step off entirely and the panel follows *you*.
+  That caveat has always applied to the status page — it is just more visible
+  on a page about motion.
+- **There is no pitch or roll.** `getPlayerPos` gives a yaw and nothing else.
+- **The sample rate is the sweep interval**, so a reading is an average over
+  the last few seconds rather than an instant. Speeds are smoothed for exactly
+  that reason: computed raw from two fixes a second apart they jitter far too
+  much to read while flying.
+- A teleport, a portal or a chunk reload **throws the history away** rather
+  than reporting several thousand blocks a second.
+
+It needs your **username** set, since that is what a position is read against.
+On by default for the POCKET and AIRSHIP profiles, off for the MAIN BASE — a
+station that never moves would show a page of zeroes.
 
 ---
 
@@ -710,7 +783,7 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 127 checks
+lua preview/smoke-test.lua .        # 135 checks
 lua preview/install-test.lua .      # 16 checks
 lua preview/render-preview.lua . preview
 ```
@@ -768,6 +841,12 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.2.** A **Flight** page — speed, climb, heading, course, altitude and the
+way home, all derived from the pilot's position as it changes, so it needs no
+peripheral at all. And every page redrawn for a **1×1 monitor**: below twenty
+cells they drop their headings, shorten their labels and show only what is
+worth a glance, instead of truncating the full layout into `AIRS` and `trac`.
 
 **v8.1.** Mekanism reports **Joules**, not FE — a Basic Energy Cube holding
 1.6 MFE answers `getMaxEnergy()` with 4,000,000 — so every device is now read

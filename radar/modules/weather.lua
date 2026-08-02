@@ -18,6 +18,7 @@ local pixel  = require("radar.pixel")
 local glyphs = require("radar.glyphs")
 local sky    = require("radar.sky")
 local theme  = require("radar.theme")
+local ui     = require("radar.ui")
 local util   = require("radar.util")
 
 local view = {
@@ -349,18 +350,36 @@ function view.build(container, app)
     end
 
     local sceneData = snap.scene or {}
+    local badge = sky.badge(sceneData)
+    local badgeColour = (sceneData.weather == "storm" and theme.alarm)
+      or (sceneData.weather ~= "clear" and theme.warn)
+      or theme.accent
+
+    -- A 1x1 monitor gets the clock, the weather and what is underneath, hard
+    -- against both edges. The day number and the separator rule are the first
+    -- things to go: three rows of readout is all there is.
+    if ui.isTiny(w) then
+      buf:blit(1, 1, util.shorten(snap.clock or "", max(1, w - #badge - 1)),
+        theme.text, theme.bg)
+      buf:blit(max(1, w - #badge), 1, badge, badgeColour, theme.bg)
+      if h >= 2 then
+        buf:blit(1, 2, util.shorten(sceneData.title or "-", w), theme.text, theme.bg)
+      end
+      if h >= 3 then
+        buf:blit(1, 3, util.shorten(snap.biomeName or sceneData.groundLabel or "-", w),
+          theme.dim, theme.bg)
+      end
+      return
+    end
+
     local twoColumn = w >= 42
     local colW = twoColumn and floor((w - 3) / 2) or (w - 2)
     local leftX, rightX = 2, 2 + colW + 1
 
     -- Headline row: clock, in-game day, and the weather in one glance.
     local headline = string.format("%s   Day %d", snap.clock, snap.day or 0)
-    buf:blit(2, 1, headline, theme.text, theme.bg)
-    local badge = sky.badge(sceneData)
-    buf:blit(max(1, w - #badge), 1, badge,
-      (sceneData.weather == "storm" and theme.alarm)
-      or (sceneData.weather ~= "clear" and theme.warn)
-      or theme.accent, theme.bg)
+    buf:blit(2, 1, util.shorten(headline, max(1, w - #badge - 3)), theme.text, theme.bg)
+    buf:blit(max(1, w - #badge), 1, badge, badgeColour, theme.bg)
 
     if h < 2 then return end
     buf:fill(1, 2, w, 1, "-", theme.line, theme.bg)

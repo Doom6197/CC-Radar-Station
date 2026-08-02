@@ -51,7 +51,7 @@ profiles.LIST = {
       toast        = true,
       tapCycle     = true,
     },
-    off = {},
+    off = { flight = true },
   },
 
   {

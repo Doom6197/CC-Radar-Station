@@ -18,6 +18,18 @@ local ui = {}
 -- Elements that swallow typing, so global shortcuts must stand down.
 local TYPING = { Input = true, TextBox = true, ComboBox = true }
 
+-- A 1x1 advanced monitor at text scale 0.5 is fifteen cells across and ten
+-- down, and with no room for a tab strip that leaves NINE rows of content.
+-- Below this width a page stops trying to be a smaller version of the big one
+-- and draws a different, shorter thing instead: no heading of its own, no
+-- separator rule, short labels, and only what is worth a glance.
+--
+-- The header takes the page name on those screens, so a page that skips its
+-- own heading is still identified.
+ui.TINY_WIDTH = 20
+
+function ui.isTiny(width) return (tonumber(width) or 51) < ui.TINY_WIDTH end
+
 --- Tab labels for a page. Falls back to the id rather than erroring, so a page
 --- id left behind in a settings file by a module that has since been removed
 --- degrades to a dull tab instead of taking the header down.
@@ -160,11 +172,31 @@ end
 function Root:refreshChrome()
   local app = self.app
   local width = self.root.width
+  local count = #app.contacts
+
+  -- On a tiny screen the header carries the PAGE NAME, because the page below
+  -- it has given up its own heading to win back a row. "RADAR" plus a
+  -- truncated "ALL CLE" told you nothing and cost the same space.
+  if ui.isTiny(width) then
+    local _, short = metaOf(self.page)
+    self.title.text = short
+
+    local state
+    if app.scanError then state = "FAULT"
+    elseif count > 0 then state = tostring(count)
+    else state = "CLR" end
+    if not app.cfg.alert then state = state .. " M" end
+
+    self.status.text = state
+    self.status.x = math.max(#short + 2, width - #state)
+    self.status.foreground = app.scanError and theme.alarm
+      or (count > 0 and theme.warn or theme.dim)
+    return
+  end
 
   self.title.text = width >= 24 and "RADAR STATION" or "RADAR"
 
   local parts = {}
-  local count = #app.contacts
   if app.scanError then
     parts[#parts + 1] = "DETECTOR FAULT"
   elseif count > 0 then

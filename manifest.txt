@@ -15,6 +15,7 @@ radar/biomes.lua
 radar/chart.lua
 radar/config.lua
 radar/environment.lua
+radar/flight.lua
 radar/glyphs.lua
 radar/hardware.lua
 radar/link.lua
@@ -30,6 +31,7 @@ radar/theme.lua
 radar/ui.lua
 radar/util.lua
 radar/modules/contacts.lua
+radar/modules/flight.lua
 radar/modules/log.lua
 radar/modules/power.lua
 radar/modules/radar.lua

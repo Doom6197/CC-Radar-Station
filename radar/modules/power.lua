@@ -27,6 +27,7 @@ local modules  = require("radar.modules")
 local pixel    = require("radar.pixel")
 local powerLib = require("radar.power")
 local theme    = require("radar.theme")
+local ui       = require("radar.ui")
 local util     = require("radar.util")
 
 local view = {
@@ -281,6 +282,89 @@ local function headerRows(height)
   return height
 end
 
+--- The compact panel a 1x1 monitor gets: percentage, gauge, net rate, and
+--- whatever rows are left over as a graph. No heading, no separator, and the
+--- unit dropped from the rate -- "NET -126 FE/" told you less than "-126"
+--- and a graph one row taller.
+local function drawTiny(buf, grid, app, w, h)
+  local model = app.power
+  local cfg = app.cfg.power
+
+  if not model or not model.available then
+    buf:blit(1, 1, "No power", theme.warn, theme.bg)
+    if h >= 3 then
+      buf:blit(1, 3, "hardware", theme.dim, theme.bg)
+      buf:blit(1, 4, "found.", theme.dim, theme.bg)
+    end
+    return
+  end
+
+  local y = 1
+
+  if model.percent then
+    local pct = ("%d%%"):format(util.round(model.percent))
+    buf:blit(1, y, pct, model.low and theme.alarm or theme.accent, theme.bg)
+
+    -- Stored and capacity share the row with the percentage, since the bar
+    -- below already says how full it is. A gap of at least one cell, or they
+    -- run together and read as one number: "30%1.20G/4.00G".
+    local both = powerLib.format(model.stored) .. "/" .. powerLib.format(model.capacity)
+    local held = powerLib.format(model.stored)
+    local text = (#both + #pct + 2 <= w) and both
+      or ((#held + #pct + 2 <= w) and held or nil)
+    if text then
+      buf:blit(max(1, w - #text), y, text, theme.dim, theme.bg)
+    end
+    y = y + 1
+
+    if h >= 4 then
+      grid:resize(w, 1)
+      grid:clear(BG)
+      local box = { x = 1, y = 1, w = grid.w, h = 2 }
+      chart.gauge(grid, box, model.percent / 100, model.low and ALARM or BANK, PANEL)
+      chart.gaugeTicks(grid, box, 0.25, LINE)
+      grid:blitTo(buf, 1, y)
+      y = y + 1
+    end
+  end
+
+  local net = powerLib.formatSigned(model.net)
+  buf:blit(1, y, "NET", theme.dim, theme.bg)
+  buf:blit(max(1, w - #net), y, net,
+    model.net < 0 and theme.warn or theme.good, theme.bg)
+  y = y + 1
+
+  -- Whatever is left is the graph, which is the reason to have the page up.
+  local bottom = h - ((h >= 7) and 1 or 0)
+  local plotHeight = bottom - y + 1
+  if plotHeight >= 2 then
+    grid:resize(w, plotHeight)
+    grid:clear(BG)
+    local ins, outs, pct = model.history:series()
+    local box = { x = 1, y = 1, w = grid.w, h = grid.h }
+    if model.hasStore then
+      chart.line(grid, box, {
+        { values = pct, index = PANEL, fill = true, fillIndex = PANEL },
+      }, { count = model.history.cap, min = 0, max = 100 })
+    end
+    local lo, hi = chart.line(grid, box, {
+      { values = ins, index = IN },
+      { values = outs, index = OUT },
+    }, { count = model.history.cap, zero = true })
+    chart.rule(grid, box, 0, lo, hi, LINE, 2)
+    grid:blitTo(buf, 1, y)
+  end
+
+  if h >= 7 then
+    local state = model:bufferState()
+    local seconds, direction = model:timeToLimit()
+    local footer = state
+      or (seconds and ("%s %s"):format(direction, powerLib.duration(seconds)))
+      or (model.error and "fault" or "holding")
+    buf:blit(1, h, util.shorten(footer, w), theme.line, theme.bg)
+  end
+end
+
 function view.build(container, app)
   local grid = pixel.new(1, 1, PALETTE)
 
@@ -294,6 +378,10 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+
+    if ui.isTiny(w) then
+      return drawTiny(buf, grid, app, w, h)
+    end
 
     local model = app.power
     local cfg = app.cfg.power

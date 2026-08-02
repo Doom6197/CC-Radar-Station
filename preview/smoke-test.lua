@@ -875,7 +875,9 @@ check("applying a profile rewrites the settings it covers", function()
   assert(cfg.profile == "base", "recorded")
   assert(cfg.orientation == "fixed", "a base locks the scope")
   assert(cfg.animate == true, "and animates")
-  assert(next(cfg.modulesOff) == nil, "with every module on")
+  -- A base that never moves has no use for a page of speeds and headings.
+  assert(cfg.modulesOff.flight == true, "with the flight page off")
+  assert(cfg.modulesOff.power == nil, "and everything else on")
 
   profiles.apply(cfg, "pocket", {})
   assert(cfg.profile == "pocket", "switched")
@@ -883,11 +885,16 @@ check("applying a profile rewrites the settings it covers", function()
   assert(cfg.orientation == "heading", "and unlocks the scope")
   assert(cfg.headingStep == 45, "in stable steps")
   assert(cfg.modulesOff.power == true, "with no power page to wire up")
+  assert(cfg.modulesOff.flight == nil, "but the flight page on, since it moves")
 
   -- Switching back has to clear what the previous profile switched off, or a
   -- module would stay dark for no reason anyone could see.
   profiles.apply(cfg, "base", {})
   assert(cfg.modulesOff.power == nil, "and going back turns it on again")
+
+  profiles.apply(cfg, "vehicle", {})
+  assert(cfg.modulesOff.flight == nil, "a vehicle gets the flight page")
+  assert(cfg.modulesOff.power == nil, "and the power page")
 end)
 
 check("a profile will not switch on what it has no username for", function()
@@ -1525,6 +1532,138 @@ check("a gauge clamps rather than overrunning its box", function()
   grid:clear(1)
   chart.gauge(grid, box, 1, 3, 2)
   assert(grid.px[grid.w] == 3, "and full reaches the far edge")
+end)
+
+-- flight ------------------------------------------------------------------
+
+local flightLib = require("radar.flight")
+
+--- Flies a straight leg, one fix a second.
+local function fly(model, from, step, seconds)
+  for i = 0, seconds do
+    model:sample({
+      x = from.x + step.x * i, y = from.y + step.y * i, z = from.z + step.z * i,
+      dimension = from.dimension or "minecraft:overworld",
+    }, i)
+  end
+  return model
+end
+
+check("flight derives speed and climb from the position alone", function()
+  local model = flightLib.new()
+  assert(model.speed == nil, "nothing to say before the first fix")
+  assert(model.position == nil, "and no position")
+
+  -- Ten blocks east and two up per second.
+  fly(model, { x = 0, y = 100, z = 0 }, { x = 10, y = 2, z = 0 }, 12)
+
+  assert(math.abs(model.speed - 10) < 0.5,
+    "ten blocks a second over the ground, got " .. tostring(model.speed))
+  assert(math.abs(model.vertical - 2) < 0.5,
+    "climbing two a second, got " .. tostring(model.vertical))
+  assert(model.moving, "and flagged as moving")
+  assert(math.abs(util.angleDelta(model.course, 90)) < 1,
+    "heading due east, got " .. tostring(model.course))
+  assert(model.position.y == 124, "the latest fix is kept")
+
+  -- Stopped: the speed decays and the course stops being claimed.
+  for i = 13, 40 do
+    model:sample({ x = 120, y = 124, z = 0, dimension = "minecraft:overworld" }, i)
+  end
+  assert(model.speed < flightLib.MOVING_SPEED,
+    "stopping is noticed, got " .. tostring(model.speed))
+  assert(not model.moving, "and it is not moving")
+  assert(model.course == nil, "so there is no course to report")
+end)
+
+check("flight ignores a teleport rather than reporting it as speed", function()
+  local model = flightLib.new()
+  fly(model, { x = 0, y = 100, z = 0 }, { x = 5, y = 0, z = 0 }, 6)
+  assert(model.speed and model.speed > 1, "flying along")
+
+  -- A jump no airship makes: a portal, a chunk reload, a /tp.
+  model:sample({ x = 90000, y = 100, z = 90000, dimension = "minecraft:overworld" }, 7)
+  assert(model.speed == nil, "the history was thrown away, got " .. tostring(model.speed))
+  assert(model.position.x == 90000, "but the new position is kept")
+
+  -- A different world is a different journey.
+  local other = flightLib.new()
+  fly(other, { x = 0, y = 100, z = 0 }, { x = 5, y = 0, z = 0 }, 6)
+  other:sample({ x = 0, y = 100, z = 0, dimension = "minecraft:the_nether" }, 7)
+  assert(other.speed == nil, "changing dimension resets it")
+  assert(other.dimension == "minecraft:the_nether", "onto the new one")
+end)
+
+check("flight reports drift between where you look and where you go", function()
+  local model = flightLib.new()
+  -- Travelling due north while the pilot faces north-east.
+  fly(model, { x = 0, y = 100, z = 0 }, { x = 0, y = 0, z = -8 }, 8)
+  assert(math.abs(util.angleDelta(model.course, 0)) < 1,
+    "course is north, got " .. tostring(model.course))
+
+  local drift = model:drift(45)
+  assert(drift and math.abs(drift + 45) < 2,
+    "drifting 45 degrees off the nose, got " .. tostring(drift))
+  assert(model:drift(nil) == nil, "with no heading there is no drift")
+
+  local stopped = flightLib.new()
+  stopped:sample({ x = 0, y = 100, z = 0 }, 1)
+  stopped:sample({ x = 0, y = 100, z = 0 }, 2)
+  assert(stopped:drift(45) == nil, "and none while stationary")
+end)
+
+check("flight works out the way home", function()
+  local cfg = config.sanitise({})
+  cfg.baseX, cfg.baseY, cfg.baseZ = 0, 64, 0
+
+  local model = flightLib.new()
+  fly(model, { x = 300, y = 100, z = 0 }, { x = -10, y = 0, z = 0 }, 10)
+
+  local distance, bearing, compass = model:home(cfg)
+  assert(math.abs(distance - 200) < 1, "two hundred out, got " .. tostring(distance))
+  assert(compass == "W", "and home is west, got " .. tostring(compass))
+  assert(math.abs(util.angleDelta(bearing, 270)) < 1, "with the bearing to match")
+
+  local eta = model:eta(distance)
+  assert(eta and math.abs(eta - 20) < 2,
+    "twenty seconds at ten a second, got " .. tostring(eta))
+  assert(model:altitudeAboveHome(cfg) == 36, "and how far above the pad it is")
+
+  -- No base set is not an error, it is simply nothing to say.
+  local blank = config.sanitise({})
+  blank.baseX = nil
+  assert(model:home(blank) == nil, "no base, no bearing")
+
+  -- Stopped, an ETA would be "never".
+  local still = flightLib.new()
+  still:sample({ x = 0, y = 100, z = 0 }, 1)
+  assert(still:eta(500) == nil, "no ETA while stopped")
+end)
+
+check("flight formats to fit a fifteen-cell screen", function()
+  assert(#flightLib.formatSpeed(12.34) <= 5, "a speed fits")
+  assert(flightLib.formatSpeed(12.34) == "12.3", "to one decimal")
+  assert(flightLib.formatSpeed(140.6) == "141", "dropping it when large")
+  assert(flightLib.formatSpeed(nil) == "--", "and nothing is a dash")
+
+  assert(flightLib.formatVertical(2.14) == "+2.1", "a climb is signed")
+  assert(flightLib.formatVertical(-2.14) == "-2.1", "and so is a descent")
+  assert(flightLib.formatVertical(0.01) == "0.0", "level is neither")
+  assert(#flightLib.formatVertical(-12.3) <= 5, "and it still fits")
+
+  assert(flightLib.formatBearing(7) == "007", "a bearing is three cells")
+  assert(flightLib.formatBearing(360) == "000", "and wraps")
+
+  assert(flightLib.formatEta(45) == "45s", "seconds")
+  assert(flightLib.formatEta(112) == "1m52", "minutes and seconds")
+  assert(flightLib.formatEta(7200) == "2.0h", "then hours")
+  assert(flightLib.formatEta(-1) == "--", "and nonsense is a dash")
+  for _, value in ipairs({ 0, 1, 59, 60, 3599, 3600, 86399, 90000 }) do
+    -- "59m59" is the longest it gets, which still leaves ten cells for the
+    -- label and the gap on a fifteen-cell row.
+    assert(#flightLib.formatEta(value) <= 5,
+      "every ETA fits five cells, " .. value .. " gave " .. flightLib.formatEta(value))
+  end
 end)
 
 ------------------------------------------------------------------ the views --
@@ -3218,6 +3357,154 @@ check("applying a profile through the app rewires the station", function()
   for k in pairs(app.cfg) do app.cfg[k] = nil end
   for k, v in pairs(restored) do app.cfg[k] = v end
   app:emit("modules")
+end)
+
+------------------------------------------------------- a 1x1 monitor --
+-- Fifteen cells across, ten down, and no room for a tab strip -- so nine rows
+-- of content. Every page has to say something useful in that, rather than
+-- being a truncated version of the big one.
+
+--- Draws one page at 15x10 and reads back what reached the screen, with the
+--- position of every write, so overflow and collisions are visible.
+local function tinyScreen(root, page)
+  local W, H = 15, 10
+  local cells = {}
+  for y = 1, H do
+    cells[y] = {}
+    for x = 1, W do cells[y][x] = " " end
+  end
+
+  local overflow = {}
+  local Screen = {}
+  Screen.__index = Screen
+  function Screen:fill(x, y, w, h, ch)
+    for yy = y, y + h - 1 do
+      for xx = x, x + w - 1 do
+        if cells[yy] and cells[yy][xx] then cells[yy][xx] = ch end
+      end
+    end
+  end
+  function Screen:blit(x, y, str)
+    if type(str) ~= "string" then return end
+    if x < 1 or x + #str - 1 > W then
+      overflow[#overflow + 1] = ("%q at x=%d..%d"):format(str, x, x + #str - 1)
+    end
+    for i = 1, #str do
+      if cells[y] and cells[y][x + i - 1] then cells[y][x + i - 1] = str:sub(i, i) end
+    end
+  end
+  function Screen:drawText(x, y, s) return self:blit(x, y, s) end
+  function Screen:colorBlit(x, y, s) return self:blit(x, y, s) end
+
+  rawget(root.root, "_p").width = W
+  rawget(root.root, "_p").height = H
+  root:setPage(page, false)
+  root:refreshChrome()
+
+  local buffer = setmetatable({}, Screen)
+  drawTree(root.root, buffer)
+
+  local lines = {}
+  for y = 1, H do lines[y] = table.concat(cells[y]) end
+  return {
+    lines = lines, overflow = overflow,
+    text = table.concat(lines, "\n"),
+    header = root.title.text, state = root.status.text,
+  }
+end
+
+check("a 1x1 monitor has no tab strip, so the header names the page", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+
+  assert(ui.isTiny(15), "fifteen cells is tiny")
+  assert(ui.isTiny(19), "and so is nineteen")
+  assert(not ui.isTiny(26), "a pocket computer is not")
+  assert(not ui.isTiny(51), "nor a terminal")
+
+  rawget(monitorRoot.root, "_p").width = 15
+  rawget(monitorRoot.root, "_p").height = 10
+  assert(not monitorRoot:hasTabs(), "there is no room for a tab strip")
+
+  -- With no tabs, the header is the only thing naming the page -- so it does,
+  -- instead of repeating "RADAR" and a clipped "ALL CLE".
+  for _, page in ipairs(monitorRoot.pages) do
+    local shot = tinyScreen(monitorRoot, page)
+    local _, short = ui.metaOf(page)
+    assert(shot.header == short,
+      page .. " is named in the header, got " .. tostring(shot.header))
+    assert(#shot.header + #shot.state <= 15,
+      page .. " header and state fit: " .. shot.header .. " / " .. shot.state)
+  end
+end)
+
+check("every page fits a 1x1 monitor without overflowing", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+
+  -- Something on every page worth drawing, so this is not just testing the
+  -- empty states.
+  app.cfg.myName = "Steve"
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+  app:sweep()
+  app.power:poll(app.cfg, CLOCK)
+  for i = 0, 8 do
+    app.flight:sample({ x = 100 + i * 11, y = 3180 + i * 4, z = -400 - i * 9,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
+  for _, page in ipairs(monitorRoot.pages) do
+    local shot = tinyScreen(monitorRoot, page)
+    assert(#shot.overflow == 0,
+      page .. " writes past the edge of a 15-cell screen:\n  "
+        .. table.concat(shot.overflow, "\n  "))
+    for index, line in ipairs(shot.lines) do
+      assert(#line == 15, page .. " row " .. index .. " is " .. #line .. " cells")
+    end
+  end
+end)
+
+check("the tiny pages say something worth reading", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+
+  -- STATUS drops the settings -- range, tracking mode, bearing-up -- and
+  -- keeps what changes on its own.
+  local status = tinyScreen(monitorRoot, "status")
+  assert(status.text:find("CONTACT", 1, true), "status counts contacts:\n" .. status.text)
+  assert(status.text:find("ALERTS", 1, true), "and says whether it will shout")
+  assert(not status.text:find("Profile", 1, true), "without the profile row")
+  assert(not status.text:find("Range", 1, true), "or the range, which is a setting")
+
+  -- FLIGHT is the reason for a screen on an airship.
+  local flight = tinyScreen(monitorRoot, "flight")
+  assert(flight.text:find("SPD", 1, true), "flight has a speed:\n" .. flight.text)
+  assert(flight.text:find("VS", 1, true), "a climb rate")
+  assert(flight.text:find("HDG", 1, true), "a heading")
+  assert(flight.text:find("CRS", 1, true), "and the course it is actually making")
+  assert(flight.text:find("ALT", 1, true), "with an altitude")
+  assert(flight.text:find("HOME", 1, true), "and the way home")
+
+  -- CONTACTS is a list of names and distances, not a table of headers.
+  local contacts = tinyScreen(monitorRoot, "contacts")
+  assert(not contacts.text:find("CONTACTDIST", 1, true),
+    "the column headers no longer run together:\n" .. contacts.text)
+  if #app.contacts > 0 then
+    assert(contacts.text:find(app.contacts[1].name:sub(1, 6), 1, true),
+      "the nearest contact is named:\n" .. contacts.text)
+  end
+
+  -- POWER keeps the graph, which is the reason to have it up.
+  local power = tinyScreen(monitorRoot, "power")
+  assert(power.text:find("NET", 1, true), "power has a net rate:\n" .. power.text)
+  assert(not power.text:find("FE/", 1, true),
+    "without a unit clipped mid-word:\n" .. power.text)
 end)
 
 ---------------------------------------------------------- a small screen --

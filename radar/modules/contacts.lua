@@ -4,6 +4,7 @@
 -- same page is readable on a 15-cell pocket screen and on a 5x5 monitor.
 
 local theme = require("radar.theme")
+local ui    = require("radar.ui")
 local util  = require("radar.util")
 
 local view = {
@@ -50,6 +51,46 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+
+    -- A 1x1 monitor gets names and distances and nothing else. The column
+    -- headers alone came to "CONTACTDIST" at this width, and the empty-state
+    -- sentence was cut mid-word.
+    if ui.isTiny(w) then
+      if app.scanError then
+        for index, line in ipairs(util.wrap(app.scanError, w)) do
+          if index > h then break end
+          buf:blit(1, index, line, theme.alarm, theme.bg)
+        end
+        return
+      end
+
+      if #app.contacts == 0 then
+        buf:blit(1, 1, "All clear.", theme.dim, theme.bg)
+        if h >= 3 then
+          buf:blit(1, 3, app.cfg.mode == "fixed" and "Watching" or "Watching",
+            theme.line, theme.bg)
+          buf:blit(1, 4, app.cfg.mode == "fixed" and "the base." or "you.",
+            theme.line, theme.bg)
+        end
+        return
+      end
+
+      for index, contact in ipairs(app.contacts) do
+        if index > h then break end
+        if index == h and index < #app.contacts then
+          buf:blit(1, index, ("+%d more"):format(#app.contacts - index + 1),
+            theme.dim, theme.bg)
+          break
+        end
+        local distance = util.distanceLabel(contact.dist)
+        -- Name from the left, distance hard right: the two things worth
+        -- knowing, with the gap between them taking the truncation.
+        buf:blit(1, index, util.shorten(contact.name, max(1, w - #distance - 1)),
+          theme.text, theme.bg)
+        buf:blit(max(1, w - #distance), index, distance, contact.zoneColor, theme.bg)
+      end
+      return
+    end
 
     -- Column budget, widest first.
     local showDir     = w >= 22

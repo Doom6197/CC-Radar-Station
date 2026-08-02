@@ -41,7 +41,7 @@ local modules = {}
 -- Loaded first, in this order, so the tab strip is stable whatever the disk
 -- hands back. Anything else found in radar/modules/ follows them.
 modules.BUILT_IN = {
-  "status", "radar", "contacts", "weather", "power", "log", "settings",
+  "status", "radar", "flight", "contacts", "weather", "power", "log", "settings",
 }
 
 modules.list  = {}     -- descriptors, in display order

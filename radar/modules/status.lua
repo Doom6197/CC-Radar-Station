@@ -8,6 +8,7 @@
 local config = require("radar.config")
 local sky    = require("radar.sky")
 local theme  = require("radar.theme")
+local ui     = require("radar.ui")
 local util   = require("radar.util")
 
 local view = {
@@ -21,6 +22,64 @@ local view = {
 
 local max, floor = math.max, math.floor
 
+-- ------------------------------------------------------------------ vitals ---
+-- What the dashboard comes down to on a screen with nine rows: is the station
+-- working, and is anything wrong. Everything on the full page that is really
+-- a SETTING -- the range, the tracking mode, which bearing is up -- is left
+-- out, because none of it changes on its own and none of it is a surprise.
+
+--- @return table[] { { label, value, colour } , ... }
+local function vitals(app)
+  local cfg = app.cfg
+  local out = {}
+  local function push(label, value, colour)
+    out[#out + 1] = { label = label, value = value, colour = colour or theme.text }
+  end
+
+  -- Whatever is broken goes first, because that is the reason to look.
+  if app.scanError then
+    push("FAULT", util.shorten(app.scanError, 10), theme.alarm)
+  end
+
+  if config.usesNetwork(cfg) then
+    local summary, healthy = app.link:summary(cfg)
+    -- The full sentence never fits; what matters is whether it is up.
+    local text = healthy and (config.isMobile(cfg)
+      and util.shorten(config.pairedLabel(cfg) or "ok", 9) or "ok") or "DOWN"
+    push("LINK", text, healthy and theme.good or theme.alarm)
+  end
+
+  local count = #app.contacts
+  push("CONTACT", tostring(count), count > 0 and theme.warn or theme.dim)
+
+  -- Speed only where the flight page is on. On a fixed base it would report
+  -- the operator walking around, which is noise dressed as an instrument.
+  local flying = require("radar.modules").isEnabled(cfg, "flight")
+  if flying and app.flight and app.flight.position then
+    local model = app.flight
+    push("SPD", require("radar.flight").formatSpeed(model.speed),
+      model.moving and theme.good or theme.dim)
+    push("ALT", tostring(floor(model.position.y)), theme.text)
+  elseif app.myPos then
+    push("ALT", tostring(floor(app.myPos.y)), theme.text)
+  end
+
+  if app.power and app.power.available and app.power.percent then
+    push("PWR", ("%d%%"):format(util.round(app.power.percent)),
+      app.power.low and theme.alarm or theme.good)
+  end
+
+  local snap = app:snapshot()
+  if snap and snap.available then
+    push("TIME", snap.clock, theme.text)
+  end
+
+  push("ALERTS", cfg.alert and "on" or "MUTE",
+    cfg.alert and theme.good or theme.warn)
+
+  return out
+end
+
 function view.build(container, app)
   local canvas = container:addCanvas({
     x = 1, y = 1,
@@ -32,6 +91,20 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+
+    -- A 1x1 monitor gets the vitals and nothing else. The full dashboard at
+    -- this size left five characters for every value, which turned "AIRSHIP /
+    -- VEHICLE" into "AIRS" and "tracking you" into "trac".
+    if ui.isTiny(w) then
+      local rows = vitals(app)
+      for index, row in ipairs(rows) do
+        if index > h then break end
+        buf:blit(1, index, util.shorten(row.label, 7), theme.dim, theme.bg)
+        local value = util.shorten(row.value, max(1, w - 8))
+        buf:blit(max(1, w - #value), index, value, row.colour, theme.bg)
+      end
+      return
+    end
 
     local twoColumn = w >= 50
     local colW = twoColumn and floor((w - 3) / 2) or (w - 2)
