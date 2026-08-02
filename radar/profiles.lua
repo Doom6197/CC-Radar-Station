@@ -127,9 +127,11 @@ function profiles.label(id)
 end
 
 --- One line for the settings page and the status readout.
-function profiles.summary(cfg)
+---@param short? boolean Drop the hint, for a screen with no room for it
+function profiles.summary(cfg, short)
   local entry = profiles.byId(cfg and cfg.profile)
-  if not entry then return "Custom - no profile applied" end
+  if not entry then return short and "Custom" or "Custom - no profile applied" end
+  if short then return entry.label end
   return entry.label .. " - " .. entry.hint
 end
 

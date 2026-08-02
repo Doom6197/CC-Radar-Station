@@ -111,9 +111,13 @@ function view.sanitise(cfg)
 end
 
 --- One line describing where a backdrop's sky comes from.
-function view.skyLabel(cfg)
+---@param short? boolean Drop the hint, for a screen with no room for it
+function view.skyLabel(cfg, short)
   for _, entry in ipairs(view.BACKDROP_SKIES) do
-    if entry.id == cfg.backdropSky then return entry.label .. " - " .. entry.hint end
+    if entry.id == cfg.backdropSky then
+      if short then return entry.label end
+      return entry.label .. " - " .. entry.hint
+    end
   end
   return cfg.backdropSky
 end
@@ -457,13 +461,6 @@ function view.settings(ctx)
       end)
   end)
 
-  ctx.row("Animation", function() return ctx.onOff(cfg.animate) end, function()
-    cfg.animate = not cfg.animate
-    app:saveConfig()
-  end, ctx.onOffColor(function() return cfg.animate end))
-
-  ctx.note("Animation drives the sky, clouds, rain and radar sweep.")
-
   ctx.row("Scenery", function()
     if cfg.biomeScene == "auto" then
       local snap = app:snapshot()
@@ -489,8 +486,8 @@ function view.settings(ctx)
     return cfg.biomeScene == "auto" and theme.text or theme.accent
   end)
 
-  ctx.note("The ground the weather page draws. Force one if your pack")
-  ctx.note("reports a biome the station does not recognise.")
+  ctx.note("The ground the weather page draws. Force one if your pack "
+    .. "reports a biome the station does not recognise.")
   ctx.spacer()
 
   -- backdrop ------------------------------------------------------------------
@@ -522,13 +519,13 @@ function view.settings(ctx)
     end)
   end, function() return cfg.backdrop == "live" and theme.text or theme.accent end)
 
-  ctx.note("A picture that ignores the weather and the biome.")
-  ctx.note("Works with no Environment Detector at all.")
+  ctx.note("A picture that ignores the weather and the biome. Works with "
+    .. "no Environment Detector at all.")
 
-  ctx.row("Sky", function() return view.skyLabel(cfg) end, function()
+  ctx.row("Sky", function() return view.skyLabel(cfg, ctx.isNarrow()) end, function()
     ctx.openPicker("BACKDROP SKY",
       ctx.entriesOf(view.BACKDROP_SKIES,
-        function(s) return s.label .. " - " .. s.hint end,
+        function(s) return ctx.withHint(s.label, s.hint) end,
         function(s) return s.id end),
       cfg.backdropSky,
       function(value)
@@ -540,9 +537,9 @@ function view.settings(ctx)
     return backdrops.isLiveSky(cfg) and theme.accent or theme.text
   end)
 
-  ctx.note("Live keeps the picture but takes the hour, the weather")
-  ctx.note("and the sun from the detector - so the airships fly")
-  ctx.note("through the real dusk and the real rain.")
+  ctx.note("Live keeps the picture but takes the hour, the weather and the "
+    .. "sun from the detector - so the airships fly through the real dusk "
+    .. "and the real rain.")
 
   ctx.row("Change every", function()
     local seconds = cfg.backdropSeconds

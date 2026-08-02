@@ -433,7 +433,7 @@ function view.settings(ctx)
       local entries = {}
       for _, role in ipairs(view.ROLES) do
         entries[#entries + 1] = {
-          label = role.label .. " - " .. role.hint,
+          label = ctx.withHint(role.label, role.hint),
           value = role.id,
         }
       end
@@ -481,8 +481,8 @@ function view.settings(ctx)
     return (app.power and app.power.available) and theme.good or theme.warn
   end)
 
-  ctx.note("Press a device to say whether it measures supply or")
-  ctx.note("demand. A battery is read for stored and capacity.")
+  ctx.note("Press a device to say whether it measures supply or demand. "
+    .. "A battery is read for stored and capacity.")
 
   ctx.row("Units", function() return cfg.unit end, function()
     ctx.openPicker("ENERGY UNITS",
@@ -522,8 +522,8 @@ function view.settings(ctx)
       end)
   end)
 
-  ctx.note("Every reading is a server-thread call, so a slow")
-  ctx.note("sample rate is the polite setting on a busy world.")
+  ctx.note("Every reading is a server-thread call, so a slow sample rate is "
+    .. "the polite setting on a busy world.")
 
   ctx.row("Low alarm", function() return ctx.onOff(cfg.alarm) end, function()
     cfg.alarm = not cfg.alarm
@@ -542,10 +542,10 @@ function view.settings(ctx)
       end)
   end)
 
-  ctx.note("Fires the same sound, flash and redstone pulse a")
-  ctx.note("contact does, once per crossing. Needs a battery.")
-  ctx.note("Redstone Output / Mode / Buffer drives a fuel gate")
-  ctx.note("from the same reading.")
+  ctx.note("Fires the same sound, flash and redstone pulse a contact does, "
+    .. "once per crossing. Needs a battery.")
+  ctx.note("Redstone Output / Mode / Buffer drives a fuel gate from the same "
+    .. "reading.")
 
   ctx.action("Rescan for energy devices", function()
     app:rescan()

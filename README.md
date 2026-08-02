@@ -137,8 +137,24 @@ peripherals and differ only in what they are attached to.
 
 A profile is applied **once**. It is not a mode the rest of the program keeps
 checking — afterwards every setting it touched is an ordinary setting you can
-change like any other. Reapply or switch under **Settings → Profile**;
-doing so overwrites the settings it covers, which is the point of it.
+change like any other, and **every one of them has its own row in Settings**:
+tracking mode, the scope, heading steps, heading rate, eased turns, animation,
+sweep rate, screen flash and the banner. Reapply or switch under
+**Settings → Profile**; doing so overwrites the settings it covers, which is the
+point of it.
+
+### Settings on a small screen
+
+A pocket computer is 26 cells across, which is not enough for a label column
+and a value column side by side. Below 34 cells the settings page **stacks**:
+each label gets its own line with the value full-width underneath it, notes
+wrap instead of being clipped, and the three base-coordinate boxes sit on one
+line rather than running off the right-hand edge.
+
+That is automatic, and **Settings → Profile → Layout** overrides it either way
+— `Stacked` on a wide screen, `Side by side` on a narrow one. It is the second
+row on the page, so it is reachable even when the rest of the page is the thing
+that is hard to read.
 
 ---
 
@@ -596,7 +612,7 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 104 checks
+lua preview/smoke-test.lua .        # 109 checks
 lua preview/install-test.lua .      # 15 checks
 lua preview/render-preview.lua . preview
 ```

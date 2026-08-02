@@ -573,8 +573,10 @@ function config.role(cfg)
   return config.ROLES[1]
 end
 
-function config.roleLabel(cfg)
+--- @param short? boolean Drop the hint, for a screen with no room for it
+function config.roleLabel(cfg, short)
   local entry = config.role(cfg)
+  if short then return entry.label end
   return entry.label .. " - " .. entry.hint
 end
 

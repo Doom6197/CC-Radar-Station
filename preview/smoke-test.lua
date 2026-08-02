@@ -3005,6 +3005,200 @@ check("applying a profile through the app rewires the station", function()
   app:emit("modules")
 end)
 
+---------------------------------------------------------- a small screen --
+-- A pocket computer is 26 cells across. The old fixed two-column layout left
+-- ten cells for every value and put two of the three base-coordinate boxes off
+-- the right-hand edge entirely, which is unusable rather than merely cramped.
+
+local settingsModule = modules.byId("settings")
+
+check("the layout decision follows the screen and the setting", function()
+  assert(settingsModule.isNarrow(26, "auto"), "a pocket screen stacks")
+  assert(settingsModule.isNarrow(15, "auto"), "and anything smaller")
+  assert(not settingsModule.isNarrow(51, "auto"), "a computer terminal does not")
+  assert(not settingsModule.isNarrow(164, "auto"), "nor a wide monitor")
+
+  -- The operator's choice overrides the measurement in both directions.
+  assert(settingsModule.isNarrow(164, "stacked"), "stacked can be forced on")
+  assert(not settingsModule.isNarrow(15, "columns"), "and columns forced back")
+
+  local cfg = config.sanitise({})
+  assert(cfg.settingsLayout == "auto", "auto by default")
+  assert(config.sanitise({ settingsLayout = "sideways" }).settingsLayout == "auto",
+    "an unknown layout falls back")
+end)
+
+--- Every element the settings page built, with its resolved geometry.
+local function settingsElements()
+  local out = {}
+  local function walk(el)
+    local props = rawget(el, "_p")
+    out[#out + 1] = {
+      kind = rawget(el, "__kind"),
+      text = type(props.text) == "string" and props.text or nil,
+      x = tonumber(el.x) or 1,
+      y = tonumber(el.y) or 1,
+      width = tonumber(el.width) or 0,
+    }
+    for _, child in ipairs(rawget(el, "_children") or {}) do walk(child) end
+  end
+  walk(terminalRoot.views.settings.container)
+  return out
+end
+
+local function buildSettingsAt(width, layout)
+  rawget(terminalRoot.root, "_p").width = width
+  rawget(terminalRoot.root, "_p").height = 20
+  terminalRoot:setPage("settings", false)
+  app.cfg.settingsLayout = layout or "auto"
+  app:emit("modules")                        -- what a real rebuild fires
+  return settingsElements()
+end
+
+check("nothing on the settings page runs off a pocket screen", function()
+  local W = 26
+  local elements = buildSettingsAt(W)
+
+  local overflow, buttons, inputs, labels = {}, 0, 0, 0
+  for _, el in ipairs(elements) do
+    if el.kind == "Button" or el.kind == "Input" then
+      if el.kind == "Button" then buttons = buttons + 1 else inputs = inputs + 1 end
+      if el.x + el.width - 1 > W then
+        overflow[#overflow + 1] = ("%s %q at x=%d w=%d ends at %d")
+          :format(el.kind, tostring(el.text), el.x, el.width, el.x + el.width - 1)
+      end
+      assert(el.x >= 1, "nothing starts left of the screen")
+    elseif el.kind == "Label" and el.text then
+      labels = labels + 1
+      -- A single word longer than the screen cannot be broken; anything that
+      -- COULD have been wrapped and was not is the bug being tested for.
+      if el.x + #el.text - 1 > W and el.text:find("%s") then
+        overflow[#overflow + 1] = ("label %q at x=%d"):format(el.text, el.x)
+      end
+    end
+  end
+
+  assert(buttons > 20, "the page really was built, got " .. buttons .. " buttons")
+  assert(inputs >= 4, "including the coordinate and name boxes, got " .. inputs)
+  assert(labels > 40, "and its labels, got " .. labels)
+  assert(#overflow == 0,
+    "these run off a 26-cell screen:\n  " .. table.concat(overflow, "\n  "))
+end)
+
+check("a narrow screen stacks each value under its label", function()
+  local elements = buildSettingsAt(26)
+
+  -- Find the Mode row: a label, then its button on the NEXT line, hard left
+  -- and nearly the full width of the screen.
+  local label, button
+  for i, el in ipairs(elements) do
+    if el.kind == "Label" and el.text == "Mode" then
+      label = el
+      for j = i + 1, #elements do
+        if elements[j].kind == "Button" then button = elements[j]; break end
+      end
+      break
+    end
+  end
+  assert(label and button, "found the Mode row")
+  assert(button.y == label.y + 1, "the value is on the line below its label")
+  assert(button.x == 1, "starting hard left, got x=" .. button.x)
+  assert(button.width >= 24, "and nearly the whole width, got " .. button.width)
+  assert(button.text == "FIXED - watch the base",
+    "so the whole value fits, got " .. tostring(button.text))
+
+  -- The three coordinate boxes share one line rather than running off the edge.
+  local boxes = {}
+  for _, el in ipairs(elements) do
+    if el.kind == "Input" and el.width == 7 then boxes[#boxes + 1] = el end
+  end
+  assert(#boxes == 3, "three coordinate boxes, got " .. #boxes)
+  assert(boxes[1].y == boxes[2].y and boxes[2].y == boxes[3].y, "on one line")
+  assert(boxes[3].x + boxes[3].width - 1 <= 26,
+    "and the last one ends on screen, at " .. (boxes[3].x + boxes[3].width - 1))
+end)
+
+check("a wide screen keeps the two-column layout", function()
+  local elements = buildSettingsAt(51)
+
+  local label, button
+  for i, el in ipairs(elements) do
+    if el.kind == "Label" and el.text == "Mode" then
+      label = el
+      for j = i + 1, #elements do
+        if elements[j].kind == "Button" then button = elements[j]; break end
+      end
+      break
+    end
+  end
+  assert(label and button, "found the Mode row")
+  assert(button.y == label.y, "label and value share a line")
+  assert(button.x > 1, "with the value in its own column, got x=" .. button.x)
+
+  -- And forcing stacked on a wide screen still stacks.
+  local forced = buildSettingsAt(51, "stacked")
+  local forcedLabel, forcedButton
+  for i, el in ipairs(forced) do
+    if el.kind == "Label" and el.text == "Mode" then
+      forcedLabel = el
+      for j = i + 1, #forced do
+        if forced[j].kind == "Button" then forcedButton = forced[j]; break end
+      end
+      break
+    end
+  end
+  assert(forcedButton.y == forcedLabel.y + 1, "forcing stacked works on any screen")
+
+  buildSettingsAt(51, "auto")
+end)
+
+check("the settings the pocket profile changes are all reachable", function()
+  -- The profile is a shortcut, not a way to reach a setting that has no row.
+  -- Every key it writes has to be editable by hand afterwards, and on a
+  -- station where the module that used to own the row has been switched off.
+  local pocket = profiles.byId("pocket")
+  local rows = {}
+  for _, el in ipairs(buildSettingsAt(51)) do
+    if el.kind == "Label" and el.text then rows[el.text] = true end
+  end
+
+  local owners = {
+    role           = "Role",
+    mode           = "Mode",
+    orientation    = "Scope",
+    headingStep    = "Heading steps",
+    headingSeconds = "Heading rate",
+    headingSmooth  = "Ease turns",
+    scanIndex      = "Sweep every",
+    animate        = "Animation",
+    envSeconds     = "Poll every",
+    flash          = "Screen flash",
+    toast          = "Banner",
+  }
+  for key in pairs(pocket.cfg) do
+    local label = owners[key]
+    assert(label, "the pocket profile writes " .. key .. " with no row named for it")
+    assert(rows[label], key .. " has no row: expected one labelled " .. label)
+  end
+
+  -- Animation drives the radar sweep and the eased turn as well as the sky, so
+  -- it belongs to the station rather than to the weather page -- switching the
+  -- weather module off must not take it away.
+  app.cfg.modulesOff = { weather = true }
+  config.sanitise(app.cfg)
+  local without = {}
+  for _, el in ipairs(buildSettingsAt(51)) do
+    if el.kind == "Label" and el.text then without[el.text] = true end
+  end
+  assert(without["Animation"], "Animation survives the weather module going off")
+  assert(without["Ease turns"], "and so does the setting that depends on it")
+  assert(not without["Scenery"], "while the weather module's own rows do not")
+
+  app.cfg.modulesOff = {}
+  config.sanitise(app.cfg)
+  buildSettingsAt(51)
+end)
+
 --------------------------------------------------------------------- power --
 
 check("the power page draws in every state at every size", function()
