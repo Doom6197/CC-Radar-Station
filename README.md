@@ -163,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.8                                    |  SETTINGS   v8.8
+ SETTINGS   v8.9                                    |  SETTINGS   v8.9
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -474,6 +474,11 @@ mean an autopilot that quietly moved to a different device the day you added
 another relay. Name one and it is pinned; if it later disappears from the
 network the page falls back to whatever *is* there and says so rather than
 pretending.
+
+The sides offered are the six every block has — `top`, `bottom`, `left`,
+`right`, `front`, `back`. A relay does not report its own sides: it has no
+`getSides()`, unlike the redstone *global*, which is worth knowing if you go
+looking for one.
 
 > The side the wired modem occupies cannot also carry a link, so do not pick
 > it as a thruster side.
@@ -1167,6 +1172,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.9 - the relay is actually found.** v8.8 matched a relay on
+`setAnalogOutput` **and `getSides`** -- and a real Redstone Relay has no
+`getSides()`, so it found nothing at all on a network with a relay sitting on
+it. The test mock had invented the method, so the check passed against a
+fiction. The mock is now built from exactly the thirteen methods a relay
+reports in game and nothing else, and matching is on the analog setter plus one
+of the other redstone methods. When there is no relay the settings row also
+says how many peripherals it *did* see, which separates "the modem is seeing
+nothing" from "the modem is seeing things that are not relays".
 
 **v8.8 - the autopilot drives a redstone relay.** The contraption controller
 is gone. The thruster groups are now two sides of a **CC:Tweaked Redstone

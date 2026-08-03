@@ -212,10 +212,28 @@ end
 -- relay on the far side of a wired modem indistinguishable from one on a side
 -- of the computer, since hardware.discover walks both.
 
-local SET_METHODS   = { "setAnalogOutput", "setAnalogueOutput" }
-local SIDES_METHODS = { "getSides" }
+-- What a real CC:Tweaked Redstone Relay actually answers to:
+--
+--   getAnalogInput   getAnalogOutput   getAnalogueInput  getAnalogueOutput
+--   getBundledInput  getBundledOutput  getInput          getOutput
+--   setAnalogOutput  setAnalogueOutput setBundledOutput  setOutput
+--   testBundledInput
+--
+-- Note what is NOT in that list: getSides(). The redstone GLOBAL has one and
+-- the relay peripheral does not, and requiring it here is why the first
+-- version of this found nothing at all on a network with a relay sitting
+-- right on it. The sides are the six every block has, so they are a constant
+-- rather than a question.
+local SET_METHODS = { "setAnalogOutput", "setAnalogueOutput" }
 
--- What a relay is asked for when it will not list its own sides.
+-- One more method, so "can be told to put out a redstone level" is not the
+-- whole test. Anything with both is a redstone output device with sides,
+-- which is all this needs it to be.
+local CONFIRM_METHODS = {
+  "setOutput", "getInput", "getAnalogInput", "getAnalogueInput",
+  "getAnalogOutput", "getAnalogueOutput",
+}
+
 local DEFAULT_SIDES = { "top", "bottom", "left", "right", "front", "back" }
 
 local function methodOf(dev, names)
@@ -228,7 +246,8 @@ end
 
 --- Whether a peripheral can be driven as a thruster relay.
 function view.looksLikeRelay(dev)
-  return methodOf(dev, SET_METHODS) ~= nil and methodOf(dev, SIDES_METHODS) ~= nil
+  return methodOf(dev, SET_METHODS) ~= nil
+     and methodOf(dev, CONFIRM_METHODS) ~= nil
 end
 
 --- Collects every relay on the network, in name order.
@@ -279,11 +298,16 @@ function view.relayIsChosen(app)
 end
 
 --- The sides of the relay a thruster group can be wired to.
+---
+--- A relay does not list its own sides, so these are the six every block has.
+--- A device that DOES offer a list is believed, since a future one might.
 function view.sides(app)
   local relay = app.kit.relay
   if not relay then return {} end
-  local ok, sides = pcall(relay.dev.getSides)
-  if ok and type(sides) == "table" and #sides > 0 then return sides end
+  if type(relay.dev.getSides) == "function" then
+    local ok, sides = pcall(relay.dev.getSides)
+    if ok and type(sides) == "table" and #sides > 0 then return sides end
+  end
   return DEFAULT_SIDES
 end
 
@@ -938,7 +962,14 @@ function view.autopilotSettings(ctx)
 
   ctx.row("Relay", function()
     local relay = app.kit.relay
-    if not relay then return "not found" end
+    -- The peripheral count, because "not found" on its own cannot tell the
+    -- difference between a modem that is seeing nothing and a modem that is
+    -- seeing plenty of things that are not relays.
+    if not relay then
+      local seen = #(app.kit.peripherals or {})
+      return ("not found - %d peripheral%s seen"):format(seen,
+        seen == 1 and "" or "s")
+    end
     if not view.relayIsChosen(app) then
       return ("%s   (%s is gone)"):format(util.shorten(relay.name, 14),
         util.shorten(auto.relay, 14))

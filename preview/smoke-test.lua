@@ -2828,30 +2828,48 @@ end)
 
 local WRITTEN = {}                    -- relay side -> last level written
 
-local RELAY = {
-  __type = "redstone_relay",
-  written = WRITTEN,
-  getSides = function()
-    return { "top", "bottom", "left", "right", "front", "back" }
-  end,
-  -- Redstone carries 0..15 and nothing else, so the mock refuses anything
-  -- else: a number that escapes the quantiser has to fail here rather than
-  -- quietly being stored.
-  setAnalogOutput = function(side, level)
-    if type(level) ~= "number" or level % 1 ~= 0 or level < 0 or level > 15 then
-      error("not a redstone level: " .. tostring(level), 0)
-    end
-    WRITTEN[side] = level
-    return true
-  end,
+-- EXACTLY the method surface a real relay has, read off one in game:
+--
+--   lua> peripheral.find("redstone_relay")
+--
+-- and nothing else. The first version of this mock invented a getSides(),
+-- which the real peripheral does not have -- so the discovery test passed
+-- against a fiction while the program found nothing at all in game. A mock
+-- that is more capable than the thing it stands for is worse than no mock.
+local RELAY_METHODS = {
+  "getAnalogInput", "getAnalogOutput", "getAnalogueInput", "getAnalogueOutput",
+  "getBundledInput", "getBundledOutput", "getInput", "getOutput",
+  "setAnalogOutput", "setAnalogueOutput", "setBundledOutput", "setOutput",
+  "testBundledInput",
 }
+
+local RELAY = { __type = "redstone_relay", written = WRITTEN }
+for _, name in ipairs(RELAY_METHODS) do
+  RELAY[name] = function() return 0 end
+end
+
+-- Redstone carries 0..15 and nothing else, so the mock refuses anything else:
+-- a number that escapes the quantiser has to fail here rather than quietly
+-- being stored.
+RELAY.setAnalogOutput = function(side, level)
+  if type(level) ~= "number" or level % 1 ~= 0 or level < 0 or level > 15 then
+    error("not a redstone level: " .. tostring(level), 0)
+  end
+  WRITTEN[side] = level
+  return true
+end
 
 check("a redstone relay is claimed by what it can do", function()
   local flightModule = modules.byId("flight")
 
   assert(flightModule.looksLikeRelay(RELAY), "takes an analog output by side")
+
+  -- A real relay has NO getSides(), so requiring one found nothing at all in
+  -- game. Nothing may depend on it again.
+  assert(RELAY.getSides == nil, "the mock has no getSides, because the real one has none")
+
   assert(not flightModule.looksLikeRelay({ setAnalogOutput = function() end }),
-    "a setter with no sides to set is not a relay")
+    "a lone analog setter is not enough to call something a relay")
   assert(not flightModule.looksLikeRelay(PERIPHERALS.back),
     "and a player detector is not one")
   assert(not flightModule.looksLikeRelay("nonsense"), "nor is a string")
@@ -2859,8 +2877,8 @@ check("a redstone relay is claimed by what it can do", function()
   -- Nothing anywhere names the peripheral type, so a relay from a later
   -- version -- or the British spelling -- still lands here.
   assert(flightModule.looksLikeRelay({
-    getSides = function() return {} end,
     setAnalogueOutput = function() end,
+    getInput = function() end,
   }), "the other spelling works too")
 
   -- Found by network NAME rather than on a side of the computer, which is how
@@ -2886,8 +2904,12 @@ check("the relay is picked, not whichever answered first", function()
   -- whichever answered first would mean an autopilot that quietly moved to a
   -- different device the day somebody added another relay.
   local flightModule = modules.byId("flight")
+  -- This one DOES list its sides, and reports four. A real relay does not
+  -- offer the method at all, but a device that does is believed -- so this
+  -- covers that path as well as the choice.
   local SECOND = {
     __type = "redstone_relay",
+    setOutput = function() return true end,
     getSides = function() return { "top", "bottom", "left", "right" } end,
     setAnalogOutput = function() return true end,
   }
