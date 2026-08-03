@@ -336,12 +336,17 @@ function view.writeOutputs(app, left, right)
   local auto = app.cfg.autopilot
   local state = app.autopilot
 
-  local leftLevel  = autopilot.level(left)
-  local rightLevel = autopilot.level(right)
+  -- The rounding error is carried between passes, so the average level over a
+  -- few of them is the throttle asked for. Sixteen levels is too coarse to
+  -- hold a heading with otherwise -- see autopilot.level.
+  local leftLevel, rightLevel, carryLeft, carryRight
+  leftLevel,  carryLeft  = autopilot.level(left,  state and state.carryLeft)
+  rightLevel, carryRight = autopilot.level(right, state and state.carryRight)
 
   if state then
     state.left, state.right = left, right
     state.leftLevel, state.rightLevel = leftLevel, rightLevel
+    state.carryLeft, state.carryRight = carryLeft, carryRight
   end
 
   if not relay then return false, "no redstone relay attached" end
@@ -402,6 +407,7 @@ function view.setAutopilot(app, on)
   state.phase, state.message = "probe", autopilot.phaseLabel("probe")
   state.probing, state.faulted = 0, nil
   state.left, state.right = 0, 0
+  state.carryLeft, state.carryRight = 0, 0
   state.recorded = nil            -- each engagement records its own file
   return true, "Autopilot engaged"
 end
@@ -565,6 +571,7 @@ function view.attach(app)
     phase   = "off",
     message = autopilot.phaseLabel("off"),
     left = 0, right = 0,
+    carryLeft = 0, carryRight = 0,
     probing = 0,
     error = nil,
     faulted = nil,

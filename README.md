@@ -166,7 +166,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.13                                    |  SETTINGS   v8.13
+ SETTINGS   v8.14                                    |  SETTINGS   v8.14
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -537,8 +537,43 @@ above zero comes out as **at least 1**: rounding a real command down to *off*
 would make a thruster meant to be idling indistinguishable from one that has
 been cut, and only one of those is a decision.
 
-Sixteen levels is all redstone has, so a correction finer than about 7% of
-cruise cannot be expressed. That is what the 5° deadband is for anyway.
+#### Dithering
+
+Sixteen levels is a very coarse actuator for holding a heading. One level is
+6.7% of full thrust, so rounding each side on its own meant the two did not
+differ **at all** until the steering command passed a threshold:
+
+```
+turn power   round each side    dithered
+20%          steer >= 0.33      steer >= 0
+35%          steer >= 0.19      steer >= 0
+55%          steer >= 0.12      steer >= 0
+100%         steer >= 0.07      steer >= 0
+```
+
+A logged cruise at 20% sat either side of exactly that 0.33 for its whole
+length, flicking between no correction and two levels of one with nothing
+available in between — and wandered left and right the whole way.
+
+So the rounding error is **carried into the next pass**. Over a few of them the
+average level is the level asked for:
+
+```
+holding 0.62 (9.3 levels):  9 10 9 9 10 9 9 9 10 9 9 10   mean 9.33
+```
+
+The loop runs at 2 Hz and the ship answers over seconds, so it filters the
+dither out and feels the average — which is the resolution the loop needed and
+the wire could not carry.
+
+#### Headroom at full cruise
+
+At `Cruise 100%` both sides used to come out at the top of the range — `0.992`
+and `0.987`, which are **both 15** — so a commanded correction reached the
+thrusters as no difference at all. That happened three times in one short
+logged flight. The base throttle is now capped at `1 − |difference|`, which
+costs a little speed and buys back the ability to hold a heading at the
+throttle setting everybody reaches for.
 
 **It commands a turn rate, not a deflection.** Two loops:
 
@@ -575,7 +610,7 @@ second:
 
 | | |
 |---|---|
-| **deadband** | errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
+| **deadband** | 2° is *subtracted from* the error rather than zeroing it, so nothing steps as it is crossed. The ship settles that far off rather than exactly on, which is the price |
 | **speed floor** | below 1 block a second the course is noise, not a heading, so it keeps probing. A real flight read `90°`, then `45°`, then `341°` in two seconds at 0.19 b/s, and the autopilot believed all three |
 | **turn brake** | up to 80% of cruise is given up at full deflection, because a vessel at full ahead in the wrong direction is going the wrong way faster |
 | **slew limit** | outputs walk to their new values rather than slamming, which a heavy contraption cannot follow anyway |
@@ -1255,6 +1290,18 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.14 - the drift at cruise.** Two faults, both in getting a decision onto
+a wire that carries sixteen values. Rounding each side on its own meant that at
+20% turn power the two thrusters did not differ until the steering command
+passed 0.33 -- and a logged cruise sat either side of exactly that, flicking
+between no correction and two levels of one. The rounding error is carried into
+the next pass now, so the average level is the level asked for. And at Cruise
+100% both sides came out at the top of the range and both rounded to 15, so a
+correction reached the thrusters as nothing at all; the base throttle now
+leaves room for the difference. The deadband also shrank to 2 degrees and is
+subtracted from the error rather than zeroing it, so nothing steps as a
+cruising ship drifts across it.
 
 **v8.13 - three from one screenshot.** Picking **No limit** as the autopilot's
 shut-off range set it to **6 blocks**: the picker helper did

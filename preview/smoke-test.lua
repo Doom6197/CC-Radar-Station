@@ -1839,20 +1839,37 @@ check("more thrust on the left swings the nose right", function()
 end)
 
 check("small errors are not chased", function()
-  -- A fix a second apart cannot resolve five degrees, and steering for it just
-  -- twitches the ship from side to side.
+  -- Inside the deadband it goes straight.
   local nudge = settle({
-    engaged = true, distance = 500, bearing = 93, course = 90,
+    engaged = true, distance = 500, bearing = 91, course = 90,
     moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
   })
   assert(nudge.left == nudge.right,
-    "three degrees off is straight ahead, got " .. nudge.left .. "/" .. nudge.right)
+    "one degree off is straight ahead, got " .. nudge.left .. "/" .. nudge.right)
 
   local real = settle({
     engaged = true, distance = 500, bearing = 110, course = 90,
     moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
   })
   assert(real.left ~= real.right, "twenty degrees off is steered for")
+
+  -- And the deadband is subtracted rather than zeroing: nothing steps as it is
+  -- crossed. The old hard one jumped the commanded rate from 0.6 deg/s to
+  -- nothing at exactly the error a cruising ship sits on, kicking it every
+  -- time it drifted across.
+  local function wantedAt(err)
+    return autopilotLib.step({
+      engaged = true, distance = 500, bearing = 90 + err, course = 90,
+      turnRate = 0, moving = true, speed = 12, probing = 0,
+      cfg = { cruise = 0.6, lead = 4, turnRate = 8 },
+    }).wanted
+  end
+  local edge = autopilotLib.DEADBAND_DEGREES
+  assert(wantedAt(edge) == 0, "at the edge it asks for nothing")
+  assert(math.abs(wantedAt(edge + 0.1)) < 0.05,
+    "and just past it, almost nothing: " .. wantedAt(edge + 0.1))
+  assert(wantedAt(edge + 4) > wantedAt(edge + 2),
+    "growing smoothly with the error")
 end)
 
 check("the throttle walks rather than slamming", function()
@@ -3146,6 +3163,106 @@ check("the relay is picked, not whichever answered first", function()
   assert(#flightModule.sides(app) == 6, "back on the six-sided relay")
 end)
 
+check("dithering gets sub-level resolution out of sixteen levels", function()
+  -- One redstone level is 6.7% of full thrust. At 20% turn power the two sides
+  -- did not differ AT ALL until the steering command passed a third of full
+  -- deflection -- so a logged cruise flicked between no correction and two
+  -- levels of one, with nothing available in between, and wandered left and
+  -- right the whole way.
+  --
+  -- Carrying the rounding error into the next pass makes the AVERAGE level the
+  -- level asked for. The loop runs at 2 Hz and the ship answers over seconds,
+  -- so it feels the average.
+  local function average(throttle, passes)
+    local carry, total = 0, 0
+    local levels = {}
+    for _ = 1, passes do
+      local level
+      level, carry = autopilotLib.level(throttle, carry)
+      total = total + level
+      levels[level] = true
+    end
+    local distinct = 0
+    for _ in pairs(levels) do distinct = distinct + 1 end
+    return total / passes, distinct
+  end
+
+  -- 0.5 is 7.5 levels: it has to come out as sevens and eights, averaging 7.5.
+  local mean, distinct = average(0.5, 40)
+  assert(math.abs(mean - 7.5) < 0.1, "half throttle averages 7.5, got " .. mean)
+  assert(distinct == 2, "using the two levels either side of it, got " .. distinct)
+
+  -- A tenth of a level still gets through, which is the whole point: without
+  -- the carry this rounds to the same number every single time.
+  local fine = average(9.1 / 15, 100)
+  assert(math.abs(fine - 9.1) < 0.05, "a tenth of a level lands, got " .. fine)
+  assert(autopilotLib.level(9.1 / 15) == 9,
+    "where a single rounding of it cannot")
+
+  -- Steady values stay steady: the carry must not wander off on its own.
+  local exact, exactDistinct = average(9 / 15, 50)
+  assert(exact == 9 and exactDistinct == 1,
+    "a whole level does not dither, got " .. exact)
+
+  -- Nor may the carry wind up at either end of the range.
+  local carry = 0
+  for _ = 1, 200 do
+    local level
+    level, carry = autopilotLib.level(1.0, carry)
+    assert(level == 15, "full is full, got " .. level)
+    assert(math.abs(carry) <= 0.5, "and the carry stays bounded, got " .. carry)
+  end
+end)
+
+check("it can still steer at full cruise", function()
+  -- The other half of the same bug. At cruise 100% both sides came out at the
+  -- top of the range -- 0.992 and 0.987, which are both 15 -- so a commanded
+  -- correction reached the thrusters as no difference at all. It happened
+  -- three times in one short logged flight.
+  local function fly(cruise, steerFor)
+    local carryL, carryR = 0, 0
+    local previous = { left = 0, right = 0 }
+    local difference, result = 0, nil
+    -- Long enough for the slew limit to settle and the dither to average.
+    for _ = 1, 60 do
+      result = autopilotLib.step({
+        engaged = true, distance = 5000, bearing = steerFor, course = 0,
+        turnRate = 0, moving = true, speed = 17, steering = true, probing = 0,
+        previous = previous,
+        cfg = { cruise = cruise, turnRate = 6, turnPower = 0.2, lead = 8,
+                range = false, slowWithin = 200 },
+      })
+      previous = { left = result.left, right = result.right }
+      local levelL, levelR
+      levelL, carryL = autopilotLib.level(result.left, carryL)
+      levelR, carryR = autopilotLib.level(result.right, carryR)
+      difference = difference + (levelL - levelR)
+    end
+    return difference / 60, result
+  end
+
+  -- The operator's exact settings, and a ten degree error to correct.
+  local levels, result = fly(1.0, 10)
+  assert(result.left <= 1 and result.right <= 1, "both sides are legal throttles")
+  assert(levels > 0.2,
+    "a correction at full cruise reaches the thrusters, got "
+      .. levels .. " levels of difference on average")
+
+  -- Half throttle has room to spare and must be at least as good.
+  local half = fly(0.6, 10)
+  assert(half > 0.2, "and so does one at half cruise, got " .. half)
+
+  -- The headroom rule: the faster side is never clipped against the ceiling,
+  -- because a difference that cannot be expressed is not a correction.
+  for _, cruise in ipairs({ 0.6, 0.9, 1.0 }) do
+    for _, err in ipairs({ 3, 10, 45, 120 }) do
+      local _, last = fly(cruise, err)
+      assert(last.left < 1.0001 and last.right >= 0,
+        ("cruise %s err %s: %s/%s"):format(cruise, err, last.left, last.right))
+    end
+  end
+end)
+
 check("a throttle becomes a redstone level", function()
   assert(autopilotLib.level(0) == 0, "off is off")
   assert(autopilotLib.level(1) == 15, "full is fifteen")
@@ -3235,10 +3352,12 @@ check("the autopilot flies the ship at the destination", function()
   for _ = 1, 12 do result = flightModule.control(app, CLOCK, 0.5) end
 
   assert(result.phase == "steer", "steering, got " .. result.phase)
-  -- What reaches the relay is a redstone level, not the throttle.
-  assert(WRITTEN["left"] == autopilotLib.level(result.left),
+  -- What reaches the relay is a redstone level, not the throttle -- and it is
+  -- dithered, so it is whatever the module recorded rather than a fresh
+  -- rounding of the same number.
+  assert(WRITTEN["left"] == app.autopilot.leftLevel,
     "the left side carries its level, got " .. tostring(WRITTEN["left"]))
-  assert(WRITTEN["right"] == autopilotLib.level(result.right),
+  assert(WRITTEN["right"] == app.autopilot.rightLevel,
     "and the right one, got " .. tostring(WRITTEN["right"]))
   assert(WRITTEN["left"] ~= WRITTEN["right"],
     "with a difference between them to turn on: "

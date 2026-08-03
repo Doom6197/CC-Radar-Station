@@ -53,11 +53,20 @@
 --   cruise. It used to be scaled by it, so turning the cruise throttle up
 --   turned the steering gain up with it -- two unrelated things on one knob.
 --
---   Around that, three softeners. A DEADBAND, because a fix a second apart
---   cannot resolve five degrees and chasing it just twitches the ship. A TURN
---   BRAKE, because a vessel at full ahead in the wrong direction is going the
---   wrong way faster. And a SLEW LIMIT, so the outputs walk to their new
---   values instead of slamming, which a heavy contraption cannot follow.
+--   Around that, three softeners. A DEADBAND, subtracted from the error
+--   rather than zeroing it, so nothing steps as it is crossed. A TURN BRAKE,
+--   because a vessel at full ahead in the wrong direction is going the wrong
+--   way faster. And a SLEW LIMIT, so the outputs walk to their new values
+--   instead of slamming, which a heavy contraption cannot follow.
+--
+--   And the output is DITHERED. Sixteen redstone levels is a very coarse
+--   actuator: at 20% turn power the two sides did not differ at all until the
+--   steering command passed a third of full deflection, so a logged cruise
+--   flicked between no correction and two levels of one, with nothing in
+--   between, and drifted left and right the whole way. Carrying the rounding
+--   error into the next pass makes the AVERAGE level the level asked for, and
+--   the ship -- which answers over seconds, not half-seconds -- feels the
+--   average. See level().
 --
 -- No peripheral is touched in here. This file decides; radar/modules/flight.lua
 -- reads the position, writes the outputs and owns the settings.
@@ -77,8 +86,16 @@ autopilot.PROBE_SECONDS = 8
 -- zero rather than holding the last command indefinitely.
 autopilot.STALE_SECONDS = 5
 
--- Errors smaller than this are not steered for.
-autopilot.DEADBAND_DEGREES = 5
+-- Errors smaller than this are not steered for, and it is taken OFF the error
+-- rather than zeroing it, so nothing steps as it is crossed. That means the
+-- ship settles this far off rather than exactly on, which is the price.
+--
+-- Small, because it no longer has to hide a coarse actuator: it was five
+-- degrees when one redstone level was the smallest correction that existed,
+-- and dithering has since made a fraction of a level possible. At cruise a
+-- ship covers fifty blocks in one course window, so two degrees is a couple of
+-- blocks of sideways movement -- comfortably measurable, and not noise.
+autopilot.DEADBAND_DEGREES = 2
 
 -- How far the ship has to actually be moving before its course means
 -- anything. radar/flight.lua will report one from 0.15 blocks a second, which
@@ -151,12 +168,34 @@ autopilot.MAX_LEVEL = 15
 --- Anything above zero comes out as at least 1. Rounding a real command down
 --- to "off" would make a thruster that is meant to be idling indistinguishable
 --- from one that has been cut, and only one of those is a decision.
+---
+--- DITHERED. Sixteen levels is a very coarse actuator for holding a heading:
+--- one level is 6.7% of full thrust, so at Turn power 20% the steering command
+--- had to pass 0.33 before the two sides differed at ALL. A logged cruise sat
+--- either side of exactly that threshold for its whole length, flicking
+--- between no correction and two levels of one with nothing in between -- and
+--- three times the two sides both rounded to 15, so a correction was commanded
+--- and the thrusters got nothing.
+---
+--- So the rounding error is carried into the next call. Over a few passes the
+--- AVERAGE level is the level asked for: 7.5 comes out as 8, 7, 8, 7. The
+--- control loop runs at 2 Hz and the ship answers over seconds, so it filters
+--- the dither out and sees the average -- which is the resolution the loop
+--- needed and the wire could not carry.
+---@param carry number|nil the rounding error left over from the last call
 ---@return number level 0..15
-function autopilot.level(throttle)
+---@return number carry to hand back in next time
+function autopilot.level(throttle, carry)
   throttle = tonumber(throttle) or 0
-  if throttle <= 0 then return 0 end
-  local level = floor(util.clamp(throttle, 0, 1) * autopilot.MAX_LEVEL + 0.5)
-  return math.max(1, math.min(autopilot.MAX_LEVEL, level))
+  if throttle <= 0 then return 0, 0 end
+
+  local exact = util.clamp(throttle, 0, 1) * autopilot.MAX_LEVEL
+    + (tonumber(carry) or 0)
+  local level = math.max(1, math.min(autopilot.MAX_LEVEL, floor(exact + 0.5)))
+
+  -- Bounded, or a throttle held at either end would wind the carry up until it
+  -- fired a spurious level long after the fact.
+  return level, util.clamp(exact - level, -0.5, 0.5)
 end
 
 --- Walks a value toward a target by at most `limit`.
@@ -253,8 +292,15 @@ function autopilot.step(s)
   -- second, so it is not allowed to yaw at 26 deg/s.
   local lead = tonumber(cfg.lead) or autopilot.LEAD_SECONDS
   if lead <= 0 then lead = 0.5 end
-  local wanted = (abs(err) <= autopilot.DEADBAND_DEGREES) and 0
-    or util.clamp(err / lead, -turnRate, turnRate)
+  -- The deadband SHRINKS the error rather than zeroing it, so there is no step
+  -- as it is crossed. Zeroing it made `wanted` jump from 0.6 deg/s to nothing
+  -- as the error passed five degrees -- and at cruise the ship sits on that
+  -- boundary, so it was being kicked every time it drifted across.
+  local slack = abs(err) - autopilot.DEADBAND_DEGREES
+  local wanted = 0
+  if slack > 0 then
+    wanted = util.clamp((err > 0 and slack or -slack) / lead, -turnRate, turnRate)
+  end
 
   -- INNER LOOP: the thrust difference comes from the gap between the rate
   -- asked for and the rate being made. As the turn builds this closes on its
@@ -263,13 +309,20 @@ function autopilot.step(s)
   -- the heading error to change sign.
   local steer = util.clamp((wanted - rate) / autopilot.RATE_FULL, -1, 1)
 
+  -- The difference is capped on its own account and NOT scaled by cruise, so
+  -- the throttle and the steering gain are two separate settings.
+  local difference = steer * turnPower
+
   -- Ease off near the destination, and while turning hard.
   local approach = util.clamp(s.distance / slowWithin, autopilot.APPROACH_FLOOR, 1)
   local base = cruise * approach * (1 - autopilot.TURN_BRAKE * abs(steer))
 
-  -- The difference is capped on its own account and NOT scaled by cruise, so
-  -- the throttle and the steering gain are two separate settings.
-  local difference = steer * turnPower
+  -- Leave room for the difference. At full cruise there is none: both sides
+  -- come out at the top of the range, the faster one is clipped against it,
+  -- and the ship has no steering at exactly the throttle setting everybody
+  -- reaches for. Dropping the base by the difference costs a little speed and
+  -- buys back the ability to hold a heading.
+  base = math.min(base, 1 - abs(difference))
 
   return {
     left  = slew(previous.left,  util.clamp(base + difference, 0, 1), autopilot.SLEW),
