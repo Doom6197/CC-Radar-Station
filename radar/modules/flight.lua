@@ -50,6 +50,7 @@ view.defaults = {
     arrive     = 25,      -- blocks from the destination it stops at
     slowWithin = 120,     -- blocks out that it starts easing off
     range      = 1000,    -- blocks; further than this it shuts itself off
+    record     = false,   -- write a telemetry row per pass, for tuning
   },
 }
 
@@ -82,6 +83,7 @@ function view.sanitise(cfg)
   auto.cruise     = util.clamp(tonumber(auto.cruise) or 0.6, 0.05, 1)
   auto.turnFull   = util.clamp(floor(tonumber(auto.turnFull) or 90), 10, 180)
   auto.lead       = util.clamp(tonumber(auto.lead) or 2.5, 0, 8)
+  auto.record     = auto.record == true
   auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 500)
   auto.slowWithin = util.clamp(floor(tonumber(auto.slowWithin) or 120),
     auto.arrive, 2000)
@@ -392,11 +394,79 @@ function view.setAutopilot(app, on)
   state.phase, state.message = "probe", autopilot.phaseLabel("probe")
   state.probing, state.faulted = 0, nil
   state.left, state.right = 0, 0
+  state.recorded = nil            -- each engagement records its own file
   return true, "Autopilot engaged"
 end
 
 function view.toggleAutopilot(app)
   return view.setAutopilot(app, not app.autopilot.engaged)
+end
+
+-- ------------------------------------------------------------- telemetry ---
+-- One line per control pass, so how the ship actually behaved can be read
+-- back as numbers rather than guessed at from watching it. An overshoot
+-- because the lead is too short, one because the turn response is too sharp,
+-- and one because the reported course lags harder than expected all look
+-- identical from the outside and want three different fixes.
+
+view.RECORD_FILE = "radar_flight.csv"
+
+-- Written at two rows a second, so this is about seventeen minutes. Bounded
+-- on purpose: a recorder left on by accident must not quietly eat the disk.
+view.RECORD_LIMIT = 2000
+
+view.RECORD_COLUMNS = {
+  "t", "phase", "dist", "bearing", "course", "err", "rate", "proj",
+  "steer", "left", "right", "lvlL", "lvlR", "speed",
+}
+
+--- A number for the file: fixed precision, or empty when there is none.
+local function csv(value, decimals)
+  if type(value) ~= "number" or value ~= value then return "" end
+  return ("%." .. (decimals or 1) .. "f"):format(value)
+end
+
+--- Appends one row, starting a fresh file at the beginning of each recording.
+---
+--- Each engagement gets its own file rather than appending forever: "fly one
+--- turn and send me the file" is the whole point of it, and a file holding
+--- six runs needs picking apart before it can answer anything.
+---@return boolean written
+function view.record(app, now, result, distance, bearing)
+  local state = app.autopilot
+  if not app.cfg.autopilot.record then
+    state.recorded = nil                  -- next time recording starts, it starts
+    return false
+  end
+  if (state.recorded or 0) >= view.RECORD_LIMIT then return false end
+
+  local model = app.flight
+  local fresh = state.recorded == nil
+
+  local ok, handle = pcall(fs.open, view.RECORD_FILE, fresh and "w" or "a")
+  if not ok or not handle then return false end
+
+  if fresh then handle.write(table.concat(view.RECORD_COLUMNS, ",") .. "\n") end
+  handle.write(table.concat({
+    csv(now, 2),
+    tostring(result.phase),
+    csv(distance),
+    csv(bearing),
+    csv(model.course),
+    csv(result.error),
+    csv(result.turnRate, 2),
+    csv(result.projected),
+    csv(result.steer, 3),
+    csv(result.left, 3),
+    csv(result.right, 3),
+    csv(state.leftLevel, 0),
+    csv(state.rightLevel, 0),
+    csv(model.speed, 2),
+  }, ",") .. "\n")
+  handle.close()
+
+  state.recorded = (state.recorded or 0) + 1
+  return true
 end
 
 --- One pass of the control loop: read the destination, decide, write.
@@ -437,6 +507,9 @@ function view.control(app, now, elapsed)
 
   state.phase, state.message, state.error = result.phase, result.message, result.error
   view.writeOutputs(app, result.left, result.right)
+
+  -- After the write, so the levels recorded are the ones that went out.
+  view.record(app, now, result, distance, bearing)
 
   -- A fault is a give-up, not a pause: say so once, on the alert log and every
   -- channel the operator has switched on, and stop flying.
@@ -1227,6 +1300,41 @@ function view.autopilotSettings(ctx)
   nudge("right", "right thrusters")
 
   ctx.note("The ship will move. Use them in clear air.", true)
+  ctx.spacer()
+
+  -- telemetry ------------------------------------------------------------
+  ctx.heading("TELEMETRY")
+
+  ctx.row("Record", function()
+    if not auto.record then return "off" end
+    local rows = app.autopilot.recorded
+    if not rows then return "ON - waiting to fly" end
+    if rows >= view.RECORD_LIMIT then
+      return ("ON - full at %d rows"):format(rows)
+    end
+    return ("ON - %d rows"):format(rows)
+  end, function()
+    auto.record = not auto.record
+    app.autopilot.recorded = nil
+    app:saveConfig()
+    root:toast(auto.record and ("Recording to " .. view.RECORD_FILE)
+      or "Recording off", "info")
+  end, ctx.onOffColor(function() return auto.record end))
+
+  ctx.note("Writes one line per control pass to " .. view.RECORD_FILE
+    .. " while the autopilot is flying: the course, the error, the turn rate "
+    .. "and both thruster levels. Each engagement starts a new file.", true)
+  ctx.note("An overshoot from too little damping and one from too sharp a "
+    .. "turn response look identical from the cockpit and want opposite "
+    .. "fixes. This is how you tell them apart.")
+  ctx.note(("It stops at %d rows, so it cannot fill the disk if it is left "
+    .. "on."):format(view.RECORD_LIMIT))
+
+  ctx.action("Clear the recording", function()
+    pcall(fs.delete, view.RECORD_FILE)
+    app.autopilot.recorded = nil
+    root:toast("Cleared " .. view.RECORD_FILE, "info")
+  end)
   ctx.spacer()
 end
 

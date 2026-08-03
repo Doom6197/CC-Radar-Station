@@ -24,12 +24,16 @@ end
 local FILES = {}
 fs = {
   exists = function(p) return FILES[p] ~= nil end,
+  delete = function(p) FILES[p] = nil end,
   open = function(p, mode)
     if mode:sub(1,1) == "r" then
       if not FILES[p] then return nil end
       return { readAll = function() return FILES[p] end, close = function() end }
     end
-    local buf = {}
+    -- "a" appends and "w" truncates, as in game. Getting this wrong would
+    -- make the telemetry recorder look like it worked while it overwrote
+    -- every row with the next one.
+    local buf = (mode:sub(1, 1) == "a" and FILES[p]) and { FILES[p] } or {}
     return {
       write = function(s) buf[#buf+1] = s end,
       close = function() FILES[p] = table.concat(buf) end,
@@ -3223,6 +3227,89 @@ check("the autopilot flies the ship at the destination", function()
   assert(app.autopilot.engaged, "while staying engaged")
 
   flightModule.setAutopilot(app, false)
+end)
+
+check("the autopilot records what it did, one row per pass", function()
+  local flightModule = modules.byId("flight")
+  local auto = app.cfg.autopilot
+  auto.left, auto.right = "left", "right"
+  auto.range, auto.record = false, false
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
+  app.cfg.flightTarget = "home"
+  app.lastScanAt = CLOCK
+
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 - i * 10, y = 70, z = 200 - i * 4,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
+  FILES[flightModule.RECORD_FILE] = nil
+
+  -- Off by default, and off means nothing is written at all.
+  assert(flightModule.setAutopilot(app, true), "engaged")
+  flightModule.control(app, CLOCK, 0.5)
+  assert(FILES[flightModule.RECORD_FILE] == nil, "recording off writes nothing")
+
+  -- On: a header and one row per pass, appended rather than overwritten.
+  auto.record = true
+  flightModule.setAutopilot(app, false)
+  assert(flightModule.setAutopilot(app, true), "re-engaged")
+  for step = 1, 5 do flightModule.control(app, CLOCK + step * 0.5, 0.5) end
+
+  local text = FILES[flightModule.RECORD_FILE]
+  assert(text, "the file was written")
+  local lines = {}
+  for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+  assert(#lines == 6, "a header and five rows, got " .. #lines)
+  assert(lines[1] == table.concat(flightModule.RECORD_COLUMNS, ","),
+    "with the header first, got " .. lines[1])
+  assert(app.autopilot.recorded == 5, "and it counts them, got "
+    .. tostring(app.autopilot.recorded))
+
+  -- Every row has a value in every column.
+  local wanted = #flightModule.RECORD_COLUMNS
+  for index = 2, #lines do
+    local fields = 1
+    for _ in lines[index]:gmatch(",") do fields = fields + 1 end
+    assert(fields == wanted,
+      ("row %d has %d fields, wanted %d: %s"):format(index, fields, wanted,
+        lines[index]))
+  end
+
+  -- The numbers are the ones the law and the relay actually used.
+  local last = {}
+  for field in (lines[#lines] .. ","):gmatch("(.-),") do last[#last + 1] = field end
+  local column = {}
+  for index, name in ipairs(flightModule.RECORD_COLUMNS) do column[name] = last[index] end
+  assert(column.phase == app.autopilot.phase,
+    "the phase is the one it was in, got " .. column.phase)
+  assert(tonumber(column.lvlL) == WRITTEN["left"],
+    "the left level is the one on the relay, got " .. tostring(column.lvlL))
+  assert(tonumber(column.lvlR) == WRITTEN["right"], "and the right one")
+  assert(tonumber(column.course) and tonumber(column.err),
+    "with a course and an error to read them against")
+
+  -- Each engagement starts a fresh file, so one run is one file.
+  flightModule.setAutopilot(app, false)
+  assert(flightModule.setAutopilot(app, true), "engaged again")
+  flightModule.control(app, CLOCK, 0.5)
+  local again = {}
+  for line in FILES[flightModule.RECORD_FILE]:gmatch("[^\n]+") do
+    again[#again + 1] = line
+  end
+  assert(#again == 2, "a header and one row, not appended to the last run, got "
+    .. #again)
+
+  -- And it stops rather than filling the disk.
+  app.autopilot.recorded = flightModule.RECORD_LIMIT
+  local before = FILES[flightModule.RECORD_FILE]
+  flightModule.control(app, CLOCK, 0.5)
+  assert(FILES[flightModule.RECORD_FILE] == before, "it stops at the limit")
+
+  flightModule.setAutopilot(app, false)
+  auto.record = false
+  FILES[flightModule.RECORD_FILE] = nil
 end)
 
 check("a fault stops the ship and goes in the alert log", function()

@@ -163,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.10                                    |  SETTINGS   v8.10
+ SETTINGS   v8.11                                    |  SETTINGS   v8.11
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -593,10 +593,56 @@ Under **Settings → Pages → Flight → Autopilot**:
 | **Ease off within** | where it starts throttling back so it stops rather than sailing past |
 | **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
 | **Test left / right thrusters** | a one-second pulse on one side at cruise level, to check the wiring without engaging |
+| **Record** | write a telemetry row per control pass — see below |
 
 **Shut off beyond** is checked on **every pass**, not only when engaging: a
 contact who logs back in on the far side of the world moves the destination,
 not the ship.
+
+#### Telemetry
+
+An overshoot because the **damping is too low**, one because the **turn
+response is too sharp**, and one because the reported course **lags harder than
+expected** all look identical from the cockpit and want three different fixes.
+*Record* writes one line per control pass to `radar_flight.csv` so they can be
+told apart:
+
+```
+t,phase,dist,bearing,course,err,rate,proj,steer,left,right,lvlL,lvlR,speed
+104.00,steer,2981.5,359.2,56.7,-57.5,-12.87,-25.3,-0.281,0.296,0.634,4,10,11.51
+104.50,steer,2975.7,359.2,45.0,-45.8,-16.05, -5.6,-0.063,0.532,0.608,8, 9,11.38
+105.00,steer,2969.7,359.2,33.1,-33.9,-18.35, 12.0, 0.133,0.616,0.456,9, 7,11.31
+105.50,steer,2963.7,359.2,22.2,-23.0,-19.38, 25.4, 0.282,0.634,0.295,10,4,11.34
+```
+
+That is the damping working, in four lines: the error is still 45° at `104.50`
+but the ship is coming round at 16°/s, so `proj` has already crossed zero,
+`steer` reverses at `105.00`, and the thrusters swap over into counter-thrust
+long before the nose reaches the bearing.
+
+| Column | |
+|---|---|
+| `t` | `os.clock()` seconds |
+| `phase` | `probe`, `steer`, `arrived`, `stalled`, … |
+| `dist` `bearing` | to the destination |
+| `course` | the course being made — what it actually steers on |
+| `err` | signed angle from `course` to `bearing`; **positive means turn right** |
+| `rate` | degrees per second the ship is coming round |
+| `proj` | `err` minus `lead × rate` — the projected error it steers on |
+| `steer` | the deflection asked for, −1 to 1, before the softeners |
+| `left` `right` | throttle after the turn brake, approach taper and slew limit |
+| `lvlL` `lvlR` | what actually went out to the relay, 0–15 |
+| `speed` | blocks per second over the ground |
+
+**Each engagement starts a fresh file**, so one run is one file. It stops at
+2000 rows — about seventeen minutes — so a recorder left on cannot fill the
+disk. *Clear the recording* deletes it.
+
+Getting it off the computer:
+
+```
+pastebin put radar_flight.csv
+```
 
 #### What it will not do
 
@@ -1187,6 +1233,12 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.11 - autopilot telemetry.** A *Record* toggle writes one line per control
+pass to `radar_flight.csv`: course, error, turn rate, projected error, the
+deflection asked for and the two levels that actually reached the relay. Tuning
+a control loop from watching the ship cannot separate too little damping from
+too sharp a turn response; this can.
 
 **v8.10 - the autopilot stops hunting, and a typed waypoint sticks.** Steering
 on the course error alone against a smoothed, three-second-averaged course made

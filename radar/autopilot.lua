@@ -233,6 +233,10 @@ function autopilot.step(s)
     error = err,
     projected = projected,
     turnRate = rate,
+    -- The deflection actually asked for, -1 to 1. Reported so the telemetry
+    -- can show what the law decided as well as what came out of it after the
+    -- turn brake, the approach taper and the slew limit had their say.
+    steer = steer,
     fault = false,
   }
 end
