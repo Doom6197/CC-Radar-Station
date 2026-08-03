@@ -1730,7 +1730,7 @@ check("the autopilot is never given a heading to steer by", function()
   -- control law is not allowed to see it. Passing one must change nothing.
   local base = {
     engaged = true, distance = 500, bearing = 90, course = 90,
-    moving = true, probing = 0, cfg = { cruise = 0.6 },
+    moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
   }
   local straight = settle(base)
 
@@ -1771,16 +1771,33 @@ check("with no course yet it probes, then gives up if nothing moves", function()
   assert(stalled.left == 0 and stalled.right == 0, "and stops pushing")
   assert(stalled.fault, "and says so loudly")
 
-  -- A course appearing is what ends the probe.
+  -- A course appearing is not enough on its own: it has to be moving fast
+  -- enough for that course to mean anything. At 0.19 b/s a real flight logged
+  -- 90, then 45, then 341 degrees in two seconds, and steering on it sent the
+  -- ship 150 degrees the wrong way.
   input.probing, input.course, input.moving = 3, 90, true
-  assert(autopilotLib.step(input).phase == "steer", "movement ends the probe")
+  input.speed = 0.2
+  assert(autopilotLib.step(input).phase == "probe",
+    "a course at a crawl is noise, not a heading")
+
+  input.speed = autopilotLib.COURSE_SPEED + 0.1
+  assert(autopilotLib.step(input).phase == "steer", "real movement ends the probe")
+
+  -- And once steering, it takes a bigger drop to give it up -- a hard turn
+  -- slows the ship on purpose, and bouncing in and out of the probe mid-turn
+  -- would leave it going straight at exactly the wrong moment.
+  input.speed, input.steering = 0.7, true
+  assert(autopilotLib.step(input).phase == "steer", "hysteresis holds the turn")
+  input.speed = autopilotLib.COURSE_SPEED_LOW - 0.1
+  assert(autopilotLib.step(input).phase == "probe", "but it does let go eventually")
+  input.steering = nil
 end)
 
 check("more thrust on the left swings the nose right", function()
   local function steer(course, bearing)
     return settle({
       engaged = true, distance = 500, bearing = bearing, course = course,
-      moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+      moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
     })
   end
 
@@ -1826,14 +1843,14 @@ check("small errors are not chased", function()
   -- twitches the ship from side to side.
   local nudge = settle({
     engaged = true, distance = 500, bearing = 93, course = 90,
-    moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+    moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
   })
   assert(nudge.left == nudge.right,
     "three degrees off is straight ahead, got " .. nudge.left .. "/" .. nudge.right)
 
   local real = settle({
     engaged = true, distance = 500, bearing = 110, course = 90,
-    moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+    moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
   })
   assert(real.left ~= real.right, "twenty degrees off is steered for")
 end)
@@ -1841,7 +1858,7 @@ end)
 check("the throttle walks rather than slamming", function()
   local input = {
     engaged = true, distance = 500, bearing = 90, course = 90,
-    moving = true, probing = 0, cfg = { cruise = 1.0 },
+    moving = true, speed = 12, probing = 0, cfg = { cruise = 1.0 },
     previous = { left = 0, right = 0 },
   }
   local first = autopilotLib.step(input)
@@ -1860,7 +1877,7 @@ check("it eases off on the approach and stops on arrival", function()
   local function at(distance)
     return settle({
       engaged = true, distance = distance, bearing = 90, course = 90,
-      moving = true, probing = 0,
+      moving = true, speed = 12, probing = 0,
       cfg = { cruise = 1.0, arrive = 25, slowWithin = 200 },
     })
   end
@@ -1882,7 +1899,7 @@ check("the autopilot shuts itself off beyond its range limit", function()
   local function at(distance, range)
     return autopilotLib.step({
       engaged = true, distance = distance, bearing = 90, course = 90,
-      moving = true, probing = 0,
+      moving = true, speed = 12, probing = 0,
       cfg = { cruise = 0.6, range = range, arrive = 25 },
     })
   end
@@ -1958,9 +1975,9 @@ check("damping catches the turn before the ship swings through it", function()
   local function steer(err, turnRate, lead)
     return autopilotLib.step({
       engaged = true, distance = 500, bearing = err, course = 0,
-      turnRate = turnRate, moving = true, probing = 0,
+      turnRate = turnRate, moving = true, speed = 12, speed = 12, probing = 0,
       previous = { left = 0.6, right = 0.6 },
-      cfg = { cruise = 0.6, turnFull = 90, lead = lead, range = false },
+      cfg = { cruise = 0.6, turnRate = 8, turnPower = 0.55, lead = lead, range = false },
     })
   end
 
@@ -1969,19 +1986,19 @@ check("damping catches the turn before the ship swings through it", function()
   assert(cold.left > cold.right, "it starts the turn, got "
     .. cold.left .. "/" .. cold.right)
 
-  -- Same error, but already coming round at fifteen degrees a second. In 2.5
-  -- seconds that is 37 of the 40, so the turn is as good as made: coast.
-  local settling = steer(40, 15, 2.5)
-  assert(settling.left < cold.left,
-    "already turning means less push, got " .. settling.left .. " vs " .. cold.left)
-  assert(settling.left == settling.right,
-    "and inside the deadband it just holds, got "
-      .. settling.left .. "/" .. settling.right)
+  assert(cold.wanted > 0, "asking for a right turn, got " .. cold.wanted)
 
-  -- Coming round faster than the error can absorb: push the other way.
-  local fast = steer(40, 25, 2.5)
-  assert(fast.projected < 0, "the projected error has gone past zero, got "
-    .. fast.projected)
+  -- Already coming round at exactly the rate asked for: stop pushing and let
+  -- it carry round. This is the inner loop closing on its own.
+  local holding = steer(40, cold.wanted, 4)
+  assert(math.abs(holding.left - holding.right) < 0.001,
+    "at the rate asked for it holds, got "
+      .. holding.left .. "/" .. holding.right)
+
+  -- Coming round FASTER than asked: push the other way, without waiting for
+  -- the heading error to change sign.
+  local fast = steer(40, 25, 4)
+  assert(fast.steer < 0, "the rate error has gone negative, got " .. fast.steer)
   assert(fast.left < fast.right,
     "so it is counter-thrust, got " .. fast.left .. "/" .. fast.right)
 
@@ -1991,76 +2008,88 @@ check("damping catches the turn before the ship swings through it", function()
     "a ship swinging right of its target is pulled back, got "
       .. swinging.left .. "/" .. swinging.right)
 
-  -- With damping off it is the old behaviour: the rate is ignored entirely.
-  local undamped = steer(40, 15, 0)
-  assert(math.abs(undamped.left - cold.left) < 0.001,
-    "damping off steers on the error alone, got " .. undamped.left)
+  -- Turning in over longer asks for a gentler rate, and so a smaller push.
+  local wide = steer(40, 0, 12)
+  assert(wide.wanted < cold.wanted,
+    "a longer turn-in asks for less rate, got " .. wide.wanted
+      .. " vs " .. cold.wanted)
+  assert(wide.left - wide.right < cold.left - cold.right,
+    "and puts less between the two sides")
 end)
 
 check("the autopilot settles on a heading instead of hunting", function()
-  -- A closed loop: the law drives a ship, the ship's turn responds to the
-  -- thrust difference with momentum, and the course the law reads back lags
-  -- the way a three-second average does. That lag is what made the first
-  -- version swing ninety degrees past every turn and hunt left and right.
+  -- A closed loop, with the ship fitted to a REAL flight log: full thrust
+  -- difference gives 26 deg/s of yaw, reached in about a second and a half,
+  -- cruising at 5 blocks a second, and the course the law reads back lagging
+  -- the way a three-second average does.
   --
-  -- Nothing else in the suite can catch that -- a check on one step cannot
-  -- tell a stable controller from an unstable one.
-  local function fly(lead, turnFull)
-    local DT = 0.5
-    local YAW_GAIN, YAW_DRAG, LAG = 40, 0.6, 0.25
-
+  -- That ship turns far faster than a once-a-second position fix can see, and
+  -- no amount of tuning a DEFLECTION controller makes it stable. Capping the
+  -- RATE is what does. Nothing else in the suite can show that: a check on a
+  -- single step cannot tell a stable controller from an unstable one.
+  local function fly(cfg)
+    local DT, YAW_GAIN, YAW_DRAG, LAG = 0.5, 17.3, 0.667, 0.25
     local course, rate, reported, reportedRate = 90, 0, 90, 0
-    local previous = { left = 0, right = 0 }
-    local worst, crossings, lastSign = 0, 0, nil
+    local previous, steering = { left = 0, right = 0 }, false
+    local settle, crossings, lastSign = 0, 0, nil
 
-    for step = 1, 240 do
+    for step = 1, 200 do
       local result = autopilotLib.step({
         engaged = true, distance = 5000, bearing = 0,
-        course = reported, turnRate = reportedRate,
-        moving = true, probing = 0, previous = previous,
-        cfg = { cruise = 0.6, turnFull = turnFull, lead = lead,
-                range = false, slowWithin = 200 },
+        course = reported, turnRate = reportedRate, speed = 5,
+        moving = true, steering = steering, probing = 0, previous = previous,
+        cfg = cfg,
       })
       previous = { left = result.left, right = result.right }
+      steering = result.phase == "steer"
 
-      -- The ship: thrust difference makes yaw acceleration, with drag.
-      rate = rate + (result.left - result.right) * YAW_GAIN * DT
-      rate = rate - rate * YAW_DRAG * DT
+      rate = rate + (YAW_GAIN * (result.left - result.right) - YAW_DRAG * rate) * DT
       course = (course + rate * DT) % 360
-
-      -- What the law gets to see, a smoothed and therefore late version.
       reported = util.approachAngle(reported, course, LAG)
       reportedRate = reportedRate + (rate - reportedRate) * LAG
 
-      -- What matters is the TRANSIENT: how many times it swings through the
-      -- heading before it stops, and how long that takes. Judging the tail
-      -- alone would call both of these settled, which is exactly the mistake
-      -- that let the hunting ship ship.
+      -- The TRANSIENT is what matters: how long until it is on the heading,
+      -- and how many times it swings through on the way. Judging the tail
+      -- alone would call a hunting ship settled, which is the mistake that
+      -- let one ship.
       local err = util.angleDelta(course, 0)
-      local sign = err > 2 and 1 or (err < -2 and -1 or 0)
+      local sign = err > 5 and 1 or (err < -5 and -1 or 0)
       if sign ~= 0 and lastSign and sign ~= lastSign then
         crossings = crossings + 1
       end
       if sign ~= 0 then lastSign = sign end
-      if math.abs(err) >= 5 then worst = step end     -- last step still off
+      if math.abs(err) >= 5 then settle = step end
     end
-    return worst, crossings                          -- settle step, reversals
+    return settle * DT, crossings
   end
 
-  local settled, crossings = fly(2.5, 90)
-  assert(settled <= 40,
-    "it is on the heading within twenty seconds, took " .. (settled * 0.5) .. "s")
-  assert(crossings <= 1,
+  local DEFAULTS = { cruise = 0.6, turnRate = 8, turnPower = 0.55, lead = 4,
+                     range = false, slowWithin = 200 }
+  local settled, crossings = fly(DEFAULTS)
+  assert(settled <= 25,
+    "it is on the heading inside half a minute, took " .. settled .. "s")
+  assert(crossings == 0,
     "arriving on it rather than swinging through, " .. crossings .. " reversals")
 
-  -- The same ship with the v8.9 gains is the bug that was reported: it swings
-  -- past the turn and hunts left and right for the best part of a minute.
-  local wasSettled, wasCrossings = fly(0, 60)
-  assert(wasCrossings > crossings,
-    "undamped keeps reversing: " .. wasCrossings .. " vs " .. crossings)
-  assert(wasSettled > settled * 2,
-    "and takes far longer to settle: " .. (wasSettled * 0.5) .. "s vs "
-      .. (settled * 0.5) .. "s")
+  -- Uncapped is the bug that was reported: a ship allowed to yaw at 45 deg/s
+  -- with the whole thrust difference behind it, hunting for as long as you
+  -- care to watch.
+  local loose, looseCrossings = fly({ cruise = 1.0, turnRate = 45,
+    turnPower = 1.0, lead = 0.5, range = false, slowWithin = 200 })
+  assert(looseCrossings > 5, "uncapped hunts: " .. looseCrossings .. " reversals")
+  assert(loose > settled * 3,
+    "and never settles: " .. loose .. "s vs " .. settled .. "s")
+
+  -- The throttle and the steering gain are separate settings now. They used to
+  -- be the same one -- the thrust difference was scaled by cruise -- so
+  -- turning the cruise up quietly turned the steering gain up with it.
+  local full = {}
+  for key, value in pairs(DEFAULTS) do full[key] = value end
+  full.cruise = 1.0
+  local fast, fastCrossings = fly(full)
+  assert(math.abs(fast - settled) <= 1 and fastCrossings == crossings,
+    "cruise does not change how it steers: " .. fast .. "s/" .. fastCrossings
+      .. " vs " .. settled .. "s/" .. crossings)
 end)
 
 check("a dead position feed cuts the thrusters", function()
@@ -2069,7 +2098,7 @@ check("a dead position feed cuts the thrusters", function()
   -- ship into the distance with nobody watching.
   local input = {
     engaged = true, distance = 500, bearing = 90, course = 90,
-    moving = true, probing = 0, cfg = { cruise = 0.6 },
+    moving = true, speed = 12, probing = 0, cfg = { cruise = 0.6 },
     sinceFix = 1,
   }
   assert(autopilotLib.step(input).phase == "steer", "a fresh fix flies")
@@ -2084,7 +2113,7 @@ check("a dead position feed cuts the thrusters", function()
   -- route: there is nowhere to steer to any more.
   local lost = autopilotLib.step({
     engaged = true, lost = true, distance = 500, bearing = 90, course = 90,
-    moving = true, probing = 0, cfg = {},
+    moving = true, speed = 12, probing = 0, cfg = {},
   })
   assert(lost.phase == "lost" and lost.left == 0, "a lost target stops it")
 
@@ -2102,8 +2131,8 @@ check("every output the law can produce is a legal throttle", function()
         for _, distance in ipairs({ 1, 26, 200, 5000 }) do
           local result = settle({
             engaged = true, distance = distance, bearing = 123, course = course,
-            moving = true, probing = 0,
-            cfg = { cruise = cruise, turnFull = turnFull, arrive = 25,
+            moving = true, speed = 12, probing = 0,
+            cfg = { cruise = cruise, turnRate = turnFull, turnPower = 0.55, arrive = 25,
                     slowWithin = 200, range = false },
           }, 20)
           for _, side in ipairs({ "left", "right" }) do

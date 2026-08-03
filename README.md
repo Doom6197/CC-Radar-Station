@@ -163,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.11                                    |  SETTINGS   v8.11
+ SETTINGS   v8.12                                    |  SETTINGS   v8.12
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -537,25 +537,43 @@ been cut, and only one of those is a decision.
 Sixteen levels is all redstone has, so a correction finer than about 7% of
 cruise cannot be expressed. That is what the 5° deadband is for anyway.
 
-**Steering on the error alone does not work here**, and v8.7 proved it: a
-course averaged over three seconds and then smoothed lags the ship badly, so
-the correction was still going in long after the nose was pointed the right
-way. It swung a good ninety degrees past every turn and hunted left and right.
+**It commands a turn rate, not a deflection.** Two loops:
 
-So it steers on **where the course will be**. The turn rate the ship is
-actually making, times a lead time in seconds, is subtracted from the error —
-and once the turn is developing fast enough to close the gap on its own, the
-command eases off and then reverses into counter-thrust *before* the error
-reaches zero. That is the difference between arriving on a heading and swinging
-through it. *Settings → … → Autopilot → Damping* sets the lead; `2.5s` by
-default, `Off` restores the old behaviour if you want to see it.
+| | |
+|---|---|
+| **outer** | the heading error picks a rate to ask for — `err ÷ turn-in` degrees a second — capped at **Turn rate** |
+| **inner** | the gap between that and the rate the ship is *actually* making sets the thrust difference |
+
+Steering the thrust difference straight off the heading error does not work
+here, and two versions of this proved it. A real airship logged **26°/s of yaw
+while moving 5 blocks a second** — a ten-block turn radius — against a position
+fix that arrives once a second and a course averaged over three. Nothing that
+commands deflection can control a vehicle that turns that much faster than it
+can be measured: it spent **60% of a flight at full one-sided thrust**,
+swinging 150° past every turn.
+
+Capping the *rate* fixes it at the root. The ship comes round at a speed the
+loop can see, the inner loop backs off as the rate builds, and full deflection
+becomes something that happens for a second at the start of a turn rather than
+the normal state of affairs. On that same ship, in simulation:
+
+```
+                settles    reversals
+capped (default)  18.5s        0
+uncapped         100.0s       19
+```
+
+The thrust difference is also capped by **Turn power**, and *independently of
+cruise* — it used to be scaled by it, so turning the throttle up turned the
+steering gain up with it.
 
 Around that, three softeners, because a position fix arrives about once a
 second:
 
 | | |
 |---|---|
-| **deadband** | projected errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
+| **deadband** | errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
+| **speed floor** | below 1 block a second the course is noise, not a heading, so it keeps probing. A real flight read `90°`, then `45°`, then `341°` in two seconds at 0.19 b/s, and the autopilot believed all three |
 | **turn brake** | up to 80% of cruise is given up at full deflection, because a vessel at full ahead in the wrong direction is going the wrong way faster |
 | **slew limit** | outputs walk to their new values rather than slamming, which a heavy contraption cannot follow anyway |
 
@@ -587,8 +605,9 @@ Under **Settings → Pages → Flight → Autopilot**:
 | **Left / Right thrusters** | which side of the relay each group is wired to |
 | **Swap left and right** | for when they are backwards |
 | **Cruise** | throttle in level flight |
-| **Turn response** | how hard it corrects — `Sharp` on a heavy ship will hunt |
-| **Damping** | how far ahead it looks at the turn rate. Turn it up if the ship swings past the turn, down if it gives up too early |
+| **Turn rate** | how fast it is *allowed* to come round. **This is the setting that stops overshooting** — turn it down until the ship stops hunting |
+| **Turn power** | the most thrust difference it will use to hold that rate |
+| **Turn in** | how long it aims to take to null the heading error; bigger is a wider, gentler turn |
 | **Arrive within** | how close is close enough |
 | **Ease off within** | where it starts throttling back so it stops rather than sailing past |
 | **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
@@ -628,7 +647,7 @@ long before the nose reaches the bearing.
 | `course` | the course being made — what it actually steers on |
 | `err` | signed angle from `course` to `bearing`; **positive means turn right** |
 | `rate` | degrees per second the ship is coming round |
-| `proj` | `err` minus `lead × rate` — the projected error it steers on |
+| `want` | the turn rate the outer loop is asking for, degrees a second |
 | `steer` | the deflection asked for, −1 to 1, before the softeners |
 | `left` `right` | throttle after the turn brake, approach taper and slew limit |
 | `lvlL` `lvlR` | what actually went out to the relay, 0–15 |
@@ -1233,6 +1252,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.12 - the autopilot commands a turn rate.** A logged flight showed a ship
+yawing at 26 deg/s while making 5 blocks a second, spending 60% of the time at
+full one-sided thrust and swinging 150 degrees past every turn. No deflection
+controller can fly that against a once-a-second fix, so it now asks for a turn
+RATE, capped, and closes an inner loop on the rate the ship is actually making.
+Three more fixes from the same log: it will not steer on a course read below a
+block a second (0.19 b/s was giving 90, 45 and 341 degrees in two seconds), the
+thrust difference is capped on its own account, and it is no longer scaled by
+cruise -- which had quietly made the throttle a steering gain as well.
 
 **v8.11 - autopilot telemetry.** A *Record* toggle writes one line per control
 pass to `radar_flight.csv`: course, error, turn rate, projected error, the

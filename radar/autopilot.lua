@@ -29,26 +29,35 @@
 --   control law never has to think in sixteenths, and the one place the
 --   quantisation happens is one function with its own tests.
 --
---   Steering on the error ALONE does not work here, and the first version of
---   this proved it: a course averaged over three seconds and then smoothed
---   lags the ship badly, so the correction was still going in long after the
---   nose was pointed the right way. The ship sailed a good ninety degrees past
---   the turn, corrected back, and hunted left and right without ever settling.
+--   It commands a TURN RATE, not a deflection. Two loops:
 --
---   So it steers on where the course WILL BE. The turn rate the ship is
---   actually making, times a lead time in seconds, is subtracted from the
---   error -- and once the turn is developing fast enough to close the gap on
---   its own, the command eases off and then reverses into counter-thrust
---   before the error reaches zero. That is the difference between arriving on
---   a heading and swinging through it.
+--     outer   the heading error picks a turn rate to ask for -- err/lead
+--             degrees a second -- capped at `turnRate`
+--     inner   the gap between that and the rate the ship is ACTUALLY making
+--             sets the thrust difference
 --
---   Around that, three softeners that matter on a slow control loop. A
---   DEADBAND, because a fix a second apart cannot resolve five degrees and
---   chasing it just twitches the ship. A TURN BRAKE, because a vessel at full
---   ahead in the wrong direction is going the wrong way faster -- and the
---   harder it is turning, the more of the throttle it gives back. And a SLEW
---   LIMIT, so the outputs walk to their new values instead of slamming, which
---   a heavy contraption cannot follow anyway.
+--   Steering the thrust difference straight off the error does not work here,
+--   and two versions of this proved it. A real airship logged at 26 deg/s of
+--   yaw while moving 5 blocks a second -- a ten-block turn radius -- against a
+--   position fix that arrives once a second and a course averaged over three.
+--   Nothing that commands deflection can control a vehicle that turns that
+--   much faster than it can be measured: it spent 60% of a flight at full
+--   one-sided thrust, swinging 150 degrees past every turn.
+--
+--   Capping the RATE fixes that at the root. The ship comes round at a speed
+--   the loop can see, the inner loop backs off as the rate builds, and full
+--   deflection becomes something that happens for a second at the start of a
+--   turn rather than the normal state of affairs.
+--
+--   The thrust difference is also capped by `turnPower`, and INDEPENDENTLY of
+--   cruise. It used to be scaled by it, so turning the cruise throttle up
+--   turned the steering gain up with it -- two unrelated things on one knob.
+--
+--   Around that, three softeners. A DEADBAND, because a fix a second apart
+--   cannot resolve five degrees and chasing it just twitches the ship. A TURN
+--   BRAKE, because a vessel at full ahead in the wrong direction is going the
+--   wrong way faster. And a SLEW LIMIT, so the outputs walk to their new
+--   values instead of slamming, which a heavy contraption cannot follow.
 --
 -- No peripheral is touched in here. This file decides; radar/modules/flight.lua
 -- reads the position, writes the outputs and owns the settings.
@@ -71,16 +80,34 @@ autopilot.STALE_SECONDS = 5
 -- Errors smaller than this are not steered for.
 autopilot.DEADBAND_DEGREES = 5
 
+-- How far the ship has to actually be moving before its course means
+-- anything. radar/flight.lua will report one from 0.15 blocks a second, which
+-- is enough to know a ship is not parked and nowhere near enough to know which
+-- way it points: at 0.19 b/s a real flight logged a course of 90, then 45,
+-- then 341 in two seconds, and the autopilot believed all three. Below this it
+-- keeps probing rather than steering on noise.
+autopilot.COURSE_SPEED = 1.0
+
+-- Once steering, it takes a bigger drop to give up -- otherwise a hard turn,
+-- which slows the ship on purpose, would bounce it in and out of the probe.
+autopilot.COURSE_SPEED_LOW = 0.5
+
+-- Degrees per second of rate error for full thrust difference. Fixed rather
+-- than exposed: the inner loop is self-adjusting -- a sluggish ship saturates
+-- it and gets everything `turnPower` allows, an agile one never does -- and a
+-- third steering knob would be a third thing to get wrong.
+autopilot.RATE_FULL = 12
+
 -- Fraction of cruise given up at full deflection, so a hard turn is also a
 -- slow one. Raised from 0.6 in v8.10: a ship that keeps its speed up through a
 -- turn covers ground in the wrong direction while it comes round, and arrives
 -- on the new heading further from where it wanted to be than when it started.
 autopilot.TURN_BRAKE = 0.8
 
--- Seconds of turn rate subtracted from the error. Effectively "where will the
--- course be in this long", and the one number that decides whether the ship
--- settles on a heading or swings through it. Overridable per station.
-autopilot.LEAD_SECONDS = 2.5
+-- Seconds the outer loop aims to close the heading error in: it asks for
+-- err/lead degrees a second, capped at the ship's turn rate limit. Bigger is
+-- a gentler, wider turn. Overridable per station.
+autopilot.LEAD_SECONDS = 4
 
 -- Most any output may move in one step of the control loop.
 autopilot.SLEW = 0.25
@@ -153,10 +180,13 @@ autopilot.slew = slew
 ---   course   number|nil  true bearing the ship is actually making
 ---   moving   boolean     whether the course means anything yet
 ---   lost     boolean     the destination is a contact that has gone
+---   speed    number|nil  blocks a second, for whether the course is trusted
+---   steering boolean     whether the last pass was steering, for hysteresis
 ---   sinceFix number|nil  seconds since the last position fix
 ---   probing  number      seconds spent pushing with no course yet
 ---   previous table|nil   { left, right } last commanded, for the slew limit
----   cfg      table       { cruise, turnFull, arrive, slowWithin }
+---   cfg      table       { cruise, lead, turnRate, turnPower, arrive,
+---                          slowWithin, range }
 --- }
 ---@return table { left, right, phase, message, error, fault }
 function autopilot.step(s)
@@ -164,8 +194,9 @@ function autopilot.step(s)
   local cfg = s.cfg or {}
   local cruise     = util.clamp(tonumber(cfg.cruise) or 0.6, 0.05, 1)
   local arrive     = math.max(1, tonumber(cfg.arrive) or 25)
-  local turnFull   = math.max(10, tonumber(cfg.turnFull) or 60)
   local slowWithin = math.max(arrive, tonumber(cfg.slowWithin) or 120)
+  local turnRate   = math.max(1, tonumber(cfg.turnRate) or 8)
+  local turnPower  = util.clamp(tonumber(cfg.turnPower) or 0.55, 0.05, 1)
   -- false, nil or 0 all mean no limit.
   local range      = tonumber(cfg.range)
   if range and range <= 0 then range = nil end
@@ -192,9 +223,17 @@ function autopilot.step(s)
   if range and s.distance > range then return stop("toofar") end
   if s.distance <= arrive then return stop("arrived") end
 
-  -- No course yet. The only honest way to learn which way the ship points is
-  -- to move it, so push both sides equally and watch.
-  if not s.course or not s.moving then
+  -- No course worth trusting yet. The only honest way to learn which way the
+  -- ship points is to move it, so push both sides equally and watch.
+  --
+  -- The SPEED threshold matters as much as having a course at all: below about
+  -- a block a second the position deltas are noise, and a course computed from
+  -- noise is a heading the autopilot will chase into a wall. Hysteresis, so a
+  -- hard turn slowing the ship does not bounce it in and out of the probe.
+  local speed = tonumber(s.speed) or 0
+  local floorSpeed = (s.steering == true)
+    and autopilot.COURSE_SPEED_LOW or autopilot.COURSE_SPEED
+  if not s.course or not s.moving or speed < floorSpeed then
     if (tonumber(s.probing) or 0) >= autopilot.PROBE_SECONDS then
       return stop("stalled")
     end
@@ -206,36 +245,42 @@ function autopilot.step(s)
   end
 
   local err = util.angleDelta(s.course, s.bearing)   -- positive: target is right
-
-  -- Where the course will be in `lead` seconds if the ship keeps turning the
-  -- way it is turning now. Steering on THIS rather than on the error is what
-  -- stops it swinging through the heading it was aiming for.
-  local lead = tonumber(cfg.lead) or autopilot.LEAD_SECONDS
   local rate = tonumber(s.turnRate) or 0
-  local projected = err - lead * rate
 
-  -- The deadband is on the projected error, not the raw one: a ship already
-  -- swinging onto the right heading should stop pushing, and one swinging off
-  -- it should be caught before the error itself has grown.
-  local steer = (abs(projected) <= autopilot.DEADBAND_DEGREES) and 0
-    or util.clamp(projected / turnFull, -1, 1)
+  -- OUTER LOOP: what turn rate would close the error in `lead` seconds, capped
+  -- at what this ship is allowed to do. The cap is the whole fix: a vessel
+  -- that yaws at 26 deg/s cannot be steered by anything watching it once a
+  -- second, so it is not allowed to yaw at 26 deg/s.
+  local lead = tonumber(cfg.lead) or autopilot.LEAD_SECONDS
+  if lead <= 0 then lead = 0.5 end
+  local wanted = (abs(err) <= autopilot.DEADBAND_DEGREES) and 0
+    or util.clamp(err / lead, -turnRate, turnRate)
+
+  -- INNER LOOP: the thrust difference comes from the gap between the rate
+  -- asked for and the rate being made. As the turn builds this closes on its
+  -- own and the command backs off -- and if the ship is coming round faster
+  -- than asked, it goes negative and pushes the other way, without waiting for
+  -- the heading error to change sign.
+  local steer = util.clamp((wanted - rate) / autopilot.RATE_FULL, -1, 1)
 
   -- Ease off near the destination, and while turning hard.
   local approach = util.clamp(s.distance / slowWithin, autopilot.APPROACH_FLOOR, 1)
-  local reach = cruise * approach
-  local base = reach * (1 - autopilot.TURN_BRAKE * abs(steer))
+  local base = cruise * approach * (1 - autopilot.TURN_BRAKE * abs(steer))
+
+  -- The difference is capped on its own account and NOT scaled by cruise, so
+  -- the throttle and the steering gain are two separate settings.
+  local difference = steer * turnPower
 
   return {
-    left  = slew(previous.left,  util.clamp(base + steer * reach, 0, 1), autopilot.SLEW),
-    right = slew(previous.right, util.clamp(base - steer * reach, 0, 1), autopilot.SLEW),
+    left  = slew(previous.left,  util.clamp(base + difference, 0, 1), autopilot.SLEW),
+    right = slew(previous.right, util.clamp(base - difference, 0, 1), autopilot.SLEW),
     phase = "steer",
     message = ("%+d deg"):format(floor(err + (err >= 0 and 0.5 or -0.5))),
     error = err,
-    projected = projected,
     turnRate = rate,
-    -- The deflection actually asked for, -1 to 1. Reported so the telemetry
-    -- can show what the law decided as well as what came out of it after the
-    -- turn brake, the approach taper and the slew limit had their say.
+    -- The rate asked for, and the deflection that came of it. Reported so the
+    -- telemetry shows both halves of the cascade rather than only the output.
+    wanted = wanted,
     steer = steer,
     fault = false,
   }

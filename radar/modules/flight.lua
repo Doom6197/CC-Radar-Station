@@ -45,8 +45,9 @@ view.defaults = {
     left  = nil,          -- relay side carrying the left thruster group
     right = nil,          -- and the right
     cruise     = 0.6,     -- throttle in level flight, 0..1
-    turnFull   = 90,      -- degrees of course error for full deflection
-    lead       = 2.5,     -- seconds of turn rate subtracted from the error
+    turnRate   = 8,       -- degrees a second it is allowed to come round at
+    turnPower  = 0.55,    -- most thrust difference it will use, 0..1
+    lead       = 4,       -- seconds it aims to close the heading error in
     arrive     = 25,      -- blocks from the destination it stops at
     slowWithin = 120,     -- blocks out that it starts easing off
     range      = 1000,    -- blocks; further than this it shuts itself off
@@ -81,8 +82,12 @@ function view.sanitise(cfg)
     cfg.autopilot = auto
   end
   auto.cruise     = util.clamp(tonumber(auto.cruise) or 0.6, 0.05, 1)
-  auto.turnFull   = util.clamp(floor(tonumber(auto.turnFull) or 90), 10, 180)
-  auto.lead       = util.clamp(tonumber(auto.lead) or 2.5, 0, 8)
+  auto.turnRate   = util.clamp(tonumber(auto.turnRate) or 8, 1, 45)
+  auto.turnPower  = util.clamp(tonumber(auto.turnPower) or 0.55, 0.05, 1)
+  auto.lead       = util.clamp(tonumber(auto.lead) or 4, 0.5, 12)
+  -- Gone in v8.12, replaced by the two above. Dropped rather than left in the
+  -- file, where it would read like a setting that still did something.
+  auto.turnFull   = nil
   auto.record     = auto.record == true
   auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 500)
   auto.slowWithin = util.clamp(floor(tonumber(auto.slowWithin) or 120),
@@ -416,7 +421,7 @@ view.RECORD_FILE = "radar_flight.csv"
 view.RECORD_LIMIT = 2000
 
 view.RECORD_COLUMNS = {
-  "t", "phase", "dist", "bearing", "course", "err", "rate", "proj",
+  "t", "phase", "dist", "bearing", "course", "err", "rate", "want",
   "steer", "left", "right", "lvlL", "lvlR", "speed",
 }
 
@@ -455,7 +460,7 @@ function view.record(app, now, result, distance, bearing)
     csv(model.course),
     csv(result.error),
     csv(result.turnRate, 2),
-    csv(result.projected),
+    csv(result.wanted, 2),
     csv(result.steer, 3),
     csv(result.left, 3),
     csv(result.right, 3),
@@ -491,6 +496,8 @@ function view.control(app, now, elapsed)
     -- The course the ship is MAKING. Deliberately not app.heading: that is
     -- where the pilot is looking, and looking over the rail must not steer.
     course   = model.course,
+    speed    = model.speed,
+    steering = state.phase == "steer",
     -- How fast it is coming round. Without this the correction is still
     -- going in long after the nose is pointed the right way, and the ship
     -- swings through the heading instead of settling on it.
@@ -1176,49 +1183,65 @@ function view.autopilotSettings(ctx)
         end)
     end)
 
-  ctx.row("Turn response", function()
-    return ("full turn at %d deg"):format(auto.turnFull)
+  ctx.row("Turn rate", function()
+    return ("%g deg/s"):format(auto.turnRate)
   end, function()
-    ctx.openPicker("TURN RESPONSE",
-      ctx.entriesOf({ 30, 45, 60, 90, 120 }, function(v)
-        local name = (v <= 30 and "Sharp") or (v <= 45 and "Quick")
-          or (v <= 60 and "Normal") or (v <= 90 and "Gentle") or "Lazy"
-        return ctx.withHint(name, ("full turn at %d deg off course"):format(v))
+    ctx.openPicker("TURN RATE",
+      ctx.entriesOf({ 4, 6, 8, 12, 20, 30 }, function(v)
+        local name = (v <= 4 and "Stately") or (v <= 6 and "Slow")
+          or (v <= 8 and "Normal") or (v <= 12 and "Brisk")
+          or (v <= 20 and "Fast") or "Violent"
+        return ctx.withHint(name, ("%d degrees a second"):format(v))
       end, function(v) return v end),
-      auto.turnFull,
+      auto.turnRate,
       function(value)
-        auto.turnFull = value
+        auto.turnRate = value
         app:saveConfig()
         ctx.refreshRows()
       end)
   end)
 
-  ctx.note("How hard it corrects. A fix arrives about once a second, so "
-    .. "Sharp on a heavy ship will hunt from side to side.")
+  ctx.note("How fast it is ALLOWED to come round. This is the setting that "
+    .. "stops a ship overshooting: a vessel yawing faster than the once-a-"
+    .. "second position fix can see cannot be steered at all, only bounced "
+    .. "between extremes. Turn it down until the ship stops hunting.", true)
 
-  ctx.row("Damping", function()
-    if auto.lead <= 0 then return "off - steers on the error alone" end
-    return ("%.1f s of lead"):format(auto.lead)
+  ctx.row("Turn power", function()
+    return ("%d%%"):format(util.round(auto.turnPower * 100))
   end, function()
-    ctx.openPicker("TURN DAMPING",
-      ctx.entriesOf({ 0, 1, 1.5, 2.5, 4, 6 }, function(v)
-        if v == 0 then return ctx.withHint("Off", "will overshoot and hunt") end
-        local name = (v <= 1 and "Light") or (v <= 1.5 and "Some")
-          or (v <= 2.5 and "Normal") or (v <= 4 and "Heavy") or "Very heavy"
-        return ctx.withHint(name, ("%.1f seconds of lead"):format(v))
+    ctx.openPicker("TURN POWER",
+      ctx.entriesOf({ 0.2, 0.35, 0.55, 0.75, 1.0 }, function(v)
+        return ("%d%% thrust difference"):format(util.round(v * 100))
       end, function(v) return v end),
-      auto.lead,
+      auto.turnPower,
       function(value)
-        auto.lead = value
+        auto.turnPower = value
         app:saveConfig()
         ctx.refreshRows()
       end)
-  end, function() return auto.lead > 0 and theme.text or theme.warn end)
+  end)
 
-  ctx.note("How far ahead it looks at the rate the ship is coming round, so "
-    .. "it starts easing off BEFORE it is on the heading. Turn this up if it "
-    .. "swings past the turn and hunts left and right; down if it gives up "
-    .. "the turn too early and creeps in.", true)
+  ctx.note("The most difference it will put between the two sides to hold "
+    .. "that rate. Separate from Cruise on purpose - they used to be the same "
+    .. "knob, so turning the throttle up turned the steering gain up with it.")
+
+  ctx.row("Turn in", function() return ("%g seconds"):format(auto.lead) end,
+    function()
+      ctx.openPicker("TURN IN",
+        ctx.entriesOf({ 2, 3, 4, 6, 8, 12 }, function(v)
+          return ctx.withHint(("%d seconds"):format(v),
+            ("asks for err/%d deg per second"):format(v))
+        end, function(v) return v end),
+        auto.lead,
+        function(value)
+          auto.lead = value
+          app:saveConfig()
+          ctx.refreshRows()
+        end)
+    end)
+
+  ctx.note("How long it aims to take to null the heading error. Bigger is a "
+    .. "wider, gentler turn that starts easing off sooner.")
 
   ctx.row("Arrive within", function() return auto.arrive .. " blocks" end, function()
     ctx.openPicker("ARRIVE WITHIN",
