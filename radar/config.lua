@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.5"
+config.VERSION = "8.6"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -103,7 +103,7 @@ config.ROLES = {
   { id = "main",       label = "MAIN BASE",
     hint = "the master: detectors, and feeds the network" },
   { id = "mobile",     label = "MOBILE",
-    hint = "pocket or vehicle: draws what the main base sends" },
+    hint = "pocket or vehicle: the main base sends, you measure" },
 }
 
 -- What the roles were called before v8. A settings file naming an old one is

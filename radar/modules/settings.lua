@@ -290,6 +290,19 @@ view.GROUPS = {
         return cfg.mode == "fixed" and "FIXED - watch the base" or "SELF - watch you"
       end, function() app:toggleMode() end)
 
+      -- A MOBILE decides this for itself. The main base relays raw positions
+      -- and every station works out its own distances from them, so a pocket
+      -- computer set to SELF measures from the pilot even though the base it
+      -- is paired to is measuring from a fixed point hundreds of blocks away.
+      if config.isMobile(cfg) then
+        ctx.note("This station's own choice, not the base's. SELF measures "
+          .. "from you, wherever the main base is.")
+        if cfg.mode == "self" and not cfg.myName then
+          ctx.note("SELF needs the username above, and it has to be one the "
+            .. "main base can see.", true)
+        end
+      end
+
       ctx.row("Base", function()
         if not cfg.baseX then
           return ctx.isNarrow() and "not set - press to set"

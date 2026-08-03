@@ -162,7 +162,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.5                                    |  SETTINGS   v8.5
+ SETTINGS   v8.6                                    |  SETTINGS   v8.6
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -770,7 +770,28 @@ listening, and announces itself whether or not anyone is.
 | **Contacts** | always. Only positions — distance, bearing, altitude band and colour are rebuilt at the far end by the same code that computes them locally. |
 | **Where the base is** | always. A mobile has no other way of knowing, and was otherwise left with whatever was in its own settings file — `0, 64, 0` on a fresh install, which points *home* at the world origin. It lands in the ordinary base coordinates, so the status page and the flight page need no special case. Turn it off with *Settings → Tracking → Follow base*. |
 | **Weather** | *Settings → Link → Relay weather*. Only the raw detector readings; the sky, palette and scenery are rebuilt on the mobile from the same code, so the page is identical without a pixel crossing the network. Off by default. |
-| **Power** | *Settings → Power → Relay to mobiles*. The merged totals from the main base and every power client. On by default. |
+| **Power** | *Settings → Pages → Power → Relay power*. The merged totals from the main base and every power client. On by default. |
+| **Who the base is watching** | always. It is the one player who is *not* in the contact list, and a mobile needs to know that in order to find its own pilot. |
+
+### Every station measures for itself
+
+Nothing derived travels — the wire carries raw positions and each station works
+out its own distances, bearings and bands from them with the same code a local
+sweep uses. That is what makes **Tracking → Mode a mobile's own choice** rather
+than the base's:
+
+| Mobile's mode | It measures from |
+|---|---|
+| **FIXED** | its own base coordinates — which *Follow base* keeps in step with the main base |
+| **SELF** | **you**, wherever the main base happens to be |
+
+`SELF` needs a **username the main base can see**, since your position is read
+by the base's detector, not by the mobile. If it cannot find you the mobile
+says so and **draws nothing** — being quietly measured from the wrong place is
+the failure this replaced.
+
+Two crews can share one base: it watches its owner and relays everybody's
+position, and each pocket computer picks its own pilot out of that.
 
 ### When the link drops
 
@@ -792,6 +813,9 @@ drawn as though it were live is worse than an empty one.
   means being a MAIN BASE rather than a standalone with a flag set.
 - A **MAIN BASE is a fully working radar in its own right** — its own screens,
   alerts, alert log and redstone, whether or not anything is ever paired to it.
+- **A mobile's tracking mode is its own.** The main base sends positions, not
+  distances, so `SELF` on a pocket computer measures from the pilot even while
+  the base it is paired to is measuring from a fixed point kilometres away.
 - **A mobile carries no position source.** Everything it draws is *your*
   position as read by the main base. Leave a ship on autopilot and walk away and
   the status page follows **you**, not the ship. There is deliberately no GPS
@@ -996,6 +1020,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.6 - a mobile measures for itself.** A MOBILE used the centre the main
+base had worked out from ITS settings, whatever the mobile's own tracking mode
+said -- so a pocket computer or airship set to **SELF** reported everyone's
+distance **from the base**, and somebody standing next to you read as six
+kilometres away. Every station now decides its own centre from the raw
+positions on the wire: `SELF` measures from the pilot, `FIXED` from that
+station's own base coordinates. A mobile also finds **its own** pilot rather
+than the base operator's, takes their heading, and leaves them out of its own
+contact list. `SELF` with nobody to find says so and draws nothing.
 
 **v8.5 - the settings page, reorganised.** One scrolling page of 17 sections,
 85 controls and 99 notes -- 231 rows, fourteen screenfuls -- became an **index

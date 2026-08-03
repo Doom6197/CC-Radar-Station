@@ -21,6 +21,7 @@
 local config      = require("radar.config")
 local environment = require("radar.environment")
 local scan        = require("radar.scan")
+local util        = require("radar.util")
 
 local link = {}
 link.__index = link
@@ -180,6 +181,12 @@ function link:sendScan(app)
     t = "s",
     c = packPos(app.centre),
     p = packPos(app.myPos),
+    -- WHOSE position `p` is. A station leaves the player it is watching out of
+    -- its own contact list, so that person reaches a mobile only through this
+    -- field -- and a mobile watching somebody else has to know that `p` is not
+    -- them. Added in v8.6; a mobile talking to an older base falls back to
+    -- assuming it is the same person, which is what it always did.
+    n = app.cfg.myName,
     g = app.headingRaw,
     e = app.scanError,
     i = config.scanInterval(app.cfg),
@@ -224,25 +231,119 @@ function link:applyHome(app, message)
   return true
 end
 
+--- The position and yaw of one named player, taken out of a relayed sweep.
+---
+--- A station leaves the player it is watching out of its own contact list, so
+--- that person arrives as `p`/`g` rather than as an entry in `l`. Which of the
+--- two to read therefore depends on whether this mobile and the main base are
+--- watching the same person.
+---@return table|nil pos { x, y, z, dimension }
+---@return number|nil heading
+function link.pilotFrom(message, name)
+  if type(name) ~= "string" or #name == 0 then return nil end
+
+  if message.n == name then
+    local pos = unpackPos(message.p)
+    if pos then return pos, tonumber(message.g) end
+  end
+
+  for _, entry in ipairs(type(message.l) == "table" and message.l or {}) do
+    if entry.n == name and tonumber(entry.x) then
+      return { x = entry.x, y = entry.y, z = entry.z, dimension = entry.d },
+        entry.w and util.headingOf(entry.w) or nil
+    end
+  end
+
+  -- A base from before v8.6 does not say whose position it is sending. It is
+  -- the player IT is watching, very often the same person, and assuming so is
+  -- exactly what this did unconditionally before.
+  if message.n == nil then return unpackPos(message.p), tonumber(message.g) end
+  return nil
+end
+
+--- Where a MOBILE measures distances from.
+---
+--- The main base worked out a centre from ITS OWN settings, and until v8.6
+--- every mobile simply used it. That is right for a mobile watching the base
+--- and WRONG for one set to SELF: a pocket computer told to watch YOU was
+--- reporting everyone's distance from the base, so a player standing next to
+--- you read as six kilometres away.
+---
+--- SELF with no fix is reported rather than quietly falling back to the base.
+--- Being silently measured from the wrong place is the bug this replaced.
+---@return table|nil centre
+---@return string|nil problem
+function link:centreFor(app, message, pilot)
+  local cfg = app.cfg
+
+  if cfg.mode == "self" then
+    if pilot then return pilot end
+    if not cfg.myName then
+      return nil, "SELF tracking needs your username - Settings / Tracking"
+    end
+    return nil, "Cannot find " .. cfg.myName .. " - out of the base's range?"
+  end
+
+  -- FIXED: this station's own base coordinates, which baseFollow keeps in step
+  -- with the main base unless the operator has turned it off.
+  if cfg.baseX then
+    return {
+      x = cfg.baseX, y = cfg.baseY or 64, z = cfg.baseZ, dimension = cfg.baseDim,
+    }
+  end
+  return unpackPos(message.c)
+end
+
 function link:applyScan(app, message)
-  local centre = unpackPos(message.c)
+  self.lastAt = os.clock()
+  self.interval = tonumber(message.i)
+
+  -- Before the centre, so a mobile following its base measures from where the
+  -- base says it is now rather than from where it was last sweep.
+  self:applyHome(app, message)
+
+  local pilot, pilotHeading = link.pilotFrom(message, app.cfg.myName)
+  local centre, problem = self:centreFor(app, message, pilot)
+
+  -- The pilot's own yaw, not the base operator's. On a mobile watching
+  -- somebody else those are two different people looking two different ways.
+  self.headingRaw = pilotHeading or tonumber(message.g)
+
+  local myPos = pilot or unpackPos(message.p)
+
+  if not centre then
+    -- Cleared rather than left standing. applyScan keeps the previous list
+    -- through an error, because a detector that blinks should not empty the
+    -- scope -- but this is not a blink. Every one of those contacts was
+    -- measured from a centre we have just decided is the wrong one, and
+    -- stale distances drawn as if they were live are worse than none.
+    app.contacts = {}
+    app:applyScan(myPos, {}, nil, problem)
+    if app:applyHeading(self.headingRaw) then app:emit("heading") end
+    return true
+  end
 
   local contacts = {}
-  if centre and type(message.l) == "table" then
-    for _, entry in ipairs(message.l) do
+  for _, entry in ipairs(type(message.l) == "table" and message.l or {}) do
+    -- Whoever this station is watching is not one of its own contacts. The
+    -- base drops the player IT watches; this drops the one WE watch, which on
+    -- a shared world is not always the same person.
+    if entry.n ~= app.cfg.myName then
       local contact = unpackContact(centre, entry)
-      if contact then contacts[#contacts + 1] = contact end
+      if contact then
+        -- Re-filtered against OUR centre: a contact in the base's dimension is
+        -- not necessarily in ours once we are measuring from somewhere else.
+        local sameDim = true
+        if app.cfg.dimFilter and contact.dim and centre.dimension then
+          sameDim = (contact.dim == centre.dimension)
+        end
+        if sameDim then contacts[#contacts + 1] = contact end
+      end
     end
   end
   scan.sort(contacts)
 
-  self.lastAt = os.clock()
-  self.interval = tonumber(message.i)
-  self.headingRaw = tonumber(message.g)
-
-  self:applyHome(app, message)
-
-  app:applyScan(unpackPos(message.p), contacts, centre,
+  app:applyScan(myPos, contacts, centre,
     type(message.e) == "string" and message.e or nil)
   if app:applyHeading(self.headingRaw) then app:emit("heading") end
   return true

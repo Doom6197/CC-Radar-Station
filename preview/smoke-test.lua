@@ -2562,6 +2562,125 @@ check("a ship renders a relayed sweep exactly as the base did", function()
   app.cfg.headingStep = saved
 end)
 
+check("a mobile watching YOU measures from you, not from the base", function()
+  -- The bug this replaced: a MOBILE used the centre the main base had worked
+  -- out from ITS settings, whatever the mobile's own tracking mode said. A
+  -- pocket computer set to SELF therefore reported everyone's distance from
+  -- the base -- somebody standing next to you read as six kilometres away.
+  local saved = { role = app.cfg.role, mode = app.cfg.mode, name = app.cfg.myName,
+                  x = app.cfg.baseX, y = app.cfg.baseY, z = app.cfg.baseZ,
+                  follow = app.cfg.baseFollow }
+
+  -- A base a long way off, and the pilot standing right next to a contact.
+  -- `c` and `h` are separate tables on purpose: the harness's serialiser
+  -- collapses a second reference to one table into nil, exactly as a cycle.
+  local payload = {
+    t = "s", i = 1,
+    -- what the BASE measured from
+    c = { x = 8963, y = 147, z = -191, d = "minecraft:overworld" },
+    h = { x = 8963, y = 147, z = -191, d = "minecraft:overworld" },
+    p = { x = 2340, y = 71, z = 4180, d = "minecraft:overworld" },
+    n = "Doom6197",                            -- whose position that is
+    g = 90,
+    l = {
+      { n = "noobidoo", x = 2343, y = 71, z = 4184, d = "minecraft:overworld" },
+      { n = "Doom6197", x = 2340, y = 71, z = 4180, d = "minecraft:overworld" },
+    },
+  }
+  local wire = textutils.unserialize(textutils.serialize(payload))
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.myName = "Doom6197"
+  app.cfg.mode = "self"
+  app.cfg.baseFollow = true
+
+  assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
+  assert(app.scanError == nil, "no fault: " .. tostring(app.scanError))
+
+  assert(app.centre and app.centre.x == 2340 and app.centre.z == 4180,
+    "measured from the pilot, got " .. tostring(app.centre and app.centre.x))
+
+  assert(#app.contacts == 1, "and you are not one of your own contacts, got "
+    .. #app.contacts)
+  local near = app.contacts[1]
+  assert(near.name == "noobidoo", "the other player is the contact")
+  assert(near.dist < 10, "who is right there, got " .. near.dist .. "m")
+
+  -- The base coordinates still arrive and are still stored -- SELF simply does
+  -- not measure from them.
+  assert(app.cfg.baseX == 8963, "the base's own position was still taken")
+
+  -- FIXED goes back to measuring from the base, off the same payload.
+  app.cfg.mode = "fixed"
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.centre.x == 8963, "FIXED measures from the base, got " .. app.centre.x)
+  assert(app.contacts[1].dist > 6000,
+    "so the same contact is a long way off, got " .. app.contacts[1].dist)
+
+  -- SELF with nobody to find says so rather than quietly using the base.
+  app.cfg.mode = "self"
+  app.cfg.myName = "SomeoneNotHere"
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.scanError and app.scanError:find("SomeoneNotHere", 1, true),
+    "the missing pilot is named, got " .. tostring(app.scanError))
+  assert(#app.contacts == 0, "and nothing is drawn at the wrong distance")
+
+  app.cfg.myName = nil
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.scanError and app.scanError:find("username", 1, true),
+    "and with no username at all it says which setting is missing, got "
+      .. tostring(app.scanError))
+
+  app.cfg.role, app.cfg.mode, app.cfg.myName = saved.role, saved.mode, saved.name
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = saved.x, saved.y, saved.z
+  app.cfg.baseFollow = saved.follow
+  app.scanError = nil
+end)
+
+check("a mobile follows its own pilot, not the base operator's", function()
+  -- Two crews, one base. The base watches its owner; the pocket computer in
+  -- somebody else's hand watches THEM, and the sweep carries both.
+  local saved = { role = app.cfg.role, mode = app.cfg.mode, name = app.cfg.myName,
+                  step = app.cfg.headingStep }
+  app.cfg.headingStep = 0
+
+  local wire = {
+    t = "s", i = 1,
+    c = { x = 0, y = 64, z = 0, d = "minecraft:overworld" },
+    p = { x = 0, y = 64, z = 0, d = "minecraft:overworld" },
+    n = "Doom6197",                            -- the BASE's player
+    g = 0,
+    l = {
+      -- Minecraft yaw 180 faces north, which is a bearing of 0.
+      { n = "noobidoo", x = 500, y = 80, z = 500, w = 180,
+        d = "minecraft:overworld" },
+      { n = "Alex", x = 520, y = 80, z = 500, d = "minecraft:overworld" },
+    },
+  }
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.myName = "noobidoo"                  -- somebody the base can see
+  app.cfg.mode = "self"
+
+  assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
+  assert(app.centre.x == 500 and app.centre.z == 500,
+    "centred on ITS pilot, not the base's, got " .. app.centre.x)
+  assert(app.myPos and app.myPos.x == 500, "and that is who 'you' are")
+  assert(app.heading == 0, "with THEIR heading, not the base operator's, got "
+    .. tostring(app.heading))
+
+  assert(#app.contacts == 1 and app.contacts[1].name == "Alex",
+    "one contact, and it is not us")
+  assert(math.abs(app.contacts[1].dist - 20) < 0.001,
+    "twenty blocks away, got " .. app.contacts[1].dist)
+
+  app.cfg.role, app.cfg.mode, app.cfg.myName = saved.role, saved.mode, saved.name
+  app.cfg.headingStep = saved.step
+  app.scanError = nil
+end)
+
 check("a ship ignores everything but its paired base", function()
   local stranger = textutils.unserialize(textutils.serialize(SHIP_PAYLOAD))
   stranger.l = {}

@@ -68,6 +68,9 @@ profiles.LIST = {
       "With a modem it runs as MOBILE and draws what the",
       "main base sends it -- including the power page,",
       "which it has nothing of its own to wire to.",
+      "",
+      "It measures from YOU, so it needs a username the",
+      "main base can see.",
     },
     cfg = {
       mode           = "self",
@@ -97,6 +100,10 @@ profiles.LIST = {
       "scan for itself, so with a modem this runs as",
       "MOBILE, ready to pair with the main base on the",
       "ground.",
+      "",
+      "Distances are measured from the PILOT, not from",
+      "the base, so it needs a username the main base",
+      "can see.",
     },
     cfg = {
       mode           = "self",
