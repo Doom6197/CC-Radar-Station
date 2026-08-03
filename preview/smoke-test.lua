@@ -1918,6 +1918,19 @@ check("the autopilot shuts itself off beyond its range limit", function()
   assert(at(50000, nil).phase == "steer", "and so is nothing at all")
   assert(at(50000, 0).phase == "steer", "and so is zero")
 
+  -- Arriving is allowed to be a long way out now: a big airship stopping
+  -- within a kilometre of a waypoint is a reasonable thing to want.
+  local roomy = config.sanitise({ autopilot = { arrive = 1000 } })
+  assert(roomy.autopilot.arrive == 1000, "a big arrive radius survives, got "
+    .. roomy.autopilot.arrive)
+  -- And the two ranges that are floored by it come up with it, rather than
+  -- being left contradicting it.
+  assert(roomy.autopilot.slowWithin >= 1000, "ease-off is at least arrive, got "
+    .. roomy.autopilot.slowWithin)
+  assert(roomy.autopilot.range >= 1000,
+    "and so is the shut-off range, or it could never fly anywhere it was not "
+      .. "already close enough to stop, got " .. tostring(roomy.autopilot.range))
+
   -- Sanitising: a real number survives, junk becomes the default, false stays.
   local cfg = config.sanitise({ autopilot = { range = 250 } })
   assert(cfg.autopilot.range == 250, "a real range survives, got "
@@ -5438,6 +5451,86 @@ check("typing a waypoint into the boxes actually sets it", function()
   app.cfg.flightTarget = "home"
   app.cfg.flightX, app.cfg.flightY, app.cfg.flightZ = nil, nil, nil
   app.cfg.settingsLayout = "auto"
+end)
+
+check("a picker entry whose value is false keeps it", function()
+  -- The bug: entriesOf did `valueOf(item, i) or i`, so an entry whose value
+  -- is deliberately `false` came back as its INDEX instead. "No limit" is the
+  -- sixth shut-off range, so picking it set the range to 6 BLOCKS -- an
+  -- autopilot that switched itself off the moment it was more than six blocks
+  -- from anywhere.
+  local settingsModule = modules.byId("settings")
+  terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+  view.openGroup(settingsModule.MODULE_PREFIX .. "flight")
+
+  local function press(label)
+    local found
+    local function walk(element)
+      for _, child in ipairs(rawget(element, "_children") or {}) do
+        if child.__kind == "Button" and tostring(child.text) == label then
+          found = child
+        end
+        walk(child)
+      end
+    end
+    walk(view.container)
+    assert(found, "found the " .. label .. " row")
+    rawget(found, "_handlers").onClick(found)
+  end
+
+  local function pick(needle)
+    local chosen
+    local function walk(element)
+      for _, item in ipairs(rawget(element, "_p").items or {}) do
+        if type(item) == "table" and item.text
+           and item.text:find(needle, 1, true) then
+          chosen = item
+        end
+      end
+      for _, child in ipairs(rawget(element, "_children") or {}) do walk(child) end
+    end
+    walk(view.container)
+    assert(chosen, "the picker offers " .. needle)
+    chosen.callback()
+  end
+
+  app.cfg.autopilot.range = 1000
+  view.openGroup(settingsModule.MODULE_PREFIX .. "flight")
+  press("1000 blocks")
+  pick("No limit")
+  assert(app.cfg.autopilot.range == false,
+    "No limit means no limit, got " .. tostring(app.cfg.autopilot.range))
+
+  -- And a real one still comes through as itself rather than as an index.
+  view.openGroup(settingsModule.MODULE_PREFIX .. "flight")
+  press("no limit")
+  pick("2500 blocks")
+  assert(app.cfg.autopilot.range == 2500,
+    "a numbered range is its own number, got " .. tostring(app.cfg.autopilot.range))
+
+  app.cfg.autopilot.range = false
+  view.openGroup(nil)
+end)
+
+check("a retired module cannot come back off the disk", function()
+  -- Installing only ever wrote files, so radar/modules/log.lua stayed on the
+  -- computer when it became alerts.lua -- and the drop-in loader found it. A
+  -- station ended up showing both an ALERTS tab and the LOG tab it replaced,
+  -- the second running last version's code against this version's entries and
+  -- printing "nil" for every alarm.
+  assert(modules.RETIRED.log == "alerts", "log is retired in favour of alerts")
+
+  local LISTED = { "log.lua", "alerts.lua", "mymodule.lua" }
+  fs.list = function() return LISTED end
+  local found = modules.scan()
+  fs.list = nil
+
+  local seen = {}
+  for _, id in ipairs(found) do seen[id] = (seen[id] or 0) + 1 end
+  assert(seen.log == nil, "the retired file is not loaded")
+  assert(seen.alerts == 1, "the page that replaced it is, exactly once")
+  assert(seen.mymodule == 1, "and a real drop-in still is")
 end)
 
 check("hints hide the helpful lines and keep the warnings", function()

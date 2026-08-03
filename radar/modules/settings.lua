@@ -1436,10 +1436,19 @@ function view.build(container, app, root)
   end
 
   --- Turns a plain array into picker entries.
+  ---
+  --- With no `valueOf` the value is the INDEX, which is what the settings that
+  --- store an index into a list want. With one, its answer is used as it
+  --- stands -- including `false`, which is a real value here: "no limit" on
+  --- the autopilot's shut-off range is stored as false, and the old
+  --- `valueOf(item, i) or i` turned it into the index instead, so picking
+  --- "No limit" set the range to 6 blocks.
   local function entriesOf(list, labelOf, valueOf)
     local out = {}
     for i, item in ipairs(list) do
-      out[i] = { label = labelOf(item, i), value = valueOf and valueOf(item, i) or i }
+      local value = i
+      if valueOf then value = valueOf(item, i) end
+      out[i] = { label = labelOf(item, i), value = value }
     end
     return out
   end

@@ -55,6 +55,14 @@ fs = {
     path = tostring(path):gsub("^/+", "")
     return DISK[path] ~= nil or DIRS[path] == true
   end,
+  isDir = function(path)
+    path = tostring(path):gsub("^/+", "")
+    return DIRS[path] == true
+  end,
+  delete = function(path)
+    path = tostring(path):gsub("^/+", "")
+    DISK[path], DIRS[path] = nil, nil
+  end,
   makeDir = function(path)
     path = tostring(path):gsub("^/+", "")
     local build = nil
@@ -126,19 +134,60 @@ local function runInstaller(...)
   return pcall(chunk, ...)
 end
 
+--- The manifest, split into what to install and what to remove. A line
+--- starting with "-" is a file an earlier version shipped and this one does
+--- not; the installer deletes those.
 local function manifestPaths()
   local file = assert(io.open(PROJ .. "/manifest.txt", "r"))
   local text = file:read("*a")
   file:close()
-  local paths = {}
+  local paths, obsolete = {}, {}
   for line in text:gmatch("[^\r\n]+") do
     local path = line:match("^%s*(.-)%s*$")
-    if #path > 0 and path:sub(1, 1) ~= "#" then paths[#paths + 1] = path end
+    if #path > 0 and path:sub(1, 1) ~= "#" then
+      if path:sub(1, 1) == "-" then
+        obsolete[#obsolete + 1] = path:sub(2)
+      else
+        paths[#paths + 1] = path
+      end
+    end
   end
-  return paths
+  return paths, obsolete
 end
 
-local PATHS = manifestPaths()
+local PATHS, OBSOLETE = manifestPaths()
+
+check("the removal list names files that are really gone", function()
+  assert(#OBSOLETE > 0, "there is a removal list to check")
+
+  local listed = {}
+  for _, path in ipairs(PATHS) do listed[path] = true end
+
+  for _, path in ipairs(OBSOLETE) do
+    assert(not listed[path],
+      path .. " is on both the install list and the removal list")
+    local file = io.open(PROJ .. "/" .. path, "r")
+    if file then
+      file:close()
+      error(path .. " is marked obsolete but still exists in the repository", 0)
+    end
+  end
+
+  -- The registry has to agree, or a copy that survives the installer would be
+  -- loaded anyway.
+  local source = assert(io.open(PROJ .. "/radar/modules.lua", "r"))
+  local text = source:read("*a")
+  source:close()
+  local retired = text:match("RETIRED%s*=%s*{(.-)}")
+  assert(retired, "modules.lua declares a RETIRED list")
+  for _, path in ipairs(OBSOLETE) do
+    local id = path:match("^radar/modules/(.+)%.lua$")
+    if id then
+      assert(retired:find(id, 1, true),
+        "modules.lua does not retire " .. id .. ", so a stale copy would load")
+    end
+  end
+end)
 
 check("manifest lists the real files", function()
   assert(#PATHS >= 20, "at least twenty files, got " .. #PATHS)
@@ -213,6 +262,28 @@ check("every module file on disk is in the manifest", function()
       assert(listed[path], path .. " exists but is not in the manifest")
     end
   end
+end)
+
+check("an obsolete file is deleted, and nothing else is", function()
+  reset()
+  -- A station upgrading from before the rename: the old module is on disk and
+  -- so is a third-party one, which must be left alone.
+  DISK["radar/modules/log.lua"] = "-- last version's alerts page"
+  DISK["radar/modules/mymodule.lua"] = "-- somebody's own page"
+  DIRS["radar/modules"] = true
+
+  local ok, err = runInstaller()
+  assert(ok, "the installer ran: " .. tostring(err))
+
+  for _, path in ipairs(OBSOLETE) do
+    assert(DISK[path] == nil, path .. " was left behind")
+  end
+  assert(DISK["radar/modules/mymodule.lua"] == "-- somebody's own page",
+    "a dropped-in module is not touched")
+  assert(DISK["radar/modules/alerts.lua"], "and the page that replaced it is there")
+
+  local text = table.concat(OUTPUT, "\n")
+  assert(text:find("Removed", 1, true), "and it says so:\n" .. text)
 end)
 
 check("default install writes every file", function()

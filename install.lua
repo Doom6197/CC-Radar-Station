@@ -138,11 +138,18 @@ if not manifest then
     "  wget run <url> yourname/CC-Radar-Station")
 end
 
-local files = {}
+local files, obsolete = {}, {}
 for line in manifest:gmatch("[^\r\n]+") do
   local path = line:match("^%s*(.-)%s*$")
   if #path > 0 and path:sub(1, 1) ~= "#" then
-    files[#files + 1] = path
+    -- A leading "-" marks a file an earlier version shipped and this one does
+    -- not. Installing only ever wrote files, so a renamed module stayed on
+    -- the computer and kept being loaded alongside the one that replaced it.
+    if path:sub(1, 1) == "-" then
+      obsolete[#obsolete + 1] = path:sub(2)
+    else
+      files[#files + 1] = path
+    end
   end
 end
 if #files == 0 then fail("manifest.txt lists no files.") end
@@ -173,7 +180,21 @@ for _, path in ipairs(files) do
   handle.close()
 end
 
+-- Only after every write has succeeded: a half-finished install that has
+-- also deleted things is worse than one that has not.
+local removed = 0
+for _, path in ipairs(obsolete) do
+  local target = fs.combine(options.dir, path)
+  if fs.exists(target) and not fs.isDir(target) then
+    if pcall(fs.delete, target) then removed = removed + 1 end
+  end
+end
+
 say("Installed " .. #files .. " files.", colors.lime)
+if removed > 0 then
+  say("Removed " .. removed .. " file(s) left by an earlier version.",
+    colors.lightGray)
+end
 
 -- ----------------------------------------------------------------- basalt ---
 

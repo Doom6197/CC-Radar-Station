@@ -79,7 +79,10 @@ wget run <url> dev --dir /apps
 
 Run the same command again any time to update — it downloads everything into
 memory first and only writes once every file has arrived, so a dropped
-connection leaves the computer exactly as it was. **Settings from every earlier
+connection leaves the computer exactly as it was. It also **removes files an
+earlier version shipped and this one does not** (a `-` line in `manifest.txt`),
+because a renamed module left on disk goes on being loaded beside the one that
+replaced it. Modules you dropped in yourself are never touched. **Settings from every earlier
 version are imported automatically**, and an upgrade never sees the first-boot
 questions: what is already on disk is your answer to them.
 
@@ -163,7 +166,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.12                                    |  SETTINGS   v8.12
+ SETTINGS   v8.13                                    |  SETTINGS   v8.13
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -608,7 +611,7 @@ Under **Settings → Pages → Flight → Autopilot**:
 | **Turn rate** | how fast it is *allowed* to come round. **This is the setting that stops overshooting** — turn it down until the ship stops hunting |
 | **Turn power** | the most thrust difference it will use to hold that rate |
 | **Turn in** | how long it aims to take to null the heading error; bigger is a wider, gentler turn |
-| **Arrive within** | how close is close enough |
+| **Arrive within** | how close is close enough — 5 blocks to 1 km |
 | **Ease off within** | where it starts throttling back so it stops rather than sailing past |
 | **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
 | **Test left / right thrusters** | a one-second pulse on one side at cruise level, to check the wiring without engaging |
@@ -1252,6 +1255,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.13 - three from one screenshot.** Picking **No limit** as the autopilot's
+shut-off range set it to **6 blocks**: the picker helper did
+`valueOf(item, i) or i`, so an entry whose value is deliberately `false` came
+back as its index. **Arrive within** goes up to a kilometre now, and the two
+settings floored by it come up with it. And the **LOG tab that reappeared
+beside ALERTS** was `radar/modules/log.lua` left on disk by the rename --
+installing only ever wrote files. The installer removes retired files now, the
+registry refuses to load one that survives anyway, and the installer's mocked
+filesystem models `delete` and `isDir`, which is the gap that let it through.
 
 **v8.12 - the autopilot commands a turn rate.** A logged flight showed a ship
 yawing at 26 deg/s while making 5 blocks a second, spending 60% of the time at

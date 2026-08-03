@@ -5,6 +5,11 @@
 # Every module in radar/modules/ has to be listed here, or the installer will
 # not fetch it and the page simply will not exist on the computer.
 # preview/install-test.lua checks this file against what is on disk.
+#
+# A line starting with "-" is a file EARLIER VERSIONS SHIPPED that must now be
+# removed. The installer only ever wrote files, so a module that was renamed
+# stayed on the computer and the registry went on loading it -- which is how
+# one station ended up with both an ALERTS tab and the LOG tab it replaced.
 
 powerclient.lua
 radar.lua
@@ -39,3 +44,5 @@ radar/modules/radar.lua
 radar/modules/settings.lua
 radar/modules/status.lua
 radar/modules/weather.lua
+
+-radar/modules/log.lua

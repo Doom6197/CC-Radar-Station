@@ -45,6 +45,16 @@ modules.BUILT_IN = {
   "settings",
 }
 
+-- Modules that USED to ship and no longer do, and what replaced them.
+--
+-- Installing only ever wrote files, so a renamed module stayed on disk and the
+-- drop-in loader below went on finding it -- which is how one station ended up
+-- showing both an ALERTS tab and the LOG tab it replaced, the second of them
+-- running last version's code against this version's data. The installer
+-- deletes these now; this makes sure a copy that survives by some other route
+-- still cannot come back.
+modules.RETIRED = { log = "alerts" }
+
 modules.list  = {}     -- descriptors, in display order
 modules.index = {}     -- id -> descriptor
 
@@ -117,7 +127,11 @@ function modules.scan()
       table.sort(entries)
       for _, entry in ipairs(entries) do
         local id = entry:match("^(.+)%.lua$")
-        if id and not seen[id] then
+        -- A retired id is skipped rather than loaded: the file is last
+        -- version's page, and it would sit in the tab strip beside the one
+        -- that replaced it drawing this version's data with last version's
+        -- code.
+        if id and not seen[id] and not modules.RETIRED[id] then
           ids[#ids + 1] = id
           seen[id] = true
         end

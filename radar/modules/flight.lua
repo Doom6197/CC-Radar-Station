@@ -89,15 +89,18 @@ function view.sanitise(cfg)
   -- file, where it would read like a setting that still did something.
   auto.turnFull   = nil
   auto.record     = auto.record == true
-  auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 500)
+  auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 2000)
   auto.slowWithin = util.clamp(floor(tonumber(auto.slowWithin) or 120),
-    auto.arrive, 2000)
+    auto.arrive, 4000)
 
   -- false is a deliberate "no limit"; anything unrecognisable becomes the
   -- default rather than silently removing the limit.
   if auto.range ~= false then
     local range = tonumber(auto.range)
     auto.range = (range and range > 0) and floor(range) or 1000
+    -- A shut-off range inside the arrive radius is a contradiction: it would
+    -- refuse to fly anywhere it was not already close enough to have stopped.
+    if auto.range < auto.arrive then auto.range = auto.arrive end
   end
 
   -- A relay side is a name, and so is the relay's own peripheral name. Which
@@ -1245,12 +1248,15 @@ function view.autopilotSettings(ctx)
 
   ctx.row("Arrive within", function() return auto.arrive .. " blocks" end, function()
     ctx.openPicker("ARRIVE WITHIN",
-      ctx.entriesOf({ 5, 10, 25, 50, 100 },
+      ctx.entriesOf({ 5, 10, 25, 50, 100, 250, 500, 1000 },
         function(v) return v .. " blocks" end, function(v) return v end),
       auto.arrive,
       function(value)
         auto.arrive = value
+        -- The two below it are both floored by this one, so raising it drags
+        -- them up rather than leaving a range that contradicts it.
         if auto.slowWithin < value then auto.slowWithin = value end
+        if auto.range ~= false and auto.range < value then auto.range = value end
         app:saveConfig()
         ctx.refreshRows()
       end)
@@ -1259,7 +1265,7 @@ function view.autopilotSettings(ctx)
   ctx.row("Ease off within", function() return auto.slowWithin .. " blocks" end,
     function()
       ctx.openPicker("EASE OFF WITHIN",
-        ctx.entriesOf({ 50, 120, 250, 500, 1000 },
+        ctx.entriesOf({ 50, 120, 250, 500, 1000, 2000 },
           function(v) return v .. " blocks" end, function(v) return v end),
         auto.slowWithin,
         function(value)
