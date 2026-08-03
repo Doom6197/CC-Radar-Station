@@ -41,6 +41,7 @@ view.defaults = {
   -- how hard to fly. Whether the autopilot is ENGAGED is deliberately not
   -- here: see view.attach.
   autopilot = {
+    relay = nil,          -- which relay, by peripheral name; nil = the first
     left  = nil,          -- relay side carrying the left thruster group
     right = nil,          -- and the right
     cruise     = 0.6,     -- throttle in level flight, 0..1
@@ -90,11 +91,12 @@ function view.sanitise(cfg)
     auto.range = (range and range > 0) and floor(range) or 1000
   end
 
-  -- A relay side is a name. Which names are legal is the relay's business --
-  -- it is asked at pick time -- so this only rejects what cannot be one.
-  for _, key in ipairs({ "left", "right" }) do
-    local side = auto[key]
-    if type(side) ~= "string" or #side == 0 then auto[key] = nil end
+  -- A relay side is a name, and so is the relay's own peripheral name. Which
+  -- names are legal is the network's business -- both are asked at pick time
+  -- -- so this only rejects what cannot be one.
+  for _, key in ipairs({ "relay", "left", "right" }) do
+    local name = auto[key]
+    if type(name) ~= "string" or #name == 0 then auto[key] = nil end
   end
 end
 
@@ -186,18 +188,29 @@ function view.destinationLabel(app)
 end
 
 -- -------------------------------------------------------------- autopilot ---
--- The thrusters are driven by REDSTONE, 0 to 15, over a CC:Tweaked Redstone
--- Relay: one of its sides carries the left thruster group and another carries
--- the right, usually through a redstone link at each.
+-- The thrusters are driven by REDSTONE, 0 to 15. The chain is:
+--
+--   computer --wired modem--> Redstone Relay --side--> Create Redstone Link
+--                                                        --wireless--> thrusters
+--
+-- so the relay is a NETWORK peripheral rather than something bolted to the
+-- computer. Two of its sides carry a redstone link each, one per thruster
+-- group, and the link puts the same signal strength out at the far end.
 --
 -- The relay rather than the computer's own sides, deliberately. The computer
 -- has one redstone output and the alert system already owns it -- see
 -- Settings / Alerts / Redstone output -- and two subsystems fighting over one
--- line would be a fault nobody could see from either page. The relay is its
--- own device with six sides of its own.
+-- line would be a fault nobody could see from either page.
+--
+-- A wired network can carry more than one relay, so which one is a setting:
+-- discover() collects every relay it can see and the operator picks. Taking
+-- whichever answered first would mean an autopilot that quietly moved to a
+-- different device when somebody added a lamp controller to the network.
 --
 -- Nothing here names the peripheral type. It is claimed by the methods it
--- answers to, exactly as every other device is.
+-- answers to, exactly as every other device is -- which is also what makes a
+-- relay on the far side of a wired modem indistinguishable from one on a side
+-- of the computer, since hardware.discover walks both.
 
 local SET_METHODS   = { "setAnalogOutput", "setAnalogueOutput" }
 local SIDES_METHODS = { "getSides" }
@@ -218,18 +231,51 @@ function view.looksLikeRelay(dev)
   return methodOf(dev, SET_METHODS) ~= nil and methodOf(dev, SIDES_METHODS) ~= nil
 end
 
+--- Collects every relay on the network, in name order.
+---
+--- `kit.relay` is whichever one the settings name, falling back to the first.
+--- discover() cannot read the settings -- it is handed a kit, not an app -- so
+--- the choice is applied in view.chooseRelay below, which attach() calls.
 function view.discover(kit)
-  kit.relay = nil
+  kit.relays = {}
   for _, entry in ipairs(kit.peripherals or {}) do
     if view.looksLikeRelay(entry.dev) then
-      kit.relay = {
+      kit.relays[#kit.relays + 1] = {
         name = entry.name, dev = entry.dev, type = entry.type,
         set = methodOf(entry.dev, SET_METHODS),
       }
-      break
     end
   end
+  kit.relay = kit.relays[1]
   return kit
+end
+
+--- Points kit.relay at the relay the settings name.
+---
+--- A name that is no longer on the network -- the modem pulled, the block
+--- mined, the ship reassembled -- falls back to whatever IS there rather than
+--- leaving the autopilot with nothing, and the settings page says which.
+---@return table|nil relay
+function view.chooseRelay(app)
+  local kit = app.kit
+  local wanted = app.cfg.autopilot.relay
+  kit.relay = kit.relays and kit.relays[1] or nil
+  if not wanted then return kit.relay end
+  for _, relay in ipairs(kit.relays or {}) do
+    if relay.name == wanted then
+      kit.relay = relay
+      return relay
+    end
+  end
+  return kit.relay
+end
+
+--- Whether the relay in use is the one that was asked for. False while a named
+--- relay is missing and something else has been substituted.
+function view.relayIsChosen(app)
+  local wanted = app.cfg.autopilot.relay
+  if not wanted then return true end
+  return app.kit.relay ~= nil and app.kit.relay.name == wanted
 end
 
 --- The sides of the relay a thruster group can be wired to.
@@ -410,6 +456,10 @@ function view.attach(app)
     error = nil,
     faulted = nil,
   }
+
+  -- attach() runs again after every rescan, which is exactly when the chosen
+  -- relay has to be found again on the network.
+  view.chooseRelay(app)
 
   -- The hardware may have just been rescanned out from under a flying ship.
   if app.autopilot.engaged and not app.kit.relay then
@@ -889,18 +939,63 @@ function view.autopilotSettings(ctx)
   ctx.row("Relay", function()
     local relay = app.kit.relay
     if not relay then return "not found" end
-    return ("%s   %d sides"):format(util.shorten(relay.name, 16), #view.sides(app))
+    if not view.relayIsChosen(app) then
+      return ("%s   (%s is gone)"):format(util.shorten(relay.name, 14),
+        util.shorten(auto.relay, 14))
+    end
+    local found = #(app.kit.relays or {})
+    if found > 1 then
+      return ("%s   1 of %d"):format(util.shorten(relay.name, 16), found)
+    end
+    return util.shorten(relay.name, 20)
   end, function()
-    app:rescan()
-    root:toast(app.kit.relay and ("Relay: " .. app.kit.relay.name)
-      or "No redstone relay found",
-      app.kit.relay and "success" or "warning")
-  end, function() return app.kit.relay and theme.good or theme.warn end)
+    -- A wired network can carry several. Offering the list beats taking
+    -- whichever answered first and quietly moving to a different device the
+    -- day somebody adds another one.
+    local relays = app.kit.relays or {}
+    if #relays == 0 then
+      app:rescan()
+      root:toast(app.kit.relay and ("Relay: " .. app.kit.relay.name)
+        or "No redstone relay found",
+        app.kit.relay and "success" or "warning")
+      return
+    end
+    local entries = {}
+    for _, relay in ipairs(relays) do
+      entries[#entries + 1] = {
+        label = ctx.withHint(relay.name, relay.type),
+        value = relay.name,
+      }
+    end
+    entries[#entries + 1] = {
+      label = ctx.withHint("-- rescan --", "look for relays again"),
+      value = false,
+    }
+    ctx.openPicker("REDSTONE RELAY", entries, auto.relay, function(value)
+      if value == false then
+        app:rescan()
+        root:toast(("%d relay(s) found"):format(#(app.kit.relays or {})), "info")
+      else
+        auto.relay = value
+        app:saveConfig()
+        view.chooseRelay(app)
+        root:toast("Relay: " .. value, "success")
+      end
+      ctx.refreshRows()
+    end)
+  end, function()
+    if not app.kit.relay then return theme.warn end
+    return view.relayIsChosen(app) and theme.good or theme.warn
+  end)
 
-  ctx.note("A CC:Tweaked Redstone Relay, wired to the thruster groups. Not "
-    .. "the computer's own sides: the alert output already owns those, and "
-    .. "two things driving one line is a fault you cannot see from either "
+  ctx.note("A CC:Tweaked Redstone Relay, usually on a wired modem next to the "
+    .. "computer. Two of its sides carry a Create Redstone Link each, and the "
+    .. "link puts the same 0-15 signal out at the thrusters.", true)
+  ctx.note("Not the computer's own sides: the alert output already owns those, "
+    .. "and two things driving one line is a fault you cannot see from either "
     .. "page.", true)
+  ctx.note("The side the wired modem is on cannot carry a link, so do not "
+    .. "pick it below.")
 
   --- One group's side picker. The two are identical bar the key, so they are
   --- built rather than written twice and left to drift apart.

@@ -116,7 +116,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 | **Wireless or ender modem** | the MAIN BASE and MOBILE roles, and power clients. Use an **ender** modem: no range limit, works across dimensions |
 | **Advanced Monitor(s)** | any size; each monitor gets its own page |
 | **Speaker(s)** | every speaker on the network plays the alert |
-| **Redstone Relay** (CC: Tweaked) | the flight page's [autopilot](#autopilot): two sides driving the left and right thruster groups |
+| **Redstone Relay** (CC: Tweaked), on a wired modem | the flight page's [autopilot](#autopilot): two sides driving the left and right thruster groups |
 | Any redstone contraption on a side of the computer | the redstone output |
 
 Peripherals are matched on **what they can do**, not on their type name, so a
@@ -450,14 +450,33 @@ With a **CC:Tweaked Redstone Relay** attached, the flight page grows an `A/P`
 row that flies the ship to whatever the destination is — `HOME`, a tracked
 contact, or a waypoint.
 
-Two of the relay's sides carry the thruster groups — one left, one right,
-usually through a redstone link at each. The thrusters take a **signal
-strength of 0 to 15**, and that is what the autopilot writes.
+The chain is:
+
+```
+  computer ──wired modem──> Redstone Relay ──side──> Create Redstone Link
+                                                       ··wireless··> thrusters
+```
+
+Two of the relay's sides carry a **Create Redstone Link** each, one per
+thruster group, and the link puts the same signal out at the far end. The
+thrusters take a **signal strength of 0 to 15**, and that is what the autopilot
+writes.
 
 It is the relay rather than the computer's own sides on purpose: the computer
 has **one** redstone output and the alert system already owns it
 (*Settings → Alerts → Redstone output*). Two subsystems driving one line would
 be a fault you could not see from either page.
+
+Because it arrives over a wired modem it is found by **network name**, exactly
+as any other network peripheral is — and a wired network can carry more than
+one relay, so **which one is a setting**. Taking whichever answered first would
+mean an autopilot that quietly moved to a different device the day you added
+another relay. Name one and it is pinned; if it later disappears from the
+network the page falls back to whatever *is* there and says so rather than
+pretending.
+
+> The side the wired modem occupies cannot also carry a link, so do not pick
+> it as a thruster side.
 
 ```
    FLT           2      FLT           2      FLT           2
@@ -545,7 +564,7 @@ Under **Settings → Pages → Flight → Autopilot**:
 
 | | |
 |---|---|
-| **Relay** | which peripheral, matched on the methods it answers to rather than its type name |
+| **Relay** | which relay on the network, matched on the methods it answers to rather than its type name. Press to pick, or to rescan |
 | **Left / Right thrusters** | which side of the relay each group is wired to |
 | **Swap left and right** | for when they are backwards |
 | **Cruise** | throttle in level flight |
@@ -1151,8 +1170,10 @@ everything still renders, just flatter.
 
 **v8.8 - the autopilot drives a redstone relay.** The contraption controller
 is gone. The thruster groups are now two sides of a **CC:Tweaked Redstone
-Relay**, carrying a signal strength of **0 to 15** -- not the computer's own
-sides, which the alert output already owns.
+Relay** on a wired modem, each carrying a **Create Redstone Link** to the
+thrusters at a signal strength of **0 to 15** -- not the computer's own sides,
+which the alert output already owns. A wired network can carry several relays,
+so which one is a setting rather than whichever answered first.
 
 **v8.7 - autopilot.** The flight page flies the ship to its destination on
 **differential thrust**: left and right thruster groups, steered by the

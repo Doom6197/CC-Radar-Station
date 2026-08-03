@@ -2863,15 +2863,67 @@ check("a redstone relay is claimed by what it can do", function()
     setAnalogueOutput = function() end,
   }), "the other spelling works too")
 
+  -- Found by network NAME rather than on a side of the computer, which is how
+  -- a peripheral on a wired modem arrives. "redstone_relay_0" is not a side,
+  -- so this can only have come through peripheral.getNames().
   PERIPHERALS.redstone_relay_0 = RELAY
   app:rescan()
   assert(app.kit.relay, "the rescan found it")
-  assert(app.kit.relay.name == "redstone_relay_0", "under its name")
+  assert(app.kit.relay.name == "redstone_relay_0", "under its network name")
+  for _, side in ipairs({ "top", "bottom", "left", "right", "front", "back" }) do
+    assert(app.kit.relay.name ~= side, "which is not a side of the computer")
+  end
   assert(app.kit.relay.set == "setAnalogOutput", "with the setter it answers to")
 
   local sides = flightModule.sides(app)
   assert(#sides == 6, "six sides offered, got " .. #sides)
   assert(sides[1] == "top", "as the relay reports them, got " .. sides[1])
+end)
+
+check("the relay is picked, not whichever answered first", function()
+  -- The relay sits on a wired modem, so it arrives the same way any network
+  -- peripheral does -- and a wired network can carry more than one. Taking
+  -- whichever answered first would mean an autopilot that quietly moved to a
+  -- different device the day somebody added another relay.
+  local flightModule = modules.byId("flight")
+  local SECOND = {
+    __type = "redstone_relay",
+    getSides = function() return { "top", "bottom", "left", "right" } end,
+    setAnalogOutput = function() return true end,
+  }
+  PERIPHERALS.redstone_relay_9 = SECOND
+  app:rescan()
+
+  assert(#app.kit.relays == 2, "both relays found, got " .. #app.kit.relays)
+  assert(app.kit.relay.name == "redstone_relay_0",
+    "the first by name is the default, got " .. app.kit.relay.name)
+  assert(flightModule.relayIsChosen(app), "which counts as chosen")
+
+  -- Naming one pins it, and it survives a rescan.
+  app.cfg.autopilot.relay = "redstone_relay_9"
+  flightModule.chooseRelay(app)
+  assert(app.kit.relay.name == "redstone_relay_9", "the named one is used")
+  app:rescan()
+  assert(app.kit.relay.name == "redstone_relay_9",
+    "and is still used after a rescan, got " .. app.kit.relay.name)
+
+  -- Its sides come from that relay, not the other one.
+  assert(#flightModule.sides(app) == 4,
+    "the sides are the chosen relay's, got " .. #flightModule.sides(app))
+
+  -- Pulled off the network: fall back to what IS there rather than leaving
+  -- the autopilot with nothing, and say so.
+  PERIPHERALS.redstone_relay_9 = nil
+  app:rescan()
+  assert(app.kit.relay and app.kit.relay.name == "redstone_relay_0",
+    "fell back to the one still there")
+  assert(not flightModule.relayIsChosen(app),
+    "and does not pretend it is the one that was asked for")
+
+  app.cfg.autopilot.relay = nil
+  app:rescan()
+  assert(flightModule.relayIsChosen(app), "clearing the choice settles it again")
+  assert(#flightModule.sides(app) == 6, "back on the six-sided relay")
 end)
 
 check("a throttle becomes a redstone level", function()
