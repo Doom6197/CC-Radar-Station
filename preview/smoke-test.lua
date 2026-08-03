@@ -1938,8 +1938,8 @@ check("a dead position feed cuts the thrusters", function()
 end)
 
 check("every output the law can produce is a legal throttle", function()
-  -- The controller takes 0..1 and raises a Lua error outside it, so a number
-  -- that escapes the clamp is a crash on the ship rather than a wrong turn.
+  -- Anything outside 0..1 quantises to a level outside 0..15, which the
+  -- relay refuses outright -- a crash on the ship rather than a wrong turn.
   for _, cruise in ipairs({ 0.05, 0.5, 1.0 }) do
     for _, turnFull in ipairs({ 10, 60, 180 }) do
       for course = 0, 359, 17 do
@@ -2823,62 +2823,78 @@ check("a ship renders a relayed sweep exactly as the base did", function()
 end)
 
 --------------------------------------------------------- the autopilot, wired --
--- A Create: Gadgets & Gizmos analogue contraption controller, as the docs
--- describe it: numbered player-input channels, each taking 0..1.
+-- A CC:Tweaked Redstone Relay: the redstone API as peripheral methods, with
+-- six sides of its own. Two of them carry the thruster groups.
 
-local WRITTEN = {}                    -- input id -> last value written
+local WRITTEN = {}                    -- relay side -> last level written
 
-local CONTROLLER = {
-  __type = "analogue_contraption_controller",
+local RELAY = {
+  __type = "redstone_relay",
   written = WRITTEN,
-  listInputs = function()
-    return {
-      { id = 1, alias = "port", label = "Left bank" },
-      { id = 2, alias = "starboard", label = "Right bank" },
-      { id = 3, label = "Winch" },
-    }
+  getSides = function()
+    return { "top", "bottom", "left", "right", "front", "back" }
   end,
-  -- The docs are explicit that an input value outside 0..1 raises, so the mock
-  -- raises too: a number that escapes the clamp has to fail here rather than
+  -- Redstone carries 0..15 and nothing else, so the mock refuses anything
+  -- else: a number that escapes the quantiser has to fail here rather than
   -- quietly being stored.
-  setInput = function(id, value)
-    if type(value) ~= "number" or value < 0 or value > 1 then
-      error("input value out of range: " .. tostring(value), 0)
+  setAnalogOutput = function(side, level)
+    if type(level) ~= "number" or level % 1 ~= 0 or level < 0 or level > 15 then
+      error("not a redstone level: " .. tostring(level), 0)
     end
-    WRITTEN[id] = value
+    WRITTEN[side] = level
     return true
   end,
 }
 
-check("a contraption controller is claimed by what it can do", function()
+check("a redstone relay is claimed by what it can do", function()
   local flightModule = modules.byId("flight")
 
-  assert(flightModule.looksLikeController(CONTROLLER),
-    "lists inputs and takes setInput")
-  assert(not flightModule.looksLikeController({ setInput = function() end }),
-    "a setter alone is not enough to drive anything")
-  assert(not flightModule.looksLikeController(PERIPHERALS.back),
-    "and a player detector is not a controller")
-  assert(not flightModule.looksLikeController("nonsense"), "nor is a string")
+  assert(flightModule.looksLikeRelay(RELAY), "takes an analog output by side")
+  assert(not flightModule.looksLikeRelay({ setAnalogOutput = function() end }),
+    "a setter with no sides to set is not a relay")
+  assert(not flightModule.looksLikeRelay(PERIPHERALS.back),
+    "and a player detector is not one")
+  assert(not flightModule.looksLikeRelay("nonsense"), "nor is a string")
 
-  -- Nothing anywhere names the peripheral type, so a controller from a later
-  -- version -- or another mod speaking the same shape -- still lands here.
-  assert(flightModule.looksLikeController({
-    listChannels = function() return {} end,
-    setChannel = function() end,
-  }), "the channel spelling works too")
+  -- Nothing anywhere names the peripheral type, so a relay from a later
+  -- version -- or the British spelling -- still lands here.
+  assert(flightModule.looksLikeRelay({
+    getSides = function() return {} end,
+    setAnalogueOutput = function() end,
+  }), "the other spelling works too")
 
-  PERIPHERALS.contraption_controller_0 = CONTROLLER
+  PERIPHERALS.redstone_relay_0 = RELAY
   app:rescan()
-  assert(app.kit.controller, "the rescan found it")
-  assert(app.kit.controller.name == "contraption_controller_0", "under its name")
-  assert(app.kit.controller.set == "setInput", "with the setter it answers to")
+  assert(app.kit.relay, "the rescan found it")
+  assert(app.kit.relay.name == "redstone_relay_0", "under its name")
+  assert(app.kit.relay.set == "setAnalogOutput", "with the setter it answers to")
 
-  local inputs = flightModule.inputs(app)
-  assert(#inputs == 3, "three inputs offered, got " .. #inputs)
-  assert(inputs[1].id == 1 and inputs[1].label == "port",
-    "named by their alias where they have one, got " .. inputs[1].label)
-  assert(inputs[3].label == "Winch", "and by their label otherwise")
+  local sides = flightModule.sides(app)
+  assert(#sides == 6, "six sides offered, got " .. #sides)
+  assert(sides[1] == "top", "as the relay reports them, got " .. sides[1])
+end)
+
+check("a throttle becomes a redstone level", function()
+  assert(autopilotLib.level(0) == 0, "off is off")
+  assert(autopilotLib.level(1) == 15, "full is fifteen")
+  assert(autopilotLib.level(0.5) == 8, "half is eight, got " .. autopilotLib.level(0.5))
+  assert(autopilotLib.level(0.6) == 9, "cruise is nine, got " .. autopilotLib.level(0.6))
+
+  -- A real command must never round down to "off": a thruster meant to be
+  -- idling would be indistinguishable from one that has been cut, and only
+  -- one of those is a decision.
+  assert(autopilotLib.level(0.01) == 1, "a whisper is still on")
+  assert(autopilotLib.level(0.0001) == 1, "however small")
+
+  -- And nothing may leave the range redstone actually has.
+  for i = 0, 100 do
+    local level = autopilotLib.level(i / 100)
+    assert(level % 1 == 0, "a whole number at " .. i)
+    assert(level >= 0 and level <= 15, "in range at " .. i .. ", got " .. level)
+  end
+  assert(autopilotLib.level(-5) == 0, "junk below the range is off")
+  assert(autopilotLib.level(99) == 15, "and above it is full")
+  assert(autopilotLib.level(nil) == 0, "and nothing at all is off")
 end)
 
 check("the autopilot refuses to engage without what it needs", function()
@@ -2888,9 +2904,9 @@ check("the autopilot refuses to engage without what it needs", function()
 
   local engaged, message = flightModule.setAutopilot(app, true)
   assert(not engaged, "no inputs mapped, so it will not fly")
-  assert(message:find("inputs", 1, true), "and says why, got " .. message)
+  assert(message:find("sides", 1, true), "and says why, got " .. message)
 
-  auto.left, auto.right = 1, 2
+  auto.left, auto.right = "left", "right"
   app.cfg.flightTarget = "custom"
   app.cfg.flightX, app.cfg.flightZ = nil, nil
   config.sanitise(app.cfg)               -- an empty waypoint falls back to home
@@ -2900,12 +2916,12 @@ check("the autopilot refuses to engage without what it needs", function()
   app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
   app.cfg.flightTarget = "home"
   engaged, message = flightModule.setAutopilot(app, true)
-  assert(engaged, "with a controller, inputs and a destination it engages: " .. message)
+  assert(engaged, "with a relay, sides and a destination it engages: " .. message)
   assert(app.autopilot.phase == "probe", "starting by finding its course")
 
   flightModule.setAutopilot(app, false)
   assert(not app.autopilot.engaged, "and switches off again")
-  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+  assert(WRITTEN["left"] == 0 and WRITTEN["right"] == 0,
     "cutting both thrusters on the way out")
 end)
 
@@ -2919,14 +2935,14 @@ check("engagement is never restored from a settings file", function()
     assert(key ~= "enabled" and key ~= "engaged",
       "engagement is not a stored setting, found " .. key)
   end
-  assert(reloaded.autopilot.left == 1, "while the wiring is stored")
+  assert(reloaded.autopilot.left == "left", "while the wiring is stored")
   assert(reloaded.autopilot.cruise, "and the tuning")
 end)
 
 check("the autopilot flies the ship at the destination", function()
   local flightModule = modules.byId("flight")
   local auto = app.cfg.autopilot
-  auto.left, auto.right, auto.cruise = 1, 2, 0.6
+  auto.left, auto.right, auto.cruise = "left", "right", 0.6
   auto.arrive, auto.slowWithin, auto.range = 25, 200, false
   auto.turnFull = 60
 
@@ -2947,9 +2963,14 @@ check("the autopilot flies the ship at the destination", function()
   for _ = 1, 12 do result = flightModule.control(app, CLOCK, 0.5) end
 
   assert(result.phase == "steer", "steering, got " .. result.phase)
-  assert(CONTROLLER.written[1] == result.left, "the left input was written")
-  assert(CONTROLLER.written[2] == result.right, "and the right one")
-  assert(result.left ~= result.right, "with a difference between them to turn on")
+  -- What reaches the relay is a redstone level, not the throttle.
+  assert(WRITTEN["left"] == autopilotLib.level(result.left),
+    "the left side carries its level, got " .. tostring(WRITTEN["left"]))
+  assert(WRITTEN["right"] == autopilotLib.level(result.right),
+    "and the right one, got " .. tostring(WRITTEN["right"]))
+  assert(WRITTEN["left"] ~= WRITTEN["right"],
+    "with a difference between them to turn on: "
+      .. WRITTEN["left"] .. "/" .. WRITTEN["right"])
 
   -- Now flying straight at it: both sides level.
   app.flight:reset()
@@ -2961,6 +2982,9 @@ check("the autopilot flies the ship at the destination", function()
   assert(result.phase == "steer", "still steering")
   assert(math.abs(result.left - result.right) < 0.001,
     "lined up, so both sides match: " .. result.left .. "/" .. result.right)
+  assert(WRITTEN["left"] == WRITTEN["right"] and WRITTEN["left"] > 0,
+    "and the same redstone level goes to each, got "
+      .. WRITTEN["left"] .. "/" .. WRITTEN["right"])
 
   -- Arriving stops it, without disengaging: a moving contact may pull away
   -- again, and having to re-engage every time would be useless for chasing.
@@ -2968,7 +2992,7 @@ check("the autopilot flies the ship at the destination", function()
   app.cfg.baseX, app.cfg.baseZ = 955, 0
   result = flightModule.control(app, CLOCK, 0.5)
   assert(result.phase == "arrived", "arrived, got " .. result.phase)
-  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+  assert(WRITTEN["left"] == 0 and WRITTEN["right"] == 0,
     "and the thrusters went off")
   assert(app.autopilot.engaged, "while staying engaged")
 
@@ -3001,7 +3025,7 @@ check("a fault stops the ship and goes in the alert log", function()
   local result = flightModule.control(app,
     FIX_AT + autopilotLib.STALE_SECONDS + 2, 0.5)
   assert(result.phase == "nofix", "noticed, got " .. result.phase)
-  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+  assert(WRITTEN["left"] == 0 and WRITTEN["right"] == 0,
     "the thrusters went off")
   assert(not app.autopilot.engaged, "and it disengaged rather than waiting")
 
@@ -3027,14 +3051,14 @@ check("shutting the station down lets go of the thrusters", function()
 
   assert(flightModule.setAutopilot(app, true), "engaged")
   flightModule.control(app, CLOCK, 0.5)
-  assert(CONTROLLER.written[1] > 0, "under power, got " .. CONTROLLER.written[1])
+  assert(WRITTEN["left"] > 0, "under power, got " .. WRITTEN["left"])
 
   -- A ship still under power with nothing left running to steer it is the one
   -- outcome worth writing code to prevent.
   app:stop()
-  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+  assert(WRITTEN["left"] == 0 and WRITTEN["right"] == 0,
     "quitting cut the thrusters, got "
-      .. CONTROLLER.written[1] .. "/" .. CONTROLLER.written[2])
+      .. WRITTEN["left"] .. "/" .. WRITTEN["right"])
   assert(not app.autopilot.engaged, "and disengaged")
 
   app.running = true                      -- the rest of the suite carries on
@@ -4497,7 +4521,7 @@ check("the autopilot is switched on from the 1x1 flight screen", function()
     if root.monitor then monitorRoot = root end
   end
 
-  app.cfg.autopilot.left, app.cfg.autopilot.right = 1, 2
+  app.cfg.autopilot.left, app.cfg.autopilot.right = "left", "right"
   app.cfg.autopilot.range = false
   app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
   app.cfg.flightTarget = "home"
@@ -4526,22 +4550,22 @@ check("the autopilot is switched on from the 1x1 flight screen", function()
   tinyScreen(monitorRoot, "flight")
   assert(view.touch(3, 1), "pressing it again was claimed")
   assert(not app.autopilot.engaged, "and switched it off")
-  assert(WRITTEN[1] == 0 and WRITTEN[2] == 0, "cutting the thrusters")
+  assert(WRITTEN["left"] == 0 and WRITTEN["right"] == 0, "cutting the thrusters")
 
-  -- Without a controller anywhere the page is exactly what it always was, so
+  -- Without a relay anywhere the page is exactly what it always was, so
   -- a base or a pocket computer pays nothing for a feature it cannot use.
-  PERIPHERALS.contraption_controller_0 = nil
+  PERIPHERALS.redstone_relay_0 = nil
   app:rescan()
   local without = tinyScreen(monitorRoot, "flight")
-  assert(not app.kit.controller, "the controller is gone")
+  assert(not app.kit.relay, "the relay is gone")
   app.cfg.autopilot.left, app.cfg.autopilot.right = nil, nil
   without = tinyScreen(monitorRoot, "flight")
   assert(not without.text:find("A/P", 1, true),
     "no autopilot row with nothing to drive:\n" .. without.text)
 
-  PERIPHERALS.contraption_controller_0 = CONTROLLER
+  PERIPHERALS.redstone_relay_0 = RELAY
   app:rescan()
-  app.cfg.autopilot.left, app.cfg.autopilot.right = 1, 2
+  app.cfg.autopilot.left, app.cfg.autopilot.right = "left", "right"
 end)
 
 check("MARK drops the waypoint where the pilot is, and is not on a 1x1", function()

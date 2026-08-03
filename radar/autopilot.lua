@@ -20,10 +20,14 @@
 --
 -- HOW IT STEERS
 --
---   Two thruster groups, left and right, each taking 0..1. More thrust on the
---   LEFT yaws the nose to the RIGHT, so the error -- the signed angle from the
---   course being made to the bearing wanted -- is added to the left and taken
---   off the right.
+--   Two thruster groups, left and right. More thrust on the LEFT yaws the nose
+--   to the RIGHT, so the error -- the signed angle from the course being made
+--   to the bearing wanted -- is added to the left and taken off the right.
+--
+--   step() works in a dimensionless 0..1 throttle. What actually reaches the
+--   thrusters is a REDSTONE LEVEL, 0 to 15, through level() below -- so the
+--   control law never has to think in sixteenths, and the one place the
+--   quantisation happens is one function with its own tests.
 --
 --   Everything is proportional, with three softeners that matter on a slow
 --   control loop. A DEADBAND, because a fix a second apart cannot resolve five
@@ -88,6 +92,23 @@ autopilot.RANGES = { 250, 500, 1000, 2500, 5000, false }
 
 function autopilot.phaseLabel(phase)
   return autopilot.PHASES[phase] or tostring(phase)
+end
+
+-- Redstone carries sixteen levels and no more, so a 0..1 throttle lands on one
+-- of them. That is the resolution the thrusters actually have.
+autopilot.MAX_LEVEL = 15
+
+--- A 0..1 throttle as a redstone signal strength.
+---
+--- Anything above zero comes out as at least 1. Rounding a real command down
+--- to "off" would make a thruster that is meant to be idling indistinguishable
+--- from one that has been cut, and only one of those is a decision.
+---@return number level 0..15
+function autopilot.level(throttle)
+  throttle = tonumber(throttle) or 0
+  if throttle <= 0 then return 0 end
+  local level = floor(util.clamp(throttle, 0, 1) * autopilot.MAX_LEVEL + 0.5)
+  return math.max(1, math.min(autopilot.MAX_LEVEL, level))
 end
 
 --- Walks a value toward a target by at most `limit`.

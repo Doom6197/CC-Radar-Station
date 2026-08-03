@@ -37,11 +37,11 @@ view.defaults = {
   flightTarget = "home",
   flightX = nil, flightY = nil, flightZ = nil,
 
-  -- Which contraption-controller inputs the thruster groups are on, and how
-  -- hard to fly. Whether the autopilot is ENGAGED is deliberately not here:
-  -- see view.attach.
+  -- Which sides of the redstone relay the thruster groups are wired to, and
+  -- how hard to fly. Whether the autopilot is ENGAGED is deliberately not
+  -- here: see view.attach.
   autopilot = {
-    left  = nil,          -- input id or alias driving the left thruster group
+    left  = nil,          -- relay side carrying the left thruster group
     right = nil,          -- and the right
     cruise     = 0.6,     -- throttle in level flight, 0..1
     turnFull   = 60,      -- degrees of course error for full deflection
@@ -90,11 +90,11 @@ function view.sanitise(cfg)
     auto.range = (range and range > 0) and floor(range) or 1000
   end
 
-  -- An input id may be a number or a string alias, and nothing else.
-  for _, side in ipairs({ "left", "right" }) do
-    local id = auto[side]
-    if type(id) ~= "string" and type(id) ~= "number" then auto[side] = nil end
-    if type(id) == "string" and #id == 0 then auto[side] = nil end
+  -- A relay side is a name. Which names are legal is the relay's business --
+  -- it is asked at pick time -- so this only rejects what cannot be one.
+  for _, key in ipairs({ "left", "right" }) do
+    local side = auto[key]
+    if type(side) ~= "string" or #side == 0 then auto[key] = nil end
   end
 end
 
@@ -186,15 +186,24 @@ function view.destinationLabel(app)
 end
 
 -- -------------------------------------------------------------- autopilot ---
--- The contraption controller from Create: Gadgets & Gizmos exposes numbered
--- player-input channels, each taking 0..1. Two of them drive the thruster
--- groups. Nothing here names the peripheral type: it is claimed by the methods
--- it answers to, exactly as every other device is, so a controller from a
--- later version -- or a different mod that speaks the same shape -- still
--- lands here.
+-- The thrusters are driven by REDSTONE, 0 to 15, over a CC:Tweaked Redstone
+-- Relay: one of its sides carries the left thruster group and another carries
+-- the right, usually through a redstone link at each.
+--
+-- The relay rather than the computer's own sides, deliberately. The computer
+-- has one redstone output and the alert system already owns it -- see
+-- Settings / Alerts / Redstone output -- and two subsystems fighting over one
+-- line would be a fault nobody could see from either page. The relay is its
+-- own device with six sides of its own.
+--
+-- Nothing here names the peripheral type. It is claimed by the methods it
+-- answers to, exactly as every other device is.
 
-local SET_METHODS  = { "setInput", "setChannel" }
-local LIST_METHODS = { "listInputs", "listInputIds", "listChannels" }
+local SET_METHODS   = { "setAnalogOutput", "setAnalogueOutput" }
+local SIDES_METHODS = { "getSides" }
+
+-- What a relay is asked for when it will not list its own sides.
+local DEFAULT_SIDES = { "top", "bottom", "left", "right", "front", "back" }
 
 local function methodOf(dev, names)
   if type(dev) ~= "table" then return nil end
@@ -204,19 +213,18 @@ local function methodOf(dev, names)
   return nil
 end
 
---- Whether a peripheral can be driven as a thruster controller.
-function view.looksLikeController(dev)
-  return methodOf(dev, SET_METHODS) ~= nil and methodOf(dev, LIST_METHODS) ~= nil
+--- Whether a peripheral can be driven as a thruster relay.
+function view.looksLikeRelay(dev)
+  return methodOf(dev, SET_METHODS) ~= nil and methodOf(dev, SIDES_METHODS) ~= nil
 end
 
 function view.discover(kit)
-  kit.controller = nil
+  kit.relay = nil
   for _, entry in ipairs(kit.peripherals or {}) do
-    if view.looksLikeController(entry.dev) then
-      kit.controller = {
+    if view.looksLikeRelay(entry.dev) then
+      kit.relay = {
         name = entry.name, dev = entry.dev, type = entry.type,
-        set  = methodOf(entry.dev, SET_METHODS),
-        list = methodOf(entry.dev, LIST_METHODS),
+        set = methodOf(entry.dev, SET_METHODS),
       }
       break
     end
@@ -224,68 +232,64 @@ function view.discover(kit)
   return kit
 end
 
---- The controller's inputs, as { id, label } rows for a picker.
----
---- listInputs() hands back config tables and listInputIds() hands back bare
---- ids, so both shapes are accepted rather than one being insisted on.
-function view.inputs(app)
-  local controller = app.kit.controller
-  if not controller then return {} end
-  local ok, raw = pcall(controller.dev[controller.list])
-  if not ok or type(raw) ~= "table" then return {} end
-
-  local out = {}
-  for _, entry in ipairs(raw) do
-    if type(entry) == "table" then
-      local id = entry.id or entry.inputId or entry.alias or entry.key
-      if id ~= nil then
-        out[#out + 1] = {
-          id = id,
-          label = tostring(entry.alias or entry.label or entry.name or id),
-        }
-      end
-    elseif type(entry) == "string" or type(entry) == "number" then
-      out[#out + 1] = { id = entry, label = tostring(entry) }
-    end
-  end
-  return out
+--- The sides of the relay a thruster group can be wired to.
+function view.sides(app)
+  local relay = app.kit.relay
+  if not relay then return {} end
+  local ok, sides = pcall(relay.dev.getSides)
+  if ok and type(sides) == "table" and #sides > 0 then return sides end
+  return DEFAULT_SIDES
 end
 
---- Writes both throttles. Every call goes through here, so there is one place
---- that talks to the hardware and one place that records what was commanded.
+--- Writes both throttles as redstone levels.
+---
+--- Every call goes through here, so there is one place that talks to the
+--- hardware and one place that records what was commanded.
+---@param left number 0..1 throttle
+---@param right number 0..1 throttle
 ---@return boolean ok
 ---@return string|nil problem
 function view.writeOutputs(app, left, right)
-  local controller = app.kit.controller
+  local relay = app.kit.relay
   local auto = app.cfg.autopilot
   local state = app.autopilot
 
-  if state then state.left, state.right = left, right end
-  if not controller then return false, "no controller attached" end
-  if auto.left == nil or auto.right == nil then return false, "inputs not mapped" end
+  local leftLevel  = autopilot.level(left)
+  local rightLevel = autopilot.level(right)
 
-  local set = controller.dev[controller.set]
-  local okLeft  = pcall(set, auto.left, left)
-  local okRight = pcall(set, auto.right, right)
+  if state then
+    state.left, state.right = left, right
+    state.leftLevel, state.rightLevel = leftLevel, rightLevel
+  end
+
+  if not relay then return false, "no redstone relay attached" end
+  if auto.left == nil or auto.right == nil then return false, "sides not set" end
+
+  local set = relay.dev[relay.set]
+  local okLeft  = pcall(set, auto.left, leftLevel)
+  local okRight = pcall(set, auto.right, rightLevel)
   if okLeft and okRight then return true end
-  return false, "the controller refused the write"
+  return false, "the relay refused the write"
 end
 
 --- Why the autopilot cannot be engaged right now, or nil when it can.
 function view.autopilotProblem(app)
-  if not app.kit.controller then return "No contraption controller attached" end
+  if not app.kit.relay then return "No redstone relay attached" end
   local auto = app.cfg.autopilot
   if auto.left == nil or auto.right == nil then
-    return "Map the left and right inputs first"
+    return "Set the left and right relay sides first"
+  end
+  if auto.left == auto.right then
+    return "Left and right are on the same side"
   end
   if not view.destination(app) then return "No destination set" end
   return nil
 end
 
 --- Whether the page shows an autopilot row at all. A base or a pocket computer
---- with no controller anywhere near it gets the page it always had.
+--- with no relay anywhere near it gets the page it always had.
 function view.autopilotAvailable(app)
-  return app.kit.controller ~= nil
+  return app.kit.relay ~= nil
     or app.cfg.autopilot.left ~= nil
     or app.cfg.autopilot.right ~= nil
 end
@@ -408,7 +412,7 @@ function view.attach(app)
   }
 
   -- The hardware may have just been rescanned out from under a flying ship.
-  if app.autopilot.engaged and not app.kit.controller then
+  if app.autopilot.engaged and not app.kit.relay then
     view.setAutopilot(app, false)
   end
 
@@ -487,15 +491,18 @@ local function readings(app, wide)
                       colour = colour or theme.text, key = key }
   end
 
-  -- FIRST, when there is a controller for it. Fifteen cells gives nine rows
+  -- FIRST, when there is a relay for it. Fifteen cells gives nine rows
   -- and this panel fills every one of them, so a row that is also the ONLY
   -- switch for the autopilot cannot be last -- it would be the one clipped.
   if view.autopilotAvailable(app) then
     local state = app.autopilot or {}
     push("A/P", view.autopilotLabel(app), view.autopilotColour(app), "auto")
-    if wide and state.engaged and state.error then
-      push("ERR", ("%+d"):format(util.round(state.error)),
-        math.abs(state.error) > 30 and theme.warn or theme.dim)
+    if wide and state.engaged then
+      -- The redstone levels actually on the relay, which is the number to
+      -- look at when the ship is not doing what the panel says it should.
+      push("THR", ("%d / %d"):format(state.leftLevel or 0, state.rightLevel or 0),
+        (state.leftLevel or 0) + (state.rightLevel or 0) > 0
+          and theme.accent or theme.dim)
     end
   end
 
@@ -879,49 +886,54 @@ function view.autopilotSettings(ctx)
     .. "are looking - so it moves off first to find out which way the ship "
     .. "points. It does not touch altitude and it does not avoid anything.", true)
 
-  ctx.row("Controller", function()
-    local controller = app.kit.controller
-    if not controller then return "not found" end
-    return ("%s   %d input%s"):format(util.shorten(controller.name, 16),
-      #view.inputs(app), #view.inputs(app) == 1 and "" or "s")
+  ctx.row("Relay", function()
+    local relay = app.kit.relay
+    if not relay then return "not found" end
+    return ("%s   %d sides"):format(util.shorten(relay.name, 16), #view.sides(app))
   end, function()
     app:rescan()
-    root:toast(app.kit.controller and ("Controller: " .. app.kit.controller.name)
-      or "No contraption controller found",
-      app.kit.controller and "success" or "warning")
-  end, function() return app.kit.controller and theme.good or theme.warn end)
+    root:toast(app.kit.relay and ("Relay: " .. app.kit.relay.name)
+      or "No redstone relay found",
+      app.kit.relay and "success" or "warning")
+  end, function() return app.kit.relay and theme.good or theme.warn end)
 
-  ctx.note("Any peripheral that lists inputs and takes setInput. Press to "
-    .. "rescan.")
+  ctx.note("A CC:Tweaked Redstone Relay, wired to the thruster groups. Not "
+    .. "the computer's own sides: the alert output already owns those, and "
+    .. "two things driving one line is a fault you cannot see from either "
+    .. "page.", true)
 
-  --- One side's input picker. The two are identical bar the key, so they are
+  --- One group's side picker. The two are identical bar the key, so they are
   --- built rather than written twice and left to drift apart.
-  local function sidePicker(side, label)
+  local function sidePicker(key, label)
     ctx.row(label, function()
-      local id = auto[side]
-      if id == nil then return "not set" end
-      for _, input in ipairs(view.inputs(app)) do
-        if input.id == id then return input.label end
-      end
-      return tostring(id) .. "  (not on the controller)"
+      local side = auto[key]
+      if side == nil then return "not set" end
+      if auto.left == auto.right then return side .. "  (same as the other)" end
+      return side
     end, function()
-      local inputs = view.inputs(app)
-      if #inputs == 0 then
-        root:toast(app.kit.controller and "The controller lists no inputs"
-          or "No controller attached", "warning")
+      local sides = view.sides(app)
+      if #sides == 0 then
+        root:toast("No redstone relay attached", "warning")
         return
       end
       local entries = {}
-      for _, input in ipairs(inputs) do
-        entries[#entries + 1] = { label = input.label, value = input.id }
+      for _, side in ipairs(sides) do
+        local taken = (key == "left" and auto.right or auto.left) == side
+        entries[#entries + 1] = {
+          label = taken and (side .. "   (the other group)") or side,
+          value = side,
+        }
       end
       entries[#entries + 1] = { label = "-- not set --", value = false }
-      ctx.openPicker(label:upper(), entries, auto[side], function(value)
-        auto[side] = (value ~= false) and value or nil
+      ctx.openPicker(label:upper(), entries, auto[key], function(value)
+        auto[key] = (value ~= false) and value or nil
         app:saveConfig()
         ctx.refreshRows()
       end)
-    end, function() return auto[side] ~= nil and theme.text or theme.warn end)
+    end, function()
+      if auto[key] == nil then return theme.warn end
+      return auto.left == auto.right and theme.alarm or theme.text
+    end)
   end
 
   sidePicker("left", "Left thrusters")
@@ -1026,8 +1038,8 @@ function view.autopilotSettings(ctx)
   --- disengaged is nothing.
   local function nudge(side, label)
     ctx.action("Test " .. label, function()
-      if not app.kit.controller then
-        root:toast("No controller attached", "error")
+      if not app.kit.relay then
+        root:toast("No redstone relay attached", "error")
         return
       end
       if app.autopilot.engaged then
@@ -1035,7 +1047,8 @@ function view.autopilotSettings(ctx)
         return
       end
       local basalt = require("basalt")
-      root:toast(("Pulsing %s for 1s"):format(label), "info")
+      root:toast(("Pulsing %s at %d for 1s"):format(label,
+        autopilot.level(auto.cruise)), "info")
       basalt.schedule(function()
         view.writeOutputs(app, side == "left" and auto.cruise or 0,
           side == "right" and auto.cruise or 0)

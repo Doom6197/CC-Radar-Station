@@ -116,7 +116,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 | **Wireless or ender modem** | the MAIN BASE and MOBILE roles, and power clients. Use an **ender** modem: no range limit, works across dimensions |
 | **Advanced Monitor(s)** | any size; each monitor gets its own page |
 | **Speaker(s)** | every speaker on the network plays the alert |
-| **Analogue contraption controller** (Create: Gadgets & Gizmos) | the flight page's [autopilot](#autopilot): differential thrust to a destination |
+| **Redstone Relay** (CC: Tweaked) | the flight page's [autopilot](#autopilot): two sides driving the left and right thruster groups |
 | Any redstone contraption on a side of the computer | the redstone output |
 
 Peripherals are matched on **what they can do**, not on their type name, so a
@@ -163,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.7                                    |  SETTINGS   v8.7
+ SETTINGS   v8.8                                    |  SETTINGS   v8.8
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -446,9 +446,18 @@ falls through to *Tap to change*.
 
 ### Autopilot
 
-With an **analogue contraption controller** from *Create: Gadgets & Gizmos*
-attached, the flight page grows an `A/P` row that flies the ship to whatever
-the destination is — `HOME`, a tracked contact, or a waypoint.
+With a **CC:Tweaked Redstone Relay** attached, the flight page grows an `A/P`
+row that flies the ship to whatever the destination is — `HOME`, a tracked
+contact, or a waypoint.
+
+Two of the relay's sides carry the thruster groups — one left, one right,
+usually through a redstone link at each. The thrusters take a **signal
+strength of 0 to 15**, and that is what the autopilot writes.
+
+It is the relay rather than the computer's own sides on purpose: the computer
+has **one** redstone output and the alert system already owns it
+(*Settings → Alerts → Redstone output*). Two subsystems driving one line would
+be a fault you could not see from either page.
 
 ```
    FLT           2      FLT           2      FLT           2
@@ -490,11 +499,19 @@ rather than pushing forever.
 
 #### Steering
 
-Two thruster groups, left and right, each taking `0..1`. **More thrust on the
-left swings the nose to the right**, so the error — the signed angle from the
-course being made to the bearing wanted — is added to the left and taken off
-the right. If it turns the wrong way, the inputs are the wrong way round;
-there is a *Swap left and right* button for exactly that.
+**More thrust on the left swings the nose to the right**, so the error — the
+signed angle from the course being made to the bearing wanted — is added to the
+left and taken off the right. If it turns the wrong way, the sides are the
+wrong way round; there is a *Swap left and right* button for exactly that.
+
+The control law works in a dimensionless `0..1` throttle and only becomes a
+redstone level on the way out, so the quantising happens in one place. Anything
+above zero comes out as **at least 1**: rounding a real command down to *off*
+would make a thruster meant to be idling indistinguishable from one that has
+been cut, and only one of those is a decision.
+
+Sixteen levels is all redstone has, so a correction finer than about 7% of
+cruise cannot be expressed. That is what the 5° deadband is for anyway.
 
 Three softeners matter, because a position fix arrives about once a second:
 
@@ -528,15 +545,15 @@ Under **Settings → Pages → Flight → Autopilot**:
 
 | | |
 |---|---|
-| **Controller** | which peripheral, matched on the methods it answers to rather than its type name |
-| **Left / Right thrusters** | which input each group is on, picked by alias |
+| **Relay** | which peripheral, matched on the methods it answers to rather than its type name |
+| **Left / Right thrusters** | which side of the relay each group is wired to |
 | **Swap left and right** | for when they are backwards |
 | **Cruise** | throttle in level flight |
 | **Turn response** | how hard it corrects — `Sharp` on a heavy ship will hunt |
 | **Arrive within** | how close is close enough |
 | **Ease off within** | where it starts throttling back so it stops rather than sailing past |
 | **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
-| **Test left / right thrusters** | a one-second pulse on one side, to check the wiring without engaging |
+| **Test left / right thrusters** | a one-second pulse on one side at cruise level, to check the wiring without engaging |
 
 **Shut off beyond** is checked on **every pass**, not only when engaging: a
 contact who logs back in on the far side of the world moves the destination,
@@ -1132,10 +1149,14 @@ everything still renders, just flatter.
 
 ## Version history
 
-**v8.7 - autopilot.** With a Create: Gadgets & Gizmos contraption controller
-attached, the flight page flies the ship to its destination on **differential
-thrust**: left and right thruster groups, steered by the **course made good**
-and never by which way the pilot is facing. Engaging opens with a probe,
+**v8.8 - the autopilot drives a redstone relay.** The contraption controller
+is gone. The thruster groups are now two sides of a **CC:Tweaked Redstone
+Relay**, carrying a signal strength of **0 to 15** -- not the computer's own
+sides, which the alert output already owns.
+
+**v8.7 - autopilot.** The flight page flies the ship to its destination on
+**differential thrust**: left and right thruster groups, steered by the
+**course made good** and never by which way the pilot is facing. Engaging opens with a probe,
 because a stationary ship has no course to steer by. An `A/P` row on the 1x1
 flight screen is the switch. A **shut-off range**, a stall detector, a stale-fix
 watchdog and a shutdown hook all cut the thrusters and say why in the alert log.
