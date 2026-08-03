@@ -1703,6 +1703,266 @@ check("flight formats to fit a fifteen-cell screen", function()
   end
 end)
 
+-- autopilot ---------------------------------------------------------------------
+
+local autopilotLib = require("radar.autopilot")
+
+--- Runs the law to a settled state, so a check reads the throttle it converges
+--- on rather than the first step of the slew limiter.
+local function settle(input, passes)
+  local result
+  local previous = input.previous or { left = 0, right = 0 }
+  for _ = 1, passes or 12 do
+    input.previous = previous
+    result = autopilotLib.step(input)
+    previous = { left = result.left, right = result.right }
+  end
+  return result
+end
+
+check("the autopilot is never given a heading to steer by", function()
+  -- The whole design. A ship's computer can read which way the PILOT is
+  -- facing, and on a vessel that is not which way the SHIP is going -- so the
+  -- control law is not allowed to see it. Passing one must change nothing.
+  local base = {
+    engaged = true, distance = 500, bearing = 90, course = 90,
+    moving = true, probing = 0, cfg = { cruise = 0.6 },
+  }
+  local straight = settle(base)
+
+  local misleading = {}
+  for k, v in pairs(base) do misleading[k] = v end
+  misleading.heading = 270          -- looking backwards over the rail
+  misleading.yaw = 180
+  misleading.facing = "north"
+  local same = settle(misleading)
+
+  assert(same.left == straight.left and same.right == straight.right,
+    "a heading in the input changes nothing, got "
+      .. same.left .. "/" .. same.right)
+  assert(straight.phase == "steer", "and it is steering, got " .. straight.phase)
+end)
+
+check("with no course yet it probes, then gives up if nothing moves", function()
+  -- A stationary ship has no course, because a course is measured from having
+  -- moved. So it pushes both sides equally and watches.
+  local input = {
+    engaged = true, distance = 500, bearing = 90,
+    course = nil, moving = false, probing = 0, cfg = { cruise = 0.5 },
+  }
+  local first = autopilotLib.step(input)
+  assert(first.phase == "probe", "it probes, got " .. first.phase)
+  assert(first.left == first.right, "both sides equally, got "
+    .. first.left .. "/" .. first.right)
+  assert(first.left > 0, "and actually pushes, got " .. first.left)
+
+  local pushing = settle(input)
+  assert(math.abs(pushing.left - 0.5) < 0.001,
+    "settling at cruise, got " .. pushing.left)
+
+  -- Still nothing after long enough: the inputs are not wired to anything.
+  input.probing = autopilotLib.PROBE_SECONDS
+  local stalled = autopilotLib.step(input)
+  assert(stalled.phase == "stalled", "it gives up, got " .. stalled.phase)
+  assert(stalled.left == 0 and stalled.right == 0, "and stops pushing")
+  assert(stalled.fault, "and says so loudly")
+
+  -- A course appearing is what ends the probe.
+  input.probing, input.course, input.moving = 3, 90, true
+  assert(autopilotLib.step(input).phase == "steer", "movement ends the probe")
+end)
+
+check("more thrust on the left swings the nose right", function()
+  local function steer(course, bearing)
+    return settle({
+      engaged = true, distance = 500, bearing = bearing, course = course,
+      moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+    })
+  end
+
+  -- Target to the RIGHT of the course being made: left harder.
+  local right = steer(0, 45)
+  assert(right.left > right.right,
+    "turning right pushes the left side harder, got "
+      .. right.left .. "/" .. right.right)
+  assert(right.error and right.error > 0, "with a positive error")
+
+  local left = steer(0, 315)
+  assert(left.right > left.left, "and the other way round for a left turn, got "
+    .. left.left .. "/" .. left.right)
+  assert(left.error < 0, "with a negative error")
+
+  -- Dead ahead: both sides the same, at cruise.
+  local ahead = steer(90, 90)
+  assert(ahead.left == ahead.right, "straight ahead is symmetrical")
+  assert(math.abs(ahead.left - 0.6) < 0.001, "at cruise, got " .. ahead.left)
+
+  -- Far enough off course and it stops going anywhere and turns on the spot.
+  local spin = steer(0, 170)
+  assert(spin.right == 0, "a near reversal is one-sided, got "
+    .. spin.left .. "/" .. spin.right)
+  assert(spin.left > 0, "with the other side driving the turn")
+
+  -- An exact 180 is a tie: either way round is the same length of turn, so
+  -- only that it commits to one of them is worth asserting.
+  local reversal = steer(0, 180)
+  assert(math.min(reversal.left, reversal.right) == 0
+    and math.max(reversal.left, reversal.right) > 0,
+    "a dead reversal still picks a side, got "
+      .. reversal.left .. "/" .. reversal.right)
+
+  -- The error crosses north the short way, not the long way round.
+  local across = steer(350, 10)
+  assert(across.error and math.abs(across.error - 20) < 0.001,
+    "twenty degrees, not three hundred and forty, got " .. tostring(across.error))
+end)
+
+check("small errors are not chased", function()
+  -- A fix a second apart cannot resolve five degrees, and steering for it just
+  -- twitches the ship from side to side.
+  local nudge = settle({
+    engaged = true, distance = 500, bearing = 93, course = 90,
+    moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+  })
+  assert(nudge.left == nudge.right,
+    "three degrees off is straight ahead, got " .. nudge.left .. "/" .. nudge.right)
+
+  local real = settle({
+    engaged = true, distance = 500, bearing = 110, course = 90,
+    moving = true, probing = 0, cfg = { cruise = 0.6, turnFull = 60 },
+  })
+  assert(real.left ~= real.right, "twenty degrees off is steered for")
+end)
+
+check("the throttle walks rather than slamming", function()
+  local input = {
+    engaged = true, distance = 500, bearing = 90, course = 90,
+    moving = true, probing = 0, cfg = { cruise = 1.0 },
+    previous = { left = 0, right = 0 },
+  }
+  local first = autopilotLib.step(input)
+  assert(first.left <= autopilotLib.SLEW + 0.001,
+    "one step moves at most the slew limit, got " .. first.left)
+
+  -- But a stop is immediate: a ship easing gently out of an emergency is not
+  -- what anybody wants.
+  input.previous = { left = 1, right = 1 }
+  input.engaged = false
+  local halt = autopilotLib.step(input)
+  assert(halt.left == 0 and halt.right == 0, "disengaging cuts at once")
+end)
+
+check("it eases off on the approach and stops on arrival", function()
+  local function at(distance)
+    return settle({
+      engaged = true, distance = distance, bearing = 90, course = 90,
+      moving = true, probing = 0,
+      cfg = { cruise = 1.0, arrive = 25, slowWithin = 200 },
+    })
+  end
+
+  local far = at(1000)
+  local near = at(100)
+  assert(near.left < far.left, "throttled back on the approach, got "
+    .. near.left .. " vs " .. far.left)
+  assert(near.left > 0, "but still moving, got " .. near.left)
+
+  local there = at(20)
+  assert(there.phase == "arrived", "inside the arrive radius it stops, got "
+    .. there.phase)
+  assert(there.left == 0 and there.right == 0, "with the thrusters off")
+  assert(not there.fault, "which is not a fault - it is the point")
+end)
+
+check("the autopilot shuts itself off beyond its range limit", function()
+  local function at(distance, range)
+    return autopilotLib.step({
+      engaged = true, distance = distance, bearing = 90, course = 90,
+      moving = true, probing = 0,
+      cfg = { cruise = 0.6, range = range, arrive = 25 },
+    })
+  end
+
+  assert(at(900, 1000).phase == "steer", "inside the limit it flies")
+  local far = at(1100, 1000)
+  assert(far.phase == "toofar", "beyond it, it stops, got " .. far.phase)
+  assert(far.left == 0 and far.right == 0, "with the thrusters off")
+  assert(far.fault, "and it counts as a give-up, not a pause")
+
+  assert(at(4000, 5000).phase == "steer", "the limit is whatever is set")
+  assert(at(4000, 250).phase == "toofar", "and a tighter one bites sooner")
+
+  -- No limit is a deliberate choice, and has to actually mean no limit.
+  assert(at(50000, false).phase == "steer", "false is no limit")
+  assert(at(50000, nil).phase == "steer", "and so is nothing at all")
+  assert(at(50000, 0).phase == "steer", "and so is zero")
+
+  -- Sanitising: a real number survives, junk becomes the default, false stays.
+  local cfg = config.sanitise({ autopilot = { range = 250 } })
+  assert(cfg.autopilot.range == 250, "a real range survives, got "
+    .. tostring(cfg.autopilot.range))
+  assert(config.sanitise({ autopilot = { range = "nonsense" } }).autopilot.range
+    == 1000, "junk falls back to the default rather than removing the limit")
+  assert(config.sanitise({ autopilot = { range = false } }).autopilot.range
+    == false, "and an explicit no-limit is kept")
+end)
+
+check("a dead position feed cuts the thrusters", function()
+  -- The link dropping, the base unloading, a username that stopped resolving:
+  -- whatever the cause, holding the last command indefinitely would fly the
+  -- ship into the distance with nobody watching.
+  local input = {
+    engaged = true, distance = 500, bearing = 90, course = 90,
+    moving = true, probing = 0, cfg = { cruise = 0.6 },
+    sinceFix = 1,
+  }
+  assert(autopilotLib.step(input).phase == "steer", "a fresh fix flies")
+
+  input.sinceFix = autopilotLib.STALE_SECONDS + 1
+  local dead = autopilotLib.step(input)
+  assert(dead.phase == "nofix", "a stale one does not, got " .. dead.phase)
+  assert(dead.left == 0 and dead.right == 0, "and the thrusters go off")
+  assert(dead.fault, "loudly")
+
+  -- A contact target that leaves the sweep is the same problem by another
+  -- route: there is nowhere to steer to any more.
+  local lost = autopilotLib.step({
+    engaged = true, lost = true, distance = 500, bearing = 90, course = 90,
+    moving = true, probing = 0, cfg = {},
+  })
+  assert(lost.phase == "lost" and lost.left == 0, "a lost target stops it")
+
+  local nowhere = autopilotLib.step({ engaged = true, probing = 0, cfg = {} })
+  assert(nowhere.phase == "nodest" and nowhere.left == 0,
+    "and so does having no destination at all")
+end)
+
+check("every output the law can produce is a legal throttle", function()
+  -- The controller takes 0..1 and raises a Lua error outside it, so a number
+  -- that escapes the clamp is a crash on the ship rather than a wrong turn.
+  for _, cruise in ipairs({ 0.05, 0.5, 1.0 }) do
+    for _, turnFull in ipairs({ 10, 60, 180 }) do
+      for course = 0, 359, 17 do
+        for _, distance in ipairs({ 1, 26, 200, 5000 }) do
+          local result = settle({
+            engaged = true, distance = distance, bearing = 123, course = course,
+            moving = true, probing = 0,
+            cfg = { cruise = cruise, turnFull = turnFull, arrive = 25,
+                    slowWithin = 200, range = false },
+          }, 20)
+          for _, side in ipairs({ "left", "right" }) do
+            local value = result[side]
+            assert(type(value) == "number" and value == value,
+              ("%s is a number at course %d"):format(side, course))
+            assert(value >= 0 and value <= 1,
+              ("%s out of range at course %d: %s"):format(side, course, value))
+          end
+        end
+      end
+    end
+  end
+end)
+
 ------------------------------------------------------------------ the views --
 
 local App = require("radar.app")
@@ -2560,6 +2820,224 @@ check("a ship renders a relayed sweep exactly as the base did", function()
   app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL)
   assert(app.heading == 270, "snapped locally, got " .. tostring(app.heading))
   app.cfg.headingStep = saved
+end)
+
+--------------------------------------------------------- the autopilot, wired --
+-- A Create: Gadgets & Gizmos analogue contraption controller, as the docs
+-- describe it: numbered player-input channels, each taking 0..1.
+
+local WRITTEN = {}                    -- input id -> last value written
+
+local CONTROLLER = {
+  __type = "analogue_contraption_controller",
+  written = WRITTEN,
+  listInputs = function()
+    return {
+      { id = 1, alias = "port", label = "Left bank" },
+      { id = 2, alias = "starboard", label = "Right bank" },
+      { id = 3, label = "Winch" },
+    }
+  end,
+  -- The docs are explicit that an input value outside 0..1 raises, so the mock
+  -- raises too: a number that escapes the clamp has to fail here rather than
+  -- quietly being stored.
+  setInput = function(id, value)
+    if type(value) ~= "number" or value < 0 or value > 1 then
+      error("input value out of range: " .. tostring(value), 0)
+    end
+    WRITTEN[id] = value
+    return true
+  end,
+}
+
+check("a contraption controller is claimed by what it can do", function()
+  local flightModule = modules.byId("flight")
+
+  assert(flightModule.looksLikeController(CONTROLLER),
+    "lists inputs and takes setInput")
+  assert(not flightModule.looksLikeController({ setInput = function() end }),
+    "a setter alone is not enough to drive anything")
+  assert(not flightModule.looksLikeController(PERIPHERALS.back),
+    "and a player detector is not a controller")
+  assert(not flightModule.looksLikeController("nonsense"), "nor is a string")
+
+  -- Nothing anywhere names the peripheral type, so a controller from a later
+  -- version -- or another mod speaking the same shape -- still lands here.
+  assert(flightModule.looksLikeController({
+    listChannels = function() return {} end,
+    setChannel = function() end,
+  }), "the channel spelling works too")
+
+  PERIPHERALS.contraption_controller_0 = CONTROLLER
+  app:rescan()
+  assert(app.kit.controller, "the rescan found it")
+  assert(app.kit.controller.name == "contraption_controller_0", "under its name")
+  assert(app.kit.controller.set == "setInput", "with the setter it answers to")
+
+  local inputs = flightModule.inputs(app)
+  assert(#inputs == 3, "three inputs offered, got " .. #inputs)
+  assert(inputs[1].id == 1 and inputs[1].label == "port",
+    "named by their alias where they have one, got " .. inputs[1].label)
+  assert(inputs[3].label == "Winch", "and by their label otherwise")
+end)
+
+check("the autopilot refuses to engage without what it needs", function()
+  local flightModule = modules.byId("flight")
+  local auto = app.cfg.autopilot
+  auto.left, auto.right = nil, nil
+
+  local engaged, message = flightModule.setAutopilot(app, true)
+  assert(not engaged, "no inputs mapped, so it will not fly")
+  assert(message:find("inputs", 1, true), "and says why, got " .. message)
+
+  auto.left, auto.right = 1, 2
+  app.cfg.flightTarget = "custom"
+  app.cfg.flightX, app.cfg.flightZ = nil, nil
+  config.sanitise(app.cfg)               -- an empty waypoint falls back to home
+  app.cfg.baseX = nil
+  assert(not flightModule.setAutopilot(app, true), "and not without a destination")
+
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+  app.cfg.flightTarget = "home"
+  engaged, message = flightModule.setAutopilot(app, true)
+  assert(engaged, "with a controller, inputs and a destination it engages: " .. message)
+  assert(app.autopilot.phase == "probe", "starting by finding its course")
+
+  flightModule.setAutopilot(app, false)
+  assert(not app.autopilot.engaged, "and switches off again")
+  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+    "cutting both thrusters on the way out")
+end)
+
+check("engagement is never restored from a settings file", function()
+  -- A ship that reloads its chunk, or a computer that reboots mid-flight,
+  -- comes back with the thrusters off. "Was flying somewhere" is not a thing
+  -- that should survive a restart with nobody present.
+  local saved = textutils.serialize(app.cfg)
+  local reloaded = config.sanitise(textutils.unserialize(saved))
+  for key in pairs(reloaded.autopilot) do
+    assert(key ~= "enabled" and key ~= "engaged",
+      "engagement is not a stored setting, found " .. key)
+  end
+  assert(reloaded.autopilot.left == 1, "while the wiring is stored")
+  assert(reloaded.autopilot.cruise, "and the tuning")
+end)
+
+check("the autopilot flies the ship at the destination", function()
+  local flightModule = modules.byId("flight")
+  local auto = app.cfg.autopilot
+  auto.left, auto.right, auto.cruise = 1, 2, 0.6
+  auto.arrive, auto.slowWithin, auto.range = 25, 200, false
+  auto.turnFull = 60
+
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
+  app.cfg.flightTarget = "home"
+  app.lastScanAt = CLOCK
+
+  -- Under way due EAST, with home due WEST: it has to turn right around.
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 + i * 10, y = 70, z = 500,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+  assert(app.flight.course and app.flight.moving, "the ship has a course")
+
+  assert(flightModule.setAutopilot(app, true), "engaged")
+  local result
+  for _ = 1, 12 do result = flightModule.control(app, CLOCK, 0.5) end
+
+  assert(result.phase == "steer", "steering, got " .. result.phase)
+  assert(CONTROLLER.written[1] == result.left, "the left input was written")
+  assert(CONTROLLER.written[2] == result.right, "and the right one")
+  assert(result.left ~= result.right, "with a difference between them to turn on")
+
+  -- Now flying straight at it: both sides level.
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 - i * 10, y = 70, z = 0,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+  for _ = 1, 20 do result = flightModule.control(app, CLOCK, 0.5) end
+  assert(result.phase == "steer", "still steering")
+  assert(math.abs(result.left - result.right) < 0.001,
+    "lined up, so both sides match: " .. result.left .. "/" .. result.right)
+
+  -- Arriving stops it, without disengaging: a moving contact may pull away
+  -- again, and having to re-engage every time would be useless for chasing.
+  -- The ship ended that run at x = 950, so move home to within the radius.
+  app.cfg.baseX, app.cfg.baseZ = 955, 0
+  result = flightModule.control(app, CLOCK, 0.5)
+  assert(result.phase == "arrived", "arrived, got " .. result.phase)
+  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+    "and the thrusters went off")
+  assert(app.autopilot.engaged, "while staying engaged")
+
+  flightModule.setAutopilot(app, false)
+end)
+
+check("a fault stops the ship and goes in the alert log", function()
+  local flightModule = modules.byId("flight")
+  app:clearLog()
+
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
+  app.cfg.flightTarget = "home"
+  app.cfg.autopilot.range = false
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 - i * 10, y = 70, z = 0,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
+  -- An explicit clock, so the staleness window is not at the mercy of
+  -- whatever the rest of the suite left os.clock() at.
+  local FIX_AT = 1000
+  app.lastScanAt = FIX_AT
+
+  assert(flightModule.setAutopilot(app, true), "engaged")
+  flightModule.control(app, FIX_AT, 0.5)
+  assert(app.autopilot.engaged, "flying")
+
+  -- The position feed dies.
+  local result = flightModule.control(app,
+    FIX_AT + autopilotLib.STALE_SECONDS + 2, 0.5)
+  assert(result.phase == "nofix", "noticed, got " .. result.phase)
+  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+    "the thrusters went off")
+  assert(not app.autopilot.engaged, "and it disengaged rather than waiting")
+
+  assert(app.log:count() == 1, "one entry in the alert log, got " .. app.log:count())
+  local entry = app.log.entries[1]
+  assert(entry.kind == "alarm" and entry.text:find("Autopilot", 1, true),
+    "saying what happened, got " .. tostring(entry.text))
+  assert(app:unreadAlerts() == 1, "and it is unread, so every screen marks it")
+
+  app:clearLog()
+end)
+
+check("shutting the station down lets go of the thrusters", function()
+  local flightModule = modules.byId("flight")
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
+  app.cfg.flightTarget = "home"
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 - i * 10, y = 70, z = 0,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+  app.lastScanAt = CLOCK
+
+  assert(flightModule.setAutopilot(app, true), "engaged")
+  flightModule.control(app, CLOCK, 0.5)
+  assert(CONTROLLER.written[1] > 0, "under power, got " .. CONTROLLER.written[1])
+
+  -- A ship still under power with nothing left running to steer it is the one
+  -- outcome worth writing code to prevent.
+  app:stop()
+  assert(CONTROLLER.written[1] == 0 and CONTROLLER.written[2] == 0,
+    "quitting cut the thrusters, got "
+      .. CONTROLLER.written[1] .. "/" .. CONTROLLER.written[2])
+  assert(not app.autopilot.engaged, "and disengaged")
+
+  app.running = true                      -- the rest of the suite carries on
 end)
 
 check("a mobile watching YOU measures from you, not from the base", function()
@@ -3997,10 +4475,73 @@ check("pressing the destination on the flight page swaps HOME and the waypoint",
   assert(cfg.flightTarget == "home", "and leaves the panel on HOME")
   assert(flightModule.swapLabel(cfg) == nil, "with no button to draw for it")
 
-  -- A row that is not the destination is not a button.
-  assert(not view.touch(3, 1), "the speed row is not pressable")
+  -- A row that is neither the destination nor the autopilot is not a button.
+  local plain
+  for index, row in ipairs(flightModule.readings(app, false)) do
+    if not row.key then plain = index; break end
+  end
+  assert(plain, "some row on the panel is just a reading")
+  assert(not view.touch(3, plain),
+    "a plain reading is not pressable, row " .. plain)
 
   cfg.flightX, cfg.flightY, cfg.flightZ = -500, 90, 800
+end)
+
+check("the autopilot is switched on from the 1x1 flight screen", function()
+  -- A 1x1 monitor is the whole cockpit on an airship: no keyboard, no settings
+  -- page, nine rows. If the autopilot cannot be engaged from there it cannot
+  -- be engaged in flight at all.
+  local flightModule = modules.byId("flight")
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+
+  app.cfg.autopilot.left, app.cfg.autopilot.right = 1, 2
+  app.cfg.autopilot.range = false
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 70, 0
+  app.cfg.flightTarget = "home"
+  app.lastScanAt = CLOCK
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 900 - i * 10, y = 70, z = 0,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+  flightModule.setAutopilot(app, false)
+
+  local shot = tinyScreen(monitorRoot, "flight")
+  assert(shot.text:find("A/P", 1, true),
+    "the autopilot row is on a fifteen-cell screen:\n" .. shot.text)
+  assert(#shot.overflow == 0, "and nothing runs off the edge")
+
+  -- It is drawn FIRST. Nine rows is exactly what this panel fills, so the one
+  -- row that is also the only switch cannot be the one that gets clipped.
+  assert(shot.lines[1]:find("A/P", 1, true),
+    "on the first row:\n" .. shot.text)
+
+  local view = monitorRoot.views.flight
+  assert(view.touch(3, 1), "pressing it was claimed")
+  assert(app.autopilot.engaged, "and engaged the autopilot")
+
+  tinyScreen(monitorRoot, "flight")
+  assert(view.touch(3, 1), "pressing it again was claimed")
+  assert(not app.autopilot.engaged, "and switched it off")
+  assert(WRITTEN[1] == 0 and WRITTEN[2] == 0, "cutting the thrusters")
+
+  -- Without a controller anywhere the page is exactly what it always was, so
+  -- a base or a pocket computer pays nothing for a feature it cannot use.
+  PERIPHERALS.contraption_controller_0 = nil
+  app:rescan()
+  local without = tinyScreen(monitorRoot, "flight")
+  assert(not app.kit.controller, "the controller is gone")
+  app.cfg.autopilot.left, app.cfg.autopilot.right = nil, nil
+  without = tinyScreen(monitorRoot, "flight")
+  assert(not without.text:find("A/P", 1, true),
+    "no autopilot row with nothing to drive:\n" .. without.text)
+
+  PERIPHERALS.contraption_controller_0 = CONTROLLER
+  app:rescan()
+  app.cfg.autopilot.left, app.cfg.autopilot.right = 1, 2
 end)
 
 check("MARK drops the waypoint where the pilot is, and is not on a 1x1", function()

@@ -26,7 +26,7 @@ over rednet — along with energy readings collected from any number of
 - [Pages](#pages)
 - [Settings](#settings) — the index, and why it is two levels
 - [Modules](#modules) — the plugin system, and how to write one
-- [Flight](#flight) — speed, climb and course from the pilot's position
+- [Flight](#flight) — speed, climb and course from the pilot's position, and the autopilot
 - [Power](#power) — and the power clients that feed it
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
@@ -116,6 +116,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 | **Wireless or ender modem** | the MAIN BASE and MOBILE roles, and power clients. Use an **ender** modem: no range limit, works across dimensions |
 | **Advanced Monitor(s)** | any size; each monitor gets its own page |
 | **Speaker(s)** | every speaker on the network plays the alert |
+| **Analogue contraption controller** (Create: Gadgets & Gizmos) | the flight page's [autopilot](#autopilot): differential thrust to a destination |
 | Any redstone contraption on a side of the computer | the redstone output |
 
 Peripherals are matched on **what they can do**, not on their type name, so a
@@ -162,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.6                                    |  SETTINGS   v8.6
+ SETTINGS   v8.7                                    |  SETTINGS   v8.7
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -442,6 +443,115 @@ Typed-in coordinates are still under **Settings → Flight → Waypoint XYZ**;
 A press that does either of those does **not** also move a monitor to the next
 page: the page gets first refusal on a tap, and only what it does not claim
 falls through to *Tap to change*.
+
+### Autopilot
+
+With an **analogue contraption controller** from *Create: Gadgets & Gizmos*
+attached, the flight page grows an `A/P` row that flies the ship to whatever
+the destination is — `HOME`, a tracked contact, or a waypoint.
+
+```
+   FLT           2      FLT           2      FLT           2
+   A/P       find       A/P       -180       A/P         +0
+   SPD        0.0       SPD       12.0       SPD       12.0
+   VS         0.0       VS         0.0       VS         0.0
+   HDG     225 SW       HDG     225 SW       HDG     225 SW
+   CRS        ---       CRS      090 E       CRS      270 W
+   ALT         70       ALT         70       ALT         70
+   HOME      600m       HOME      660m       HOME      540m
+   BRG          W       BRG          W       BRG          W
+   ETA         --       ETA        55s       ETA        45s
+
+  L 0.60 R 0.60        L 0.00 R 0.84        L 0.60 R 0.60
+  finding course       turning around       on course
+```
+
+**The `A/P` row is drawn first and is a button.** Press it to engage or
+disengage. That is deliberate: nine rows is exactly what this panel fills, and
+on a 1×1 monitor — no keyboard, no settings page — that row is the only switch
+there is, so it must never be the one that gets clipped.
+
+Note `HDG 225 SW` in all three columns above. The pilot is facing south-west
+throughout while the ship flies west. That is the point:
+
+#### It steers by where the ship has been, not where you are looking
+
+The control law is **never given a heading**. It takes a `CRS` — the course
+made good, derived from the ship's own position changing over time — and
+nothing else. A computer can read which way the *pilot* is facing, and on a
+vessel that is not which way the *ship* is going; someone turning to look over
+the rail would otherwise steer the boat.
+
+The cost is that a stationary ship has no course at all, so engaging opens with
+a **probe**: both sides equally, straight ahead, until it is moving fast enough
+for a course to exist. Then it steers. If nothing moves after eight seconds of
+that, the thrusters are not wired to the inputs it was given and it says so
+rather than pushing forever.
+
+#### Steering
+
+Two thruster groups, left and right, each taking `0..1`. **More thrust on the
+left swings the nose to the right**, so the error — the signed angle from the
+course being made to the bearing wanted — is added to the left and taken off
+the right. If it turns the wrong way, the inputs are the wrong way round;
+there is a *Swap left and right* button for exactly that.
+
+Three softeners matter, because a position fix arrives about once a second:
+
+| | |
+|---|---|
+| **deadband** | errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
+| **turn brake** | up to 60% of cruise is given up at full deflection, because a vessel at full ahead in the wrong direction is going the wrong way faster |
+| **slew limit** | outputs walk to their new values rather than slamming, which a heavy contraption cannot follow anyway |
+
+**Cutting the throttle is never slewed.** Everything that stops the autopilot
+is a reason to stop now.
+
+#### It gives up loudly
+
+| Phase | Shown | What happened |
+|---|---|---|
+| `probe` | `find` | moving off to find which way it points |
+| `steer` | `+12` | flying, showing the course error in degrees |
+| `arrived` | `there` | inside the arrive radius; thrusters off, **still engaged**, so a moving contact can pull it going again |
+| `stalled` | `STALL` | pushed for eight seconds with no movement — check the inputs |
+| `nofix` | `no fix` | the position feed stopped: link lost, base unloaded, username stopped resolving |
+| `lost` | `lost` | the contact being chased left the sweep |
+| `toofar` | `far` | the destination is beyond the shut-off range |
+
+The last four **cut the thrusters, disengage, and go in the alert log** — so
+they put the `!` marker on every screen and ring whatever channels are on.
+
+#### Settings
+
+Under **Settings → Pages → Flight → Autopilot**:
+
+| | |
+|---|---|
+| **Controller** | which peripheral, matched on the methods it answers to rather than its type name |
+| **Left / Right thrusters** | which input each group is on, picked by alias |
+| **Swap left and right** | for when they are backwards |
+| **Cruise** | throttle in level flight |
+| **Turn response** | how hard it corrects — `Sharp` on a heavy ship will hunt |
+| **Arrive within** | how close is close enough |
+| **Ease off within** | where it starts throttling back so it stops rather than sailing past |
+| **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
+| **Test left / right thrusters** | a one-second pulse on one side, to check the wiring without engaging |
+
+**Shut off beyond** is checked on **every pass**, not only when engaging: a
+contact who logs back in on the far side of the world moves the destination,
+not the ship.
+
+#### What it will not do
+
+- **No altitude control.** It holds whatever height you are at.
+- **No obstacle avoidance** of any kind.
+- **Engagement is never persisted.** A chunk reload or a reboot mid-flight
+  comes back with the thrusters off. "Was flying somewhere" is not a thing that
+  should survive a restart with nobody present.
+- **Quitting the station cuts the thrusters**, before anything else is torn
+  down. A ship still under power with nothing left running to steer it is the
+  one outcome worth writing code to prevent.
 
 ### What it cannot know
 
@@ -934,6 +1044,7 @@ radar/
   link.lua             the network: pairing, relay, staleness, module protocols
   environment.lua      Environment Detector -> snapshot + scene description
   power.lua            energy peripherals -> rates, buffer, history, alarms
+  autopilot.lua        the autopilot's control law: differential thrust
   biomes.lua           biome id -> ground profile, and its colours by mood
   backdrops.lua        hand-picked scenes for the weather page, and the cycle
   alerts.lua           sound, redstone and flash; the shared alarm channels
@@ -1020,6 +1131,15 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.7 - autopilot.** With a Create: Gadgets & Gizmos contraption controller
+attached, the flight page flies the ship to its destination on **differential
+thrust**: left and right thruster groups, steered by the **course made good**
+and never by which way the pilot is facing. Engaging opens with a probe,
+because a stationary ship has no course to steer by. An `A/P` row on the 1x1
+flight screen is the switch. A **shut-off range**, a stall detector, a stale-fix
+watchdog and a shutdown hook all cut the thrusters and say why in the alert log.
+No altitude control, no obstacle avoidance, and engagement is never persisted.
 
 **v8.6 - a mobile measures for itself.** A MOBILE used the centre the main
 base had worked out from ITS settings, whatever the mobile's own tracking mode

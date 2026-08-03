@@ -157,7 +157,8 @@ check("every project lua file is in the manifest", function()
   local expected = {
     "radar/app.lua", "radar/ui.lua", "radar/config.lua", "radar/hardware.lua",
     "radar/scan.lua", "radar/environment.lua", "radar/alerts.lua",
-    "radar/backdrops.lua", "radar/link.lua", "radar/logbook.lua",
+    "radar/autopilot.lua", "radar/backdrops.lua", "radar/link.lua",
+    "radar/logbook.lua",
     "radar/theme.lua", "radar/pixel.lua", "radar/chart.lua",
     "radar/glyphs.lua", "radar/sky.lua", "radar/util.lua",
     "radar/modules.lua", "radar/power.lua", "radar/profiles.lua",

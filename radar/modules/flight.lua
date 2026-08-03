@@ -9,6 +9,7 @@
 -- radar/flight.lua for what that can and cannot know. Nothing here polls a
 -- peripheral: the sweep already produces a fix, and this listens for it.
 
+local autopilot = require("radar.autopilot")
 local config    = require("radar.config")
 local flightLib = require("radar.flight")
 local theme     = require("radar.theme")
@@ -35,6 +36,19 @@ view.defaults = {
   -- re-read from the contact list on every draw.
   flightTarget = "home",
   flightX = nil, flightY = nil, flightZ = nil,
+
+  -- Which contraption-controller inputs the thruster groups are on, and how
+  -- hard to fly. Whether the autopilot is ENGAGED is deliberately not here:
+  -- see view.attach.
+  autopilot = {
+    left  = nil,          -- input id or alias driving the left thruster group
+    right = nil,          -- and the right
+    cruise     = 0.6,     -- throttle in level flight, 0..1
+    turnFull   = 60,      -- degrees of course error for full deflection
+    arrive     = 25,      -- blocks from the destination it stops at
+    slowWithin = 120,     -- blocks out that it starts easing off
+    range      = 1000,    -- blocks; further than this it shuts itself off
+  },
 }
 
 function view.sanitise(cfg)
@@ -56,6 +70,31 @@ function view.sanitise(cfg)
   -- optional, since a bearing does not use it.
   if not (cfg.flightX and cfg.flightZ) and cfg.flightTarget == "custom" then
     cfg.flightTarget = "home"
+  end
+
+  local auto = cfg.autopilot
+  if type(auto) ~= "table" then
+    auto = require("radar.modules").copy(view.defaults.autopilot)
+    cfg.autopilot = auto
+  end
+  auto.cruise     = util.clamp(tonumber(auto.cruise) or 0.6, 0.05, 1)
+  auto.turnFull   = util.clamp(floor(tonumber(auto.turnFull) or 60), 10, 180)
+  auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 500)
+  auto.slowWithin = util.clamp(floor(tonumber(auto.slowWithin) or 120),
+    auto.arrive, 2000)
+
+  -- false is a deliberate "no limit"; anything unrecognisable becomes the
+  -- default rather than silently removing the limit.
+  if auto.range ~= false then
+    local range = tonumber(auto.range)
+    auto.range = (range and range > 0) and floor(range) or 1000
+  end
+
+  -- An input id may be a number or a string alias, and nothing else.
+  for _, side in ipairs({ "left", "right" }) do
+    local id = auto[side]
+    if type(id) ~= "string" and type(id) ~= "number" then auto[side] = nil end
+    if type(id) == "string" and #id == 0 then auto[side] = nil end
   end
 end
 
@@ -146,8 +185,232 @@ function view.destinationLabel(app)
   return name and ("contact - " .. name) or target
 end
 
+-- -------------------------------------------------------------- autopilot ---
+-- The contraption controller from Create: Gadgets & Gizmos exposes numbered
+-- player-input channels, each taking 0..1. Two of them drive the thruster
+-- groups. Nothing here names the peripheral type: it is claimed by the methods
+-- it answers to, exactly as every other device is, so a controller from a
+-- later version -- or a different mod that speaks the same shape -- still
+-- lands here.
+
+local SET_METHODS  = { "setInput", "setChannel" }
+local LIST_METHODS = { "listInputs", "listInputIds", "listChannels" }
+
+local function methodOf(dev, names)
+  if type(dev) ~= "table" then return nil end
+  for _, name in ipairs(names) do
+    if type(dev[name]) == "function" then return name end
+  end
+  return nil
+end
+
+--- Whether a peripheral can be driven as a thruster controller.
+function view.looksLikeController(dev)
+  return methodOf(dev, SET_METHODS) ~= nil and methodOf(dev, LIST_METHODS) ~= nil
+end
+
+function view.discover(kit)
+  kit.controller = nil
+  for _, entry in ipairs(kit.peripherals or {}) do
+    if view.looksLikeController(entry.dev) then
+      kit.controller = {
+        name = entry.name, dev = entry.dev, type = entry.type,
+        set  = methodOf(entry.dev, SET_METHODS),
+        list = methodOf(entry.dev, LIST_METHODS),
+      }
+      break
+    end
+  end
+  return kit
+end
+
+--- The controller's inputs, as { id, label } rows for a picker.
+---
+--- listInputs() hands back config tables and listInputIds() hands back bare
+--- ids, so both shapes are accepted rather than one being insisted on.
+function view.inputs(app)
+  local controller = app.kit.controller
+  if not controller then return {} end
+  local ok, raw = pcall(controller.dev[controller.list])
+  if not ok or type(raw) ~= "table" then return {} end
+
+  local out = {}
+  for _, entry in ipairs(raw) do
+    if type(entry) == "table" then
+      local id = entry.id or entry.inputId or entry.alias or entry.key
+      if id ~= nil then
+        out[#out + 1] = {
+          id = id,
+          label = tostring(entry.alias or entry.label or entry.name or id),
+        }
+      end
+    elseif type(entry) == "string" or type(entry) == "number" then
+      out[#out + 1] = { id = entry, label = tostring(entry) }
+    end
+  end
+  return out
+end
+
+--- Writes both throttles. Every call goes through here, so there is one place
+--- that talks to the hardware and one place that records what was commanded.
+---@return boolean ok
+---@return string|nil problem
+function view.writeOutputs(app, left, right)
+  local controller = app.kit.controller
+  local auto = app.cfg.autopilot
+  local state = app.autopilot
+
+  if state then state.left, state.right = left, right end
+  if not controller then return false, "no controller attached" end
+  if auto.left == nil or auto.right == nil then return false, "inputs not mapped" end
+
+  local set = controller.dev[controller.set]
+  local okLeft  = pcall(set, auto.left, left)
+  local okRight = pcall(set, auto.right, right)
+  if okLeft and okRight then return true end
+  return false, "the controller refused the write"
+end
+
+--- Why the autopilot cannot be engaged right now, or nil when it can.
+function view.autopilotProblem(app)
+  if not app.kit.controller then return "No contraption controller attached" end
+  local auto = app.cfg.autopilot
+  if auto.left == nil or auto.right == nil then
+    return "Map the left and right inputs first"
+  end
+  if not view.destination(app) then return "No destination set" end
+  return nil
+end
+
+--- Whether the page shows an autopilot row at all. A base or a pocket computer
+--- with no controller anywhere near it gets the page it always had.
+function view.autopilotAvailable(app)
+  return app.kit.controller ~= nil
+    or app.cfg.autopilot.left ~= nil
+    or app.cfg.autopilot.right ~= nil
+end
+
+--- Engages or disengages.
+---
+--- Engagement is NOT persisted. A ship that reloads its chunk, or a computer
+--- that reboots mid-flight, comes back with the thrusters off -- restoring
+--- "was flying somewhere" from a settings file is not a thing that should
+--- happen without a person present.
+---@return boolean engaged
+---@return string message
+function view.setAutopilot(app, on)
+  local state = app.autopilot
+
+  if not on then
+    state.engaged = false
+    state.phase, state.message = "off", autopilot.phaseLabel("off")
+    state.error, state.faulted = nil, nil
+    view.writeOutputs(app, 0, 0)
+    return false, "Autopilot off"
+  end
+
+  local problem = view.autopilotProblem(app)
+  if problem then return false, problem end
+
+  state.engaged = true
+  state.phase, state.message = "probe", autopilot.phaseLabel("probe")
+  state.probing, state.faulted = 0, nil
+  state.left, state.right = 0, 0
+  return true, "Autopilot engaged"
+end
+
+function view.toggleAutopilot(app)
+  return view.setAutopilot(app, not app.autopilot.engaged)
+end
+
+--- One pass of the control loop: read the destination, decide, write.
+---@param now number os.clock()
+---@param elapsed number seconds since the previous pass
+---@return table result The autopilot's decision
+function view.control(app, now, elapsed)
+  local state = app.autopilot
+  local model = app.flight
+  local destination = view.destination(app)
+
+  local distance, bearing
+  if destination and not destination.lost then
+    distance, bearing = model:vectorTo(destination.x, destination.z)
+  end
+
+  local result = autopilot.step({
+    engaged  = state.engaged,
+    lost     = (destination and destination.lost) or false,
+    distance = distance,
+    bearing  = bearing,
+    -- The course the ship is MAKING. Deliberately not app.heading: that is
+    -- where the pilot is looking, and looking over the rail must not steer.
+    course   = model.course,
+    moving   = model.moving,
+    sinceFix = (app.lastScanAt > 0) and (now - app.lastScanAt) or nil,
+    probing  = state.probing,
+    previous = { left = state.left, right = state.right },
+    cfg      = app.cfg.autopilot,
+  })
+
+  state.probing = (result.phase == "probe")
+    and (state.probing + (elapsed or 0)) or 0
+
+  state.phase, state.message, state.error = result.phase, result.message, result.error
+  view.writeOutputs(app, result.left, result.right)
+
+  -- A fault is a give-up, not a pause: say so once, on the alert log and every
+  -- channel the operator has switched on, and stop flying.
+  if result.fault and state.engaged and state.faulted ~= result.phase then
+    state.faulted = result.phase
+    state.engaged = false
+    app:alarm("Autopilot off - " .. autopilot.phaseLabel(result.phase), "flight")
+  elseif not result.fault then
+    state.faulted = nil
+  end
+
+  app:emit("autopilot")
+  return result
+end
+
+view.events = { "scan", "autopilot" }
+
+--- The control loop. Faster than the sweep on purpose: the decision is only
+--- as fresh as the last fix, but the slew limiter needs steps to walk through,
+--- and the staleness check has to notice a dead position feed between sweeps.
+function view.start(app)
+  local basalt = require("basalt")
+  local interval = 0.5
+  basalt.schedule(function()
+    while app.running do
+      sleep(interval)
+      if app.autopilot.engaged
+         and require("radar.modules").isEnabled(app.cfg, "flight") then
+        local ok, err = pcall(view.control, app, os.clock(), interval)
+        if not ok then app.autopilot.message = tostring(err) end
+      end
+    end
+  end)
+end
+
 function view.attach(app)
   app.flight = app.flight or flightLib.new()
+
+  -- Engagement lives here rather than in the settings file, so it can never be
+  -- restored by a restart.
+  app.autopilot = app.autopilot or {
+    engaged = false,
+    phase   = "off",
+    message = autopilot.phaseLabel("off"),
+    left = 0, right = 0,
+    probing = 0,
+    error = nil,
+    faulted = nil,
+  }
+
+  -- The hardware may have just been rescanned out from under a flying ship.
+  if app.autopilot.engaged and not app.kit.controller then
+    view.setAutopilot(app, false)
+  end
 
   -- Hung off the app so another page can aim the panel without requiring this
   -- module: the contact list checks for it and leaves its taps alone when the
@@ -168,11 +431,46 @@ function view.attach(app)
       app.flight:sample(app.myPos, os.clock())
     end
   end)
+
+  -- Whatever else is going on, a station shutting down leaves the thrusters
+  -- off. A ship still under power with nothing left running to steer it is
+  -- the one outcome worth writing code to prevent.
+  app:on("stop", function()
+    app.autopilot.engaged = false
+    pcall(view.writeOutputs, app, 0, 0)
+  end)
 end
 
-view.events = { "scan" }
-
 -- ------------------------------------------------------------------- page ---
+
+-- Six cells is what the value column has on a fifteen-cell screen, so the
+-- phases get short names there rather than being cut mid-word.
+local PHASE_SHORT = {
+  off = "off", nodest = "no dest", lost = "lost", nofix = "no fix",
+  toofar = "far", probe = "find", steer = "on", arrived = "there",
+  stalled = "STALL",
+}
+
+--- What the A/P row reads. While steering it shows the course error, because
+--- that is the number that says whether it is working.
+function view.autopilotLabel(app)
+  local state = app.autopilot
+  if not state or not state.engaged then
+    return view.autopilotProblem(app) and "--" or "off"
+  end
+  if state.phase == "steer" and state.error then
+    return ("%+d"):format(util.round(state.error))
+  end
+  return PHASE_SHORT[state.phase] or state.phase
+end
+
+function view.autopilotColour(app)
+  local state = app.autopilot
+  if not state or not state.engaged then return theme.dim end
+  if autopilot.FAULTS[state.phase] then return theme.alarm end
+  if state.phase == "steer" then return theme.good end
+  return theme.accent
+end
 
 --- The readings, in the order they matter while flying. Each is
 --- { label, value, colour } and nil entries are skipped, so a panel with no
@@ -182,11 +480,23 @@ local function readings(app, wide)
   local cfg = app.cfg
   local out = {}
 
-  --- `key` names a row the operator can press. Only the destination row has
-  --- one: pressing it swaps between HOME and the waypoint.
+  --- `key` names a row the operator can press: the destination row swaps
+  --- between HOME and the waypoint, and the A/P row engages the autopilot.
   local function push(label, value, colour, key)
     out[#out + 1] = { label = label, value = value,
                       colour = colour or theme.text, key = key }
+  end
+
+  -- FIRST, when there is a controller for it. Fifteen cells gives nine rows
+  -- and this panel fills every one of them, so a row that is also the ONLY
+  -- switch for the autopilot cannot be last -- it would be the one clipped.
+  if view.autopilotAvailable(app) then
+    local state = app.autopilot or {}
+    push("A/P", view.autopilotLabel(app), view.autopilotColour(app), "auto")
+    if wide and state.engaged and state.error then
+      push("ERR", ("%+d"):format(util.round(state.error)),
+        math.abs(state.error) > 30 and theme.warn or theme.dim)
+    end
   end
 
   local speed = model.speed
@@ -381,6 +691,19 @@ function view.build(container, app, root)
     end
   end
 
+  --- Engages or disengages the autopilot from the page itself, which on a 1x1
+  --- monitor is the only way in: there is no keyboard and no settings page on
+  --- a screen that size.
+  local function toggleAuto()
+    local engaged, message = view.setAutopilot(app, not app.autopilot.engaged)
+    if root then
+      root:toast(message, engaged and "success"
+        or (view.autopilotProblem(app) and "error" or "info"))
+    end
+    canvas:markRenderDirty()
+    return true
+  end
+
   --- Puts the panel on the next destination in the cycle: HOME and the
   --- waypoint, and nothing else.
   local function swapDestination()
@@ -424,14 +747,17 @@ function view.build(container, app, root)
 
   return {
     refresh = function() canvas:markRenderDirty() end,
-    --- Two presses on this page: the destination -- either the row or the
-    --- button beside the footer -- swaps between HOME and the waypoint, and
-    --- MARK drops the waypoint where you are.
+    --- Three presses on this page. The destination -- either the row or the
+    --- button beside the footer -- swaps between HOME and the waypoint, MARK
+    --- drops the waypoint where you are, and the A/P row engages the
+    --- autopilot. The last one is the reason the A/P row is drawn first: on a
+    --- 1x1 monitor it is the only switch there is.
     touch = function(x, y)
       for _, hit in ipairs(hits) do
         if y == hit.y and x >= hit.x1 and x <= hit.x2 then
           if hit.key == "mark" then return markWaypoint() end
           if hit.key == "dest" then return swapDestination() end
+          if hit.key == "auto" then return toggleAuto() end
         end
       end
       return false
@@ -519,6 +845,210 @@ function view.settings(ctx)
     .. "your username set. Press to clear the history.")
   ctx.note("It is the PILOT's position, not the ship's: walk off and the "
     .. "readings follow you.")
+  ctx.spacer()
+
+  view.autopilotSettings(ctx)
+end
+
+-- --------------------------------------------------------------- autopilot ---
+
+function view.autopilotSettings(ctx)
+  local app, root = ctx.app, ctx.root
+  local auto = app.cfg.autopilot
+
+  ctx.heading("AUTOPILOT")
+
+  ctx.row("Autopilot", function()
+    local state = app.autopilot
+    if state.engaged then
+      return ("ON - %s"):format(autopilot.phaseLabel(state.phase))
+    end
+    return view.autopilotProblem(app) or "off"
+  end, function()
+    local _, message = view.toggleAutopilot(app)
+    root:toast(message, app.autopilot.engaged and "success" or "info")
+  end, function()
+    if not app.autopilot.engaged then
+      return view.autopilotProblem(app) and theme.warn or theme.dim
+    end
+    return autopilot.FAULTS[app.autopilot.phase] and theme.alarm or theme.good
+  end)
+
+  ctx.note("Flies to the destination above using the left and right thruster "
+    .. "groups. It steers by the course it is MAKING, never by which way you "
+    .. "are looking - so it moves off first to find out which way the ship "
+    .. "points. It does not touch altitude and it does not avoid anything.", true)
+
+  ctx.row("Controller", function()
+    local controller = app.kit.controller
+    if not controller then return "not found" end
+    return ("%s   %d input%s"):format(util.shorten(controller.name, 16),
+      #view.inputs(app), #view.inputs(app) == 1 and "" or "s")
+  end, function()
+    app:rescan()
+    root:toast(app.kit.controller and ("Controller: " .. app.kit.controller.name)
+      or "No contraption controller found",
+      app.kit.controller and "success" or "warning")
+  end, function() return app.kit.controller and theme.good or theme.warn end)
+
+  ctx.note("Any peripheral that lists inputs and takes setInput. Press to "
+    .. "rescan.")
+
+  --- One side's input picker. The two are identical bar the key, so they are
+  --- built rather than written twice and left to drift apart.
+  local function sidePicker(side, label)
+    ctx.row(label, function()
+      local id = auto[side]
+      if id == nil then return "not set" end
+      for _, input in ipairs(view.inputs(app)) do
+        if input.id == id then return input.label end
+      end
+      return tostring(id) .. "  (not on the controller)"
+    end, function()
+      local inputs = view.inputs(app)
+      if #inputs == 0 then
+        root:toast(app.kit.controller and "The controller lists no inputs"
+          or "No controller attached", "warning")
+        return
+      end
+      local entries = {}
+      for _, input in ipairs(inputs) do
+        entries[#entries + 1] = { label = input.label, value = input.id }
+      end
+      entries[#entries + 1] = { label = "-- not set --", value = false }
+      ctx.openPicker(label:upper(), entries, auto[side], function(value)
+        auto[side] = (value ~= false) and value or nil
+        app:saveConfig()
+        ctx.refreshRows()
+      end)
+    end, function() return auto[side] ~= nil and theme.text or theme.warn end)
+  end
+
+  sidePicker("left", "Left thrusters")
+  sidePicker("right", "Right thrusters")
+
+  ctx.action("Swap left and right", function()
+    auto.left, auto.right = auto.right, auto.left
+    app:saveConfig()
+    root:toast("Swapped", "info")
+  end)
+
+  ctx.note("If it turns the wrong way, they are the wrong way round. More "
+    .. "thrust on the LEFT swings the nose to the RIGHT.", true)
+
+  ctx.row("Cruise", function() return ("%d%%"):format(util.round(auto.cruise * 100)) end,
+    function()
+      ctx.openPicker("CRUISE THROTTLE",
+        ctx.entriesOf({ 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0 },
+          function(v) return ("%d%%"):format(util.round(v * 100)) end,
+          function(v) return v end),
+        auto.cruise,
+        function(value)
+          auto.cruise = value
+          app:saveConfig()
+          ctx.refreshRows()
+        end)
+    end)
+
+  ctx.row("Turn response", function()
+    return ("full turn at %d deg"):format(auto.turnFull)
+  end, function()
+    ctx.openPicker("TURN RESPONSE",
+      ctx.entriesOf({ 30, 45, 60, 90, 120 }, function(v)
+        local name = (v <= 30 and "Sharp") or (v <= 45 and "Quick")
+          or (v <= 60 and "Normal") or (v <= 90 and "Gentle") or "Lazy"
+        return ctx.withHint(name, ("full turn at %d deg off course"):format(v))
+      end, function(v) return v end),
+      auto.turnFull,
+      function(value)
+        auto.turnFull = value
+        app:saveConfig()
+        ctx.refreshRows()
+      end)
+  end)
+
+  ctx.note("How hard it corrects. A fix arrives about once a second, so "
+    .. "Sharp on a heavy ship will hunt from side to side.")
+
+  ctx.row("Arrive within", function() return auto.arrive .. " blocks" end, function()
+    ctx.openPicker("ARRIVE WITHIN",
+      ctx.entriesOf({ 5, 10, 25, 50, 100 },
+        function(v) return v .. " blocks" end, function(v) return v end),
+      auto.arrive,
+      function(value)
+        auto.arrive = value
+        if auto.slowWithin < value then auto.slowWithin = value end
+        app:saveConfig()
+        ctx.refreshRows()
+      end)
+  end)
+
+  ctx.row("Ease off within", function() return auto.slowWithin .. " blocks" end,
+    function()
+      ctx.openPicker("EASE OFF WITHIN",
+        ctx.entriesOf({ 50, 120, 250, 500, 1000 },
+          function(v) return v .. " blocks" end, function(v) return v end),
+        auto.slowWithin,
+        function(value)
+          auto.slowWithin = math.max(value, auto.arrive)
+          app:saveConfig()
+          ctx.refreshRows()
+        end)
+    end)
+
+  ctx.note("It throttles back on the approach so it stops near the "
+    .. "destination rather than sailing past it.")
+
+  ctx.row("Shut off beyond", function()
+    if auto.range == false then return "no limit" end
+    return auto.range .. " blocks"
+  end, function()
+    ctx.openPicker("SHUT OFF BEYOND",
+      ctx.entriesOf(autopilot.RANGES, function(v)
+        if v == false then return ctx.withHint("No limit", "it will fly anywhere") end
+        return v .. " blocks"
+      end, function(v) return v end),
+      auto.range,
+      function(value)
+        auto.range = value
+        app:saveConfig()
+        ctx.refreshRows()
+      end)
+  end, function() return auto.range == false and theme.warn or theme.text end)
+
+  ctx.note("Cuts the thrusters if the destination is further off than this, "
+    .. "checked every pass and not only when engaging - a contact who logs "
+    .. "back in on the far side of the world moves the destination, not the "
+    .. "ship.", true)
+
+  --- A one-second nudge on one side, for checking the wiring without
+  --- engaging. It restores whatever was commanded before, which while
+  --- disengaged is nothing.
+  local function nudge(side, label)
+    ctx.action("Test " .. label, function()
+      if not app.kit.controller then
+        root:toast("No controller attached", "error")
+        return
+      end
+      if app.autopilot.engaged then
+        root:toast("Switch the autopilot off first", "warning")
+        return
+      end
+      local basalt = require("basalt")
+      root:toast(("Pulsing %s for 1s"):format(label), "info")
+      basalt.schedule(function()
+        view.writeOutputs(app, side == "left" and auto.cruise or 0,
+          side == "right" and auto.cruise or 0)
+        sleep(1)
+        view.writeOutputs(app, 0, 0)
+      end)
+    end)
+  end
+
+  nudge("left", "left thrusters")
+  nudge("right", "right thrusters")
+
+  ctx.note("The ship will move. Use them in clear air.", true)
   ctx.spacer()
 end
 

@@ -10,6 +10,7 @@ powerclient.lua
 radar.lua
 radar/alerts.lua
 radar/app.lua
+radar/autopilot.lua
 radar/backdrops.lua
 radar/biomes.lua
 radar/chart.lua

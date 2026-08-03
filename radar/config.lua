@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.6"
+config.VERSION = "8.7"
 
 config.FILES = {
   cfg    = "radar.cfg",

@@ -409,7 +409,11 @@ function app:start()
   modules.start(self)
 end
 
+--- Shuts the station down. The event goes out FIRST, while everything is still
+--- attached: a module with hardware latched on -- the autopilot holding a
+--- ship's thrusters open -- has to be able to let go of it.
 function app:stop()
+  self:emit("stop")
   self.running = false
   self.link:close()
 end
