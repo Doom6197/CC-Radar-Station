@@ -53,6 +53,10 @@ flight.MOVING_SPEED = 0.15
 -- change within a second or two, not so much that it flickers.
 local SMOOTHING = 0.4
 
+-- The turn rate is a derivative of an already smoothed, already averaged
+-- signal, so it is smoothed harder still. Unsmoothed it is mostly jitter.
+local TURN_SMOOTHING = 0.3
+
 function flight.new()
   local self = setmetatable({}, flight)
   self:reset()
@@ -67,7 +71,11 @@ function flight:reset()
   self.speed = nil          -- blocks per second over the ground
   self.vertical = nil       -- blocks per second, positive is climbing
   self.course = nil         -- true bearing of travel, nil when stationary
+  self.turnRate = nil       -- degrees per second, positive is turning right
   self.moving = false
+
+  self.courseAt = nil       -- when `course` was last set, for the turn rate
+  self.lastCourse = nil
 
   self.position = nil       -- the most recent fix
   self.dimension = nil
@@ -162,11 +170,39 @@ function flight:update(now)
   -- A course is only meaningful while actually going somewhere; the last one
   -- is kept rather than swinging to nonsense as the ship comes to a stop.
   if ground >= flight.MOVING_SPEED then
-    self.course = util.bearingOf(dx, dz)
+    self:setCourse(util.bearingOf(dx, dz), now)
   elseif not self.moving then
-    self.course = nil
+    self.course, self.turnRate = nil, nil
+    self.courseAt, self.lastCourse = nil, nil
   end
 
+  return self
+end
+
+--- Records a new course and works out how fast it is changing.
+---
+--- The turn rate is what stops the autopilot overshooting. Steering on the
+--- error alone, against a course that is averaged over three seconds and then
+--- smoothed, means the correction is still going in long after the ship is
+--- pointed the right way -- so it sails past, corrects back, and hunts. The
+--- rate is what lets it start easing off before the error reaches zero.
+---
+--- Smoothed harder than the course itself: it is a derivative of an already
+--- noisy signal, and an unsmoothed one would be mostly jitter.
+function flight:setCourse(course, now)
+  local previous, at = self.lastCourse, self.courseAt
+  self.course = course
+
+  if previous and at then
+    local elapsed = now - at
+    if elapsed > 0 then
+      local rate = util.angleDelta(previous, course) / elapsed
+      self.turnRate = self.turnRate
+        and util.lerp(self.turnRate, rate, TURN_SMOOTHING) or rate
+    end
+  end
+
+  self.lastCourse, self.courseAt = course, now
   return self
 end
 

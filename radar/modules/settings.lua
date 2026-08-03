@@ -319,7 +319,12 @@ view.GROUPS = {
 
       ctx.coords("Base X Y Z", { "baseX", "baseY", "baseZ" }, function()
         app:saveConfig()
-        root:toast("Base updated", "success")
+        if cfg.baseX and cfg.baseZ then
+          root:toast(("Base %d, %d, %d"):format(cfg.baseX, cfg.baseY or 0,
+            cfg.baseZ), "success")
+        else
+          root:toast("The base needs an X and a Z", "warning")
+        end
       end)
 
       -- A MOBILE is told where its main base stands, so the coordinates above
@@ -1318,9 +1323,36 @@ function view.build(container, app, root)
     local x = narrow and 1 or (LABEL_WIDTH + 1)
     local boxWidth = narrow and 7 or 8
     local gap = boxWidth + 1
+    local boxes = {}
+
+    --- Commits ALL THREE boxes, whichever one was left.
+    ---
+    --- Each box used to commit only itself, and only on Enter. Type into all
+    --- three, press Enter once, and the other two kept their typing on screen
+    --- while the settings kept their old values -- so a waypoint typed in full
+    --- read back as "not set" under a toast saying it had been set. Reading
+    --- every box on every commit is what makes what is on screen and what is
+    --- stored the same thing.
+    ---
+    --- An empty box means nil, so a coordinate can be cleared as well as set.
+    local function commit()
+      local changed = false
+      for index, key in ipairs(keys) do
+        local value = tonumber(boxes[index] and boxes[index].text)
+        local now = value and math.floor(value) or nil
+        if app.cfg[key] ~= now then
+          app.cfg[key] = now
+          changed = true
+        end
+      end
+      -- Only when something actually moved, or leaving a box you never typed
+      -- in would announce a change that did not happen.
+      if changed and onCommit then onCommit() end
+      refreshRows()
+    end
 
     for index, key in ipairs(keys) do
-      local box = body:addInput({
+      boxes[index] = body:addInput({
         x = x + (index - 1) * gap, y = nextY,
         width = boxWidth, height = 1,
         text = tostring(app.cfg[key] or ""),
@@ -1330,14 +1362,9 @@ function view.build(container, app, root)
         background = theme.panel, foreground = theme.text,
         placeholderColor = theme.line,
       })
-      box:onEnter(function(self)
-        local value = tonumber(self.text)
-        if value then
-          app.cfg[key] = math.floor(value)
-          if onCommit then onCommit(key, app.cfg[key]) end
-        end
-        refreshRows()
-      end)
+      -- On blur as well as Enter, so tabbing or clicking off a box counts.
+      boxes[index]:onEnter(commit)
+      boxes[index]:onBlur(commit)
     end
     nextY = nextY + 1
   end

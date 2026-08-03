@@ -1907,6 +1907,158 @@ check("the autopilot shuts itself off beyond its range limit", function()
     == false, "and an explicit no-limit is kept")
 end)
 
+check("the turn rate is measured, signed and smoothed", function()
+  local model = flightLib.new()
+  -- Flying north, turning steadily to the right.
+  local x, z, course = 0, 0, 0
+  for step = 0, 30 do
+    local radians = math.rad(course)
+    x = x + math.sin(radians) * 10
+    z = z - math.cos(radians) * 10
+    model:sample({ x = x, y = 70, z = z, dimension = "minecraft:overworld" }, step)
+    course = course + 10                    -- ten degrees a second, to the right
+  end
+  assert(model.turnRate and model.turnRate > 1,
+    "a right turn reads positive, got " .. tostring(model.turnRate))
+
+  -- And the other way.
+  local back = flightLib.new()
+  x, z, course = 0, 0, 0
+  for step = 0, 30 do
+    local radians = math.rad(course)
+    x = x + math.sin(radians) * 10
+    z = z - math.cos(radians) * 10
+    back:sample({ x = x, y = 70, z = z, dimension = "minecraft:overworld" }, step)
+    course = course - 10
+  end
+  assert(back.turnRate and back.turnRate < -1,
+    "a left turn reads negative, got " .. tostring(back.turnRate))
+
+  -- Straight and level is not a turn.
+  local straight = flightLib.new()
+  for step = 0, 20 do
+    straight:sample({ x = 0, y = 70, z = -step * 10,
+      dimension = "minecraft:overworld" }, step)
+  end
+  assert(math.abs(straight.turnRate or 0) < 0.5,
+    "flying straight is not turning, got " .. tostring(straight.turnRate))
+
+  -- Coming to a stop throws it away rather than leaving a stale rate behind.
+  for step = 21, 40 do
+    straight:sample({ x = 0, y = 70, z = -200, dimension = "minecraft:overworld" }, step)
+  end
+  assert(straight.turnRate == nil, "a stopped ship has no turn rate")
+end)
+
+check("damping catches the turn before the ship swings through it", function()
+  local function steer(err, turnRate, lead)
+    return autopilotLib.step({
+      engaged = true, distance = 500, bearing = err, course = 0,
+      turnRate = turnRate, moving = true, probing = 0,
+      previous = { left = 0.6, right = 0.6 },
+      cfg = { cruise = 0.6, turnFull = 90, lead = lead, range = false },
+    })
+  end
+
+  -- Forty degrees off, not yet turning: push into the turn.
+  local cold = steer(40, 0, 2.5)
+  assert(cold.left > cold.right, "it starts the turn, got "
+    .. cold.left .. "/" .. cold.right)
+
+  -- Same error, but already coming round at fifteen degrees a second. In 2.5
+  -- seconds that is 37 of the 40, so the turn is as good as made: coast.
+  local settling = steer(40, 15, 2.5)
+  assert(settling.left < cold.left,
+    "already turning means less push, got " .. settling.left .. " vs " .. cold.left)
+  assert(settling.left == settling.right,
+    "and inside the deadband it just holds, got "
+      .. settling.left .. "/" .. settling.right)
+
+  -- Coming round faster than the error can absorb: push the other way.
+  local fast = steer(40, 25, 2.5)
+  assert(fast.projected < 0, "the projected error has gone past zero, got "
+    .. fast.projected)
+  assert(fast.left < fast.right,
+    "so it is counter-thrust, got " .. fast.left .. "/" .. fast.right)
+
+  -- Dead on the bearing but still swinging: catch it before the error grows.
+  local swinging = steer(0, 12, 2.5)
+  assert(swinging.right > swinging.left,
+    "a ship swinging right of its target is pulled back, got "
+      .. swinging.left .. "/" .. swinging.right)
+
+  -- With damping off it is the old behaviour: the rate is ignored entirely.
+  local undamped = steer(40, 15, 0)
+  assert(math.abs(undamped.left - cold.left) < 0.001,
+    "damping off steers on the error alone, got " .. undamped.left)
+end)
+
+check("the autopilot settles on a heading instead of hunting", function()
+  -- A closed loop: the law drives a ship, the ship's turn responds to the
+  -- thrust difference with momentum, and the course the law reads back lags
+  -- the way a three-second average does. That lag is what made the first
+  -- version swing ninety degrees past every turn and hunt left and right.
+  --
+  -- Nothing else in the suite can catch that -- a check on one step cannot
+  -- tell a stable controller from an unstable one.
+  local function fly(lead, turnFull)
+    local DT = 0.5
+    local YAW_GAIN, YAW_DRAG, LAG = 40, 0.6, 0.25
+
+    local course, rate, reported, reportedRate = 90, 0, 90, 0
+    local previous = { left = 0, right = 0 }
+    local worst, crossings, lastSign = 0, 0, nil
+
+    for step = 1, 240 do
+      local result = autopilotLib.step({
+        engaged = true, distance = 5000, bearing = 0,
+        course = reported, turnRate = reportedRate,
+        moving = true, probing = 0, previous = previous,
+        cfg = { cruise = 0.6, turnFull = turnFull, lead = lead,
+                range = false, slowWithin = 200 },
+      })
+      previous = { left = result.left, right = result.right }
+
+      -- The ship: thrust difference makes yaw acceleration, with drag.
+      rate = rate + (result.left - result.right) * YAW_GAIN * DT
+      rate = rate - rate * YAW_DRAG * DT
+      course = (course + rate * DT) % 360
+
+      -- What the law gets to see, a smoothed and therefore late version.
+      reported = util.approachAngle(reported, course, LAG)
+      reportedRate = reportedRate + (rate - reportedRate) * LAG
+
+      -- What matters is the TRANSIENT: how many times it swings through the
+      -- heading before it stops, and how long that takes. Judging the tail
+      -- alone would call both of these settled, which is exactly the mistake
+      -- that let the hunting ship ship.
+      local err = util.angleDelta(course, 0)
+      local sign = err > 2 and 1 or (err < -2 and -1 or 0)
+      if sign ~= 0 and lastSign and sign ~= lastSign then
+        crossings = crossings + 1
+      end
+      if sign ~= 0 then lastSign = sign end
+      if math.abs(err) >= 5 then worst = step end     -- last step still off
+    end
+    return worst, crossings                          -- settle step, reversals
+  end
+
+  local settled, crossings = fly(2.5, 90)
+  assert(settled <= 40,
+    "it is on the heading within twenty seconds, took " .. (settled * 0.5) .. "s")
+  assert(crossings <= 1,
+    "arriving on it rather than swinging through, " .. crossings .. " reversals")
+
+  -- The same ship with the v8.9 gains is the bug that was reported: it swings
+  -- past the turn and hunts left and right for the best part of a minute.
+  local wasSettled, wasCrossings = fly(0, 60)
+  assert(wasCrossings > crossings,
+    "undamped keeps reversing: " .. wasCrossings .. " vs " .. crossings)
+  assert(wasSettled > settled * 2,
+    "and takes far longer to settle: " .. (wasSettled * 0.5) .. "s vs "
+      .. (settled * 0.5) .. "s")
+end)
+
 check("a dead position feed cuts the thrusters", function()
   -- The link dropping, the base unloading, a username that stopped resolving:
   -- whatever the cause, holding the last command indefinitely would fly the
@@ -5090,6 +5242,86 @@ check("a wide screen keeps the two-column layout", function()
   assert(forcedButton.y == forcedLabel.y + 1, "forcing stacked works on any screen")
 
   buildSettingsAt(51, "auto")
+end)
+
+check("typing a waypoint into the boxes actually sets it", function()
+  -- The bug: each box committed only itself, and only on Enter. Type into all
+  -- three, press Enter once, and the other two kept their typing on screen
+  -- while the settings kept their old values -- so a waypoint typed in full
+  -- read back as "a waypoint - not set" under a toast saying it was set.
+  local settingsModule = modules.byId("settings")
+  local flightModule = modules.byId("flight")
+
+  local function boxesOf(layout)
+    app.cfg.settingsLayout = layout
+    app.cfg.flightX, app.cfg.flightY, app.cfg.flightZ = nil, nil, nil
+    app.cfg.flightTarget = "custom"        -- as the destination picker leaves it
+    rawget(terminalRoot.root, "_p").width = 51
+    rawget(terminalRoot.root, "_p").height = 19
+    terminalRoot.views.settings = nil
+    terminalRoot:setPage("settings", false)
+    local view = terminalRoot.views.settings
+    view.openGroup(settingsModule.MODULE_PREFIX .. "flight")
+
+    local found = {}
+    local function walk(element)
+      for _, child in ipairs(rawget(element, "_children") or {}) do
+        if child.__kind == "Input" and child.placeholder then
+          found[#found + 1] = child
+        end
+        walk(child)
+      end
+    end
+    walk(view.container)
+    return found
+  end
+
+  -- Both layouts: the reported failure was on the stacked one, and the two
+  -- lay the boxes out differently.
+  for _, layout in ipairs({ "columns", "stacked" }) do
+    local boxes = boxesOf(layout)
+    assert(#boxes == 3, layout .. ": three waypoint boxes, got " .. #boxes)
+
+    boxes[1].text, boxes[2].text, boxes[3].text = "100", "50", "-200"
+
+    -- Enter in the MIDDLE box only, which is what made this so easy to hit.
+    rawget(boxes[2], "_handlers").onEnter(boxes[2])
+
+    assert(app.cfg.flightX == 100, layout .. ": X committed, got "
+      .. tostring(app.cfg.flightX))
+    assert(app.cfg.flightY == 50, layout .. ": Y committed, got "
+      .. tostring(app.cfg.flightY))
+    assert(app.cfg.flightZ == -200, layout .. ": Z committed, got "
+      .. tostring(app.cfg.flightZ))
+
+    -- And what the page says about it now matches what is stored.
+    assert(flightModule.destinationLabel(app) == "waypoint 100, -200",
+      layout .. ": the destination row agrees, got "
+        .. flightModule.destinationLabel(app))
+    local destination = flightModule.destination(app)
+    assert(destination and destination.x == 100 and destination.z == -200,
+      layout .. ": and the flight page flies to it")
+  end
+
+  -- Leaving a box counts too, so clicking away from it is not silently lost.
+  local boxes = boxesOf("columns")
+  boxes[1].text, boxes[3].text = "7", "9"
+  rawget(boxes[1], "_handlers").onBlur(boxes[1])
+  assert(app.cfg.flightX == 7 and app.cfg.flightZ == 9,
+    "blurring a box commits, got " .. tostring(app.cfg.flightX)
+      .. ", " .. tostring(app.cfg.flightZ))
+
+  -- An emptied box clears its coordinate, which was previously impossible.
+  boxes[3].text = ""
+  rawget(boxes[3], "_handlers").onEnter(boxes[3])
+  assert(app.cfg.flightZ == nil, "an empty box clears it, got "
+    .. tostring(app.cfg.flightZ))
+  assert(flightModule.destinationLabel(app) == "a waypoint - not set",
+    "and the page says so rather than claiming a waypoint")
+
+  app.cfg.flightTarget = "home"
+  app.cfg.flightX, app.cfg.flightY, app.cfg.flightZ = nil, nil, nil
+  app.cfg.settingsLayout = "auto"
 end)
 
 check("hints hide the helpful lines and keep the warnings", function()

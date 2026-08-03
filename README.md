@@ -163,7 +163,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.9                                    |  SETTINGS   v8.9
+ SETTINGS   v8.10                                    |  SETTINGS   v8.10
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -537,12 +537,26 @@ been cut, and only one of those is a decision.
 Sixteen levels is all redstone has, so a correction finer than about 7% of
 cruise cannot be expressed. That is what the 5° deadband is for anyway.
 
-Three softeners matter, because a position fix arrives about once a second:
+**Steering on the error alone does not work here**, and v8.7 proved it: a
+course averaged over three seconds and then smoothed lags the ship badly, so
+the correction was still going in long after the nose was pointed the right
+way. It swung a good ninety degrees past every turn and hunted left and right.
+
+So it steers on **where the course will be**. The turn rate the ship is
+actually making, times a lead time in seconds, is subtracted from the error —
+and once the turn is developing fast enough to close the gap on its own, the
+command eases off and then reverses into counter-thrust *before* the error
+reaches zero. That is the difference between arriving on a heading and swinging
+through it. *Settings → … → Autopilot → Damping* sets the lead; `2.5s` by
+default, `Off` restores the old behaviour if you want to see it.
+
+Around that, three softeners, because a position fix arrives about once a
+second:
 
 | | |
 |---|---|
-| **deadband** | errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
-| **turn brake** | up to 60% of cruise is given up at full deflection, because a vessel at full ahead in the wrong direction is going the wrong way faster |
+| **deadband** | projected errors under 5° are not chased — a fix a second apart cannot resolve them and steering for them just twitches the ship |
+| **turn brake** | up to 80% of cruise is given up at full deflection, because a vessel at full ahead in the wrong direction is going the wrong way faster |
 | **slew limit** | outputs walk to their new values rather than slamming, which a heavy contraption cannot follow anyway |
 
 **Cutting the throttle is never slewed.** Everything that stops the autopilot
@@ -574,6 +588,7 @@ Under **Settings → Pages → Flight → Autopilot**:
 | **Swap left and right** | for when they are backwards |
 | **Cruise** | throttle in level flight |
 | **Turn response** | how hard it corrects — `Sharp` on a heavy ship will hunt |
+| **Damping** | how far ahead it looks at the turn rate. Turn it up if the ship swings past the turn, down if it gives up too early |
 | **Arrive within** | how close is close enough |
 | **Ease off within** | where it starts throttling back so it stops rather than sailing past |
 | **Shut off beyond** | 250 / 500 / **1000** / 2500 / 5000 blocks, or no limit |
@@ -1172,6 +1187,21 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.10 - the autopilot stops hunting, and a typed waypoint sticks.** Steering
+on the course error alone against a smoothed, three-second-averaged course made
+the ship swing about ninety degrees past every turn and hunt. It now steers on
+the **projected** error -- the turn rate it is actually making, times a lead
+time -- so it eases off and counter-thrusts before the error reaches zero. A
+closed-loop simulation in the test suite flies the thing and asserts it settles
+without reversing, which is the only kind of check that can tell a stable
+controller from an unstable one.
+
+Also: each coordinate box committed only itself, and only on Enter. Typing all
+three and pressing Enter once left the other two on screen but unsaved -- so a
+waypoint typed in full read back as "not set" under a toast claiming it had
+been set. Every box now commits on Enter **and on blur**, and the toast says
+what actually landed.
 
 **v8.9 - the relay is actually found.** v8.8 matched a relay on
 `setAnalogOutput` **and `getSides`** -- and a real Redstone Relay has no

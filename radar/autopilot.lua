@@ -29,12 +29,26 @@
 --   control law never has to think in sixteenths, and the one place the
 --   quantisation happens is one function with its own tests.
 --
---   Everything is proportional, with three softeners that matter on a slow
---   control loop. A DEADBAND, because a fix a second apart cannot resolve five
---   degrees and chasing it just twitches the ship. A TURN BRAKE, because a
---   vessel at full ahead in the wrong direction is going the wrong way faster.
---   And a SLEW LIMIT, so the outputs walk to their new values instead of
---   slamming, which a heavy contraption cannot follow anyway.
+--   Steering on the error ALONE does not work here, and the first version of
+--   this proved it: a course averaged over three seconds and then smoothed
+--   lags the ship badly, so the correction was still going in long after the
+--   nose was pointed the right way. The ship sailed a good ninety degrees past
+--   the turn, corrected back, and hunted left and right without ever settling.
+--
+--   So it steers on where the course WILL BE. The turn rate the ship is
+--   actually making, times a lead time in seconds, is subtracted from the
+--   error -- and once the turn is developing fast enough to close the gap on
+--   its own, the command eases off and then reverses into counter-thrust
+--   before the error reaches zero. That is the difference between arriving on
+--   a heading and swinging through it.
+--
+--   Around that, three softeners that matter on a slow control loop. A
+--   DEADBAND, because a fix a second apart cannot resolve five degrees and
+--   chasing it just twitches the ship. A TURN BRAKE, because a vessel at full
+--   ahead in the wrong direction is going the wrong way faster -- and the
+--   harder it is turning, the more of the throttle it gives back. And a SLEW
+--   LIMIT, so the outputs walk to their new values instead of slamming, which
+--   a heavy contraption cannot follow anyway.
 --
 -- No peripheral is touched in here. This file decides; radar/modules/flight.lua
 -- reads the position, writes the outputs and owns the settings.
@@ -58,8 +72,15 @@ autopilot.STALE_SECONDS = 5
 autopilot.DEADBAND_DEGREES = 5
 
 -- Fraction of cruise given up at full deflection, so a hard turn is also a
--- slow one.
-autopilot.TURN_BRAKE = 0.6
+-- slow one. Raised from 0.6 in v8.10: a ship that keeps its speed up through a
+-- turn covers ground in the wrong direction while it comes round, and arrives
+-- on the new heading further from where it wanted to be than when it started.
+autopilot.TURN_BRAKE = 0.8
+
+-- Seconds of turn rate subtracted from the error. Effectively "where will the
+-- course be in this long", and the one number that decides whether the ship
+-- settles on a heading or swings through it. Overridable per station.
+autopilot.LEAD_SECONDS = 2.5
 
 -- Most any output may move in one step of the control loop.
 autopilot.SLEW = 0.25
@@ -185,8 +206,19 @@ function autopilot.step(s)
   end
 
   local err = util.angleDelta(s.course, s.bearing)   -- positive: target is right
-  local steer = (abs(err) <= autopilot.DEADBAND_DEGREES) and 0
-    or util.clamp(err / turnFull, -1, 1)
+
+  -- Where the course will be in `lead` seconds if the ship keeps turning the
+  -- way it is turning now. Steering on THIS rather than on the error is what
+  -- stops it swinging through the heading it was aiming for.
+  local lead = tonumber(cfg.lead) or autopilot.LEAD_SECONDS
+  local rate = tonumber(s.turnRate) or 0
+  local projected = err - lead * rate
+
+  -- The deadband is on the projected error, not the raw one: a ship already
+  -- swinging onto the right heading should stop pushing, and one swinging off
+  -- it should be caught before the error itself has grown.
+  local steer = (abs(projected) <= autopilot.DEADBAND_DEGREES) and 0
+    or util.clamp(projected / turnFull, -1, 1)
 
   -- Ease off near the destination, and while turning hard.
   local approach = util.clamp(s.distance / slowWithin, autopilot.APPROACH_FLOOR, 1)
@@ -199,6 +231,8 @@ function autopilot.step(s)
     phase = "steer",
     message = ("%+d deg"):format(floor(err + (err >= 0 and 0.5 or -0.5))),
     error = err,
+    projected = projected,
+    turnRate = rate,
     fault = false,
   }
 end

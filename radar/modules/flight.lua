@@ -45,7 +45,8 @@ view.defaults = {
     left  = nil,          -- relay side carrying the left thruster group
     right = nil,          -- and the right
     cruise     = 0.6,     -- throttle in level flight, 0..1
-    turnFull   = 60,      -- degrees of course error for full deflection
+    turnFull   = 90,      -- degrees of course error for full deflection
+    lead       = 2.5,     -- seconds of turn rate subtracted from the error
     arrive     = 25,      -- blocks from the destination it stops at
     slowWithin = 120,     -- blocks out that it starts easing off
     range      = 1000,    -- blocks; further than this it shuts itself off
@@ -79,7 +80,8 @@ function view.sanitise(cfg)
     cfg.autopilot = auto
   end
   auto.cruise     = util.clamp(tonumber(auto.cruise) or 0.6, 0.05, 1)
-  auto.turnFull   = util.clamp(floor(tonumber(auto.turnFull) or 60), 10, 180)
+  auto.turnFull   = util.clamp(floor(tonumber(auto.turnFull) or 90), 10, 180)
+  auto.lead       = util.clamp(tonumber(auto.lead) or 2.5, 0, 8)
   auto.arrive     = util.clamp(floor(tonumber(auto.arrive) or 25), 1, 500)
   auto.slowWithin = util.clamp(floor(tonumber(auto.slowWithin) or 120),
     auto.arrive, 2000)
@@ -419,6 +421,10 @@ function view.control(app, now, elapsed)
     -- The course the ship is MAKING. Deliberately not app.heading: that is
     -- where the pilot is looking, and looking over the rail must not steer.
     course   = model.course,
+    -- How fast it is coming round. Without this the correction is still
+    -- going in long after the nose is pointed the right way, and the ship
+    -- swings through the heading instead of settling on it.
+    turnRate = model.turnRate,
     moving   = model.moving,
     sinceFix = (app.lastScanAt > 0) and (now - app.lastScanAt) or nil,
     probing  = state.probing,
@@ -898,7 +904,16 @@ function view.settings(ctx)
   if cfg.flightTarget == "custom" then
     ctx.coords("Waypoint XYZ", { "flightX", "flightY", "flightZ" }, function()
       app:saveConfig()
-      ctx.root:toast("Waypoint set", "success")
+      -- What it says has to match what the Destination row above now reads. A
+      -- waypoint needs an X and a Z to be a place at all; the height is
+      -- optional, since a bearing does not use it.
+      if cfg.flightX and cfg.flightZ then
+        ctx.root:toast(("Waypoint %d, %d"):format(cfg.flightX, cfg.flightZ),
+          "success")
+      else
+        ctx.root:toast("A waypoint needs an X and a Z", "warning")
+      end
+      ctx.refreshRows()
     end)
   end
 
@@ -1107,6 +1122,30 @@ function view.autopilotSettings(ctx)
 
   ctx.note("How hard it corrects. A fix arrives about once a second, so "
     .. "Sharp on a heavy ship will hunt from side to side.")
+
+  ctx.row("Damping", function()
+    if auto.lead <= 0 then return "off - steers on the error alone" end
+    return ("%.1f s of lead"):format(auto.lead)
+  end, function()
+    ctx.openPicker("TURN DAMPING",
+      ctx.entriesOf({ 0, 1, 1.5, 2.5, 4, 6 }, function(v)
+        if v == 0 then return ctx.withHint("Off", "will overshoot and hunt") end
+        local name = (v <= 1 and "Light") or (v <= 1.5 and "Some")
+          or (v <= 2.5 and "Normal") or (v <= 4 and "Heavy") or "Very heavy"
+        return ctx.withHint(name, ("%.1f seconds of lead"):format(v))
+      end, function(v) return v end),
+      auto.lead,
+      function(value)
+        auto.lead = value
+        app:saveConfig()
+        ctx.refreshRows()
+      end)
+  end, function() return auto.lead > 0 and theme.text or theme.warn end)
+
+  ctx.note("How far ahead it looks at the rate the ship is coming round, so "
+    .. "it starts easing off BEFORE it is on the heading. Turn this up if it "
+    .. "swings past the turn and hunts left and right; down if it gives up "
+    .. "the turn too early and creeps in.", true)
 
   ctx.row("Arrive within", function() return auto.arrive .. " blocks" end, function()
     ctx.openPicker("ARRIVE WITHIN",
