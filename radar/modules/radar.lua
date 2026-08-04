@@ -179,7 +179,12 @@ function view.build(container, app)
     local text, color
     if unlocked then
       if app.heading then
-        text, color = ("HDG %03d"):format(util.round(app:rotation()) % 360), theme.accent
+        -- app.heading, not app:rotation(). The rotation is the EASED value the
+        -- picture is drawn at, which lags on purpose and never quite settles
+        -- while the source moves -- so reporting it here had this page and the
+        -- flight page showing different numbers under the same three letters.
+        -- One heading, one meaning: where the tracking mode says the nose is.
+        text, color = ("HDG %03d"):format(util.round(app.heading) % 360), theme.accent
       else
         text, color = "HDG --", theme.warn
       end

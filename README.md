@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.19                                    |  SETTINGS   v8.19
+ SETTINGS   v8.20                                    |  SETTINGS   v8.20
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -730,7 +730,7 @@ Sub-Level, it stops being inferred:
 | `SPD` `VS` | straight off the ship's linear velocity, in blocks/second |
 | `CRS` | the direction of that velocity — where it is going *this instant* |
 | turn rate | the ship's angular velocity, exact and current |
-| `HDG` | the **ship's** nose, out of the pose's orientation quaternion — not where the pilot is looking |
+| `HDG` | the **ship's** nose, from rotating the bow by the pose's orientation — not where the pilot is looking |
 | `DFT` | which makes this real sideslip: nose against track |
 | position | the **vessel's**, not the pilot's |
 | **the sweep** | `SHIP` tracking centres the scope on the vessel and turns it with the bow |
@@ -750,6 +750,27 @@ its course rotates.
 Getting that sign wrong would not have been subtle: the rate term would add to
 the heading error instead of opposing it, and the autopilot would diverge on
 its first correction.
+
+#### One heading, one meaning
+
+`HDG` is `app.heading`: whatever the [tracking mode](#tracking-modes) follows,
+snapped to this station's heading step. The **flight page and the radar page
+show the same number**, because they read the same one — they used to derive it
+two different ways and disagree under the same three letters.
+
+It is not the same as what the scope is *drawn* at. That is the eased value,
+which lags on purpose and never quite settles while the source moves.
+
+The heading is also worked out by **rotating the bow** and taking the bearing
+of where it lands, rather than by pulling an Euler yaw out of the quaternion.
+The Euler version mixes in pitch and roll, so a hull rocking at anchor wandered
+while the bow had not moved:
+
+```
+bow held at 090:      pitch 5 roll 10    pitch 10 roll 25    pitch 20 roll 25
+  Euler yaw                     090.9               094.3               098.7
+  bow projected                 090.0               090.0               090.0
+```
 
 #### `HDG` needs trimming once, per ship
 
@@ -1395,6 +1416,17 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.20 - the heading stops wandering, and both pages agree on it.** Three
+things were wrong at once. The heading came out of an Euler yaw, which mixes in
+pitch and roll -- so a rocking airship moved it up to nine degrees while the
+bow had not moved at all; it now rotates the BOW and takes the bearing of where
+that lands, which does not care how the hull is tilted. The radar page reported
+the EASED drawing bearing while the flight page derived its own from the flight
+model, so the two disagreed under the same three letters; both read app.heading
+now. And the heading loop idled while the scope was locked, leaving the number
+stale on the flight page; it polls either way, since HDG is a reading whether
+or not the picture turns.
 
 **v8.19 - three tracking modes, and the scope turns again.** Tracking was two
 modes named for the wrong thing, and the scope's rotation was a separate

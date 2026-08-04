@@ -488,13 +488,16 @@ end
 
 --- Where the nose points.
 ---
---- The SHIP's, where the vessel can report its own orientation. Otherwise the
---- PILOT's facing, which is all a computer riding a contraption ever had --
---- and which is why HDG used to read the way you were looking rather than the
---- way the ship was pointing.
+--- app.heading and nothing else. It is whatever the TRACKING MODE follows --
+--- the ship on a Sub-Level in SHIP, the operator otherwise -- already snapped
+--- to this station's heading step.
+---
+--- This page used to derive its own from the flight model while the radar page
+--- showed a third number, so the two disagreed under the same three letters.
+--- One heading, one meaning, one place it comes from.
 ---@return number|nil bearing
 function view.heading(app)
-  return app.flight.heading or app.heading
+  return app.heading
 end
 
 --- Takes a reading off the ship itself, where there is one to take.

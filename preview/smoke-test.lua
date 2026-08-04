@@ -3387,26 +3387,79 @@ check("the ship reports where its nose points, not where the pilot looks", funct
   assert(sableLib.headingFrom("not a quaternion") == nil, "junk is no heading")
   assert(sableLib.headingFrom(nil) == nil, "and neither is nothing")
 
-  -- Through the model and onto the page.
+  -- A HEADING IS NOT AN EULER YAW. Pulling one out with
+  -- atan2(2(wy+xz), 1-2(yy+zz)) mixes in pitch and roll, so an airship rocking
+  -- at anchor made it wander tens of degrees while the bow had not moved --
+  -- which is exactly what was reported. Projecting the BOW does not care how
+  -- the hull is tilted.
+  local function rocked(yaw, pitch, roll)
+    local function mul(a, b)
+      return { w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+               x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+               y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+               z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w }
+    end
+    local function about(ax, ay, az, degrees)
+      local half = math.rad(degrees) / 2
+      return { w = math.cos(half), x = ax * math.sin(half),
+               y = ay * math.sin(half), z = az * math.sin(half) }
+    end
+    return mul(mul(about(0, 1, 0, -yaw), about(1, 0, 0, pitch)),
+      about(0, 0, 1, roll))
+  end
+
+  for _, pitch in ipairs({ 0, 5, 10, 20 }) do
+    for _, roll in ipairs({ 0, 10, 25 }) do
+      local reported = sableLib.headingFrom(rocked(90, pitch, roll))
+      assert(math.abs(util.angleDelta(reported, 90)) < 0.01,
+        ("pitch %d roll %d moved the heading to %.1f, and the bow had not "
+          .. "moved at all"):format(pitch, roll, reported))
+    end
+  end
+
+  -- Standing on its nose there is no bearing to report, and saying nothing
+  -- beats a number that spins.
+  assert(sableLib.headingFrom(rocked(90, 90, 0)) == nil,
+    "a vertical hull has no heading")
+
+  -- Through the model, and onto the page through app.heading.
   local flightModule = modules.byId("flight")
   SHIP.velocity = { x = 0, y = 0, z = -14 }
-  local saved = app.heading
-  app.heading = 340                       -- the pilot, looking over the rail
+  local saved = { heading = app.heading, mode = app.cfg.mode,
+                  step = app.cfg.headingStep, trim = app.cfg.headingTrim }
+  app.cfg.headingStep, app.cfg.headingTrim = 0, 0
 
   app.flight:reset()
   assert(flightModule.readShip(app, 500), "read the ship")
   assert(math.abs(app.flight.heading - 16.71) < 0.01,
     "the model carries the SHIP's heading, got " .. tostring(app.flight.heading))
-  assert(math.abs(flightModule.heading(app) - 16.71) < 0.01,
-    "and that is what the page uses, not the pilot's 340")
 
-  -- Lose the ship and it goes back to the pilot rather than showing where the
-  -- vessel was pointing a minute ago.
+  -- Both pages read app.heading, so what they show is what the tracking mode
+  -- follows -- and they cannot disagree under the same three letters.
+  app.cfg.mode = "ship"
+  app:readHeading()
+  assert(math.abs(flightModule.heading(app) - 16.71) < 0.01,
+    "SHIP tracking puts the vessel's nose on the page, got "
+      .. tostring(flightModule.heading(app)))
+
+  app.cfg.mode = "player"
+  -- setRole forgets everything heard from the previous base, headingRaw
+  -- included, so the role has to change before the reading is planted.
+  app:setRole("mobile")
+  app.link.headingRaw = 340
+  app:readHeading()
+  assert(math.abs(flightModule.heading(app) - 340) < 0.01,
+    "and PLAYER puts the operator's facing there, got "
+      .. tostring(flightModule.heading(app)))
+
+  -- Lose the ship and the model drops its heading rather than showing where
+  -- the vessel was pointing a minute ago.
   app.flight:sample({ x = 0, y = 70, z = 0, dimension = "d" }, 501)
   assert(app.flight.heading == nil, "a stale ship heading is dropped")
-  assert(flightModule.heading(app) == 340, "back to the pilot's facing")
 
-  app.heading = saved
+  app.heading, app.cfg.mode = saved.heading, saved.mode
+  app.cfg.headingStep, app.cfg.headingTrim = saved.step, saved.trim
+  app.link.headingRaw = nil
   removeSable()
   app.flight:reset()
 end)

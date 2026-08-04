@@ -376,7 +376,7 @@ function app:start()
   -- call every half second for a scope that is not going to turn.
   basalt.schedule(function()
     while self.running do
-      if config.isUnlocked(self.cfg) then
+      do
         local ok, changed = pcall(self.readHeading, self)
         -- Always eased here, not only when the animation loop happens to be
         -- turning over: see easeHeading. The drawn bearing moving is itself a
@@ -384,9 +384,11 @@ function app:start()
         -- screen until something else asked for one.
         local _, moved = pcall(self.easeHeading, self)
         if (ok and changed) or moved then self:emit("heading") end
+        -- Polled even while the scope is LOCKED. It used to idle in that case
+        -- to save a detector call, but HDG is a reading the flight page shows
+        -- whether or not the picture turns -- and locking the scope should not
+        -- make the number go stale.
         sleep(self.cfg.headingSeconds)
-      else
-        sleep(1)
       end
     end
   end)

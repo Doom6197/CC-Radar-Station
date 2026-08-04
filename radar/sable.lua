@@ -108,15 +108,28 @@ sable.quaternion = quaternion
 
 --- The compass bearing the ship's nose points along.
 ---
---- Yaw out of the quaternion is the rotation about the vertical axis:
+--- Worked out by ROTATING THE BOW and taking the bearing of where it ends up,
+--- flattened onto the ground:
 ---
----   yaw = atan2(2(wy + xz), 1 - 2(yy + zz))
+---   forward = q * (0, 0, -1) * q'      -- north in the ship's own frame
+---   bearing = bearingOf(forward.x, forward.z)
 ---
---- and then NEGATED, for the same reason the turn rate is. A rotation about
---- +Y is anticlockwise seen from above and a compass runs the other way -- the
---- angular velocity measurement settled that convention, and a heading that
---- disagreed with the turn rate about which way is right would be worse than
---- no heading at all.
+--- which comes out of the rotation matrix as
+---
+---   x = -2(xz + wy)      z = -(1 - 2(xx + yy))
+---
+--- The obvious alternative -- pulling an Euler yaw out with
+--- atan2(2(wy + xz), 1 - 2(yy + zz)) -- is what this replaced, and it was
+--- wrong on a vessel that is not level. That expression is the yaw of a
+--- particular decomposition, and it MIXES IN pitch and roll: an airship
+--- rocking gently at anchor made it wander tens of degrees while the bow had
+--- not moved at all. Projecting the bow does not care how the hull is tilted,
+--- which is the whole point of a heading.
+---
+--- The sign falls out of bearingOf rather than being applied by hand, and it
+--- agrees with the angular velocity's -- a rotation about +Y is a turn to the
+--- left on both. A heading that disagreed with the turn rate about which way
+--- is right would be worse than no heading at all.
 ---
 --- WHAT THIS CANNOT KNOW is which way the ship was BUILT.
 ---
@@ -138,8 +151,16 @@ sable.quaternion = quaternion
 function sable.headingFrom(orientation)
   local w, x, y, z = quaternion(orientation)
   if not w then return nil end
-  local yaw = math.atan(2 * (w * y + x * z), 1 - 2 * (y * y + z * z))
-  return (-math.deg(yaw)) % 360
+
+  local forwardX = -2 * (x * z + w * y)
+  local forwardZ = -(1 - 2 * (x * x + y * y))
+
+  -- A hull standing on its nose has no bearing to report: the bow projects
+  -- onto almost nothing and the answer would be whichever way it happened to
+  -- be rolled. Saying nothing beats a number that spins.
+  if (forwardX * forwardX + forwardZ * forwardZ) < 1e-6 then return nil end
+
+  return util.bearingOf(forwardX, forwardZ) % 360
 end
 
 --- The `sublevel` global, or nil where there is none.
