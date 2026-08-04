@@ -277,6 +277,12 @@ function link:centreFor(app, message, pilot)
   local cfg = app.cfg
 
   if cfg.mode == "self" then
+    -- A mobile riding a Sub-Level measures from the SHIP. The pilot's fix is
+    -- still what arrives over the network -- it is what the base can see --
+    -- but on a vessel that can say where it is, where somebody happens to be
+    -- standing on the deck is not the centre of anything.
+    local ship = scan.shipCentre(cfg, pilot)
+    if ship then return ship end
     if pilot then return pilot end
     if not cfg.myName then
       return nil, "SELF tracking needs your username - Settings / Tracking"

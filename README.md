@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.17                                    |  SETTINGS   v8.17
+ SETTINGS   v8.18                                    |  SETTINGS   v8.18
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -733,6 +733,7 @@ Sub-Level, it stops being inferred:
 | `HDG` | the **ship's** nose, out of the pose's orientation quaternion — not where the pilot is looking |
 | `DFT` | which makes this real sideslip: nose against track |
 | position | the **vessel's**, not the pilot's |
+| **the sweep** | `SELF` tracking centres the scope on the **ship** — see below |
 
 The footer says `ship` instead of `relayed`, and *Settings → … → Flight →
 Sensor* reports which is in use.
@@ -781,6 +782,18 @@ a **dropout, not a still ship** — two in 197 samples while the vessel was doin
 ship *reports* needs no speed floor at all: it is a velocity vector, not two
 positions subtracted, so it is trustworthy at a crawl where a derived one is
 noise.
+
+#### The scope is centred on the ship
+
+Every distance, bearing and blip is measured from one point, and in `SELF`
+tracking that point was the **pilot**. On a vessel that meant the middle of the
+screen was wherever the operator was standing: walk to the stern and every
+contact moved, and the ship's own position was never the origin of anything.
+
+On a Sub-Level it is now the **ship**. `FIXED` is untouched — it measures from
+the base coordinates as it always has — and the pilot is still tracked and
+still shown as *You* on the status page. The dimension comes off the pilot,
+since the ship does not report one.
 
 None of it is required. Without the mod, off a Sub-Level, or on the pocket
 computer and the main base, everything falls back to the derived path exactly
@@ -1365,6 +1378,12 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.18 - the scope is centred on the ship.** Every distance, bearing and blip
+is measured from one point, and in SELF tracking that was the pilot -- so on a
+vessel the middle of the screen was wherever the operator was standing, and
+walking to the stern moved every contact. On a Sub-Level it is the ship. FIXED
+is untouched, and the pilot is still tracked and still shown as You.
 
 **v8.17 - the heading needs trimming, once, per ship.** v8.16 computed the
 heading from the pose and assumed an unrotated Sub-Level faces north. It does

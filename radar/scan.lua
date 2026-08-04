@@ -6,10 +6,32 @@
 -- the detector's own position, and the two agree.
 
 local config = require("radar.config")
+local sable  = require("radar.sable")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
 
 local scan = {}
+
+--- The SHIP's own position as a centre, where the vessel can report one.
+---
+--- A radar riding a Sub-Level should be centred on the SUB-LEVEL. Measuring
+--- from the pilot put the middle of the scope wherever the operator happened
+--- to be standing, so walking to the stern moved every contact on the screen
+--- and the ship's own position was never the origin of anything.
+---
+--- The dimension comes off the pilot, since the ship does not report one and
+--- the two are in the same world in every case that matters. With neither, the
+--- centre simply has no dimension and the cross-world filter lets everything
+--- through -- which is the safe way to be unsure.
+---@return table|nil centre
+function scan.shipCentre(cfg, myPos)
+  local ship = sable.position()
+  if not ship then return nil end
+  return {
+    x = ship.x, y = ship.y, z = ship.z,
+    dimension = (myPos and myPos.dimension) or (cfg and cfg.baseDim),
+  }
+end
 
 --- Where distances are measured from.
 local function centreOf(cfg, myPos)
@@ -19,7 +41,8 @@ local function centreOf(cfg, myPos)
       dimension = cfg.baseDim,
     }
   end
-  return myPos
+  -- SELF on a vessel that knows where it is means the VESSEL.
+  return scan.shipCentre(cfg, myPos) or myPos
 end
 
 --- Reads the operator's own position, if a username is configured.

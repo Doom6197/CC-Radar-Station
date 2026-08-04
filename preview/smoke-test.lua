@@ -3457,6 +3457,76 @@ check("the heading is trimmed to the ship, because nothing can compute it", func
   app.flight:reset()
 end)
 
+check("the radar on a ship is centred on the SHIP", function()
+  -- Every distance, bearing and blip on the scope is measured from
+  -- app.centre. In SELF mode that was the PILOT, so the middle of the screen
+  -- was wherever the operator was standing -- walk to the stern and every
+  -- contact moved. On a vessel that knows where it is, the vessel is the
+  -- origin.
+  local saved = { role = app.cfg.role, mode = app.cfg.mode, name = app.cfg.myName,
+                  x = app.cfg.baseX, y = app.cfg.baseY, z = app.cfg.baseZ }
+
+  installSable()
+  SHIP.position = { x = 2000, y = 100, z = 2000 }
+  SHIP.velocity = { x = 0, y = 0, z = -10 }
+  SHIP.angular  = { x = 0, y = 0, z = 0 }
+
+  -- A relayed sweep: the base can see the pilot, who is standing on the deck
+  -- a little way from the ship's own origin.
+  local wire = {
+    t = "s", i = 1,
+    c = { x = 0, y = 64, z = 0, d = "minecraft:overworld" },
+    p = { x = 2040, y = 101, z = 2000, d = "minecraft:overworld" },
+    n = "Doom6197",
+    l = {
+      { n = "noobidoo", x = 2100, y = 100, z = 2000, d = "minecraft:overworld" },
+    },
+  }
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.myName = "Doom6197"
+  app.cfg.mode = "self"
+
+  assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
+  assert(app.centre.x == 2000 and app.centre.z == 2000,
+    "centred on the ship, got " .. app.centre.x .. ", " .. app.centre.z)
+  assert(app.centre.dimension == "minecraft:overworld",
+    "carrying the pilot's dimension, since the ship reports none")
+  assert(math.abs(app.contacts[1].dist - 100) < 0.001,
+    "so the contact is 100 blocks off the SHIP, not 60 off the pilot, got "
+      .. app.contacts[1].dist)
+
+  -- The pilot is still the pilot: "You" on the status page has not moved.
+  assert(app.myPos and app.myPos.x == 2040, "and the operator is still tracked")
+
+  -- FIXED is unaffected: it measures from the base coordinates as ever.
+  app.cfg.mode = "fixed"
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 64, 0
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.centre.x == 0, "FIXED still measures from the base, got " .. app.centre.x)
+
+  -- And with no ship under it, SELF goes back to the pilot.
+  app.cfg.mode = "self"
+  removeSable()
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.centre.x == 2040,
+    "no Sub-Level, so back to the pilot, got " .. app.centre.x)
+
+  -- A local sweep centres the same way.
+  local scanLib = require("radar.scan")
+  installSable()
+  local centre = scanLib.shipCentre(app.cfg, { dimension = "minecraft:the_nether" })
+  assert(centre.x == 2000 and centre.dimension == "minecraft:the_nether",
+    "the local path agrees, and takes the dimension from the pilot")
+  removeSable()
+  assert(scanLib.shipCentre(app.cfg, nil) == nil, "and has none without a ship")
+
+  app.cfg.role, app.cfg.mode, app.cfg.myName = saved.role, saved.mode, saved.name
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = saved.x, saved.y, saved.z
+  app.scanError = nil
+end)
+
 check("a dropped angular reading is held, not believed", function()
   -- A real log had two exact 0,0,0 readings in 197 samples while the vessel
   -- was doing 18 blocks a second. An autopilot that believed them would decide

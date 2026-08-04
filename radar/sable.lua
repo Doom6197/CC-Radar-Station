@@ -166,7 +166,18 @@ end
 --- Forgets the cache and the held turn rate, for a rescan or a fresh start.
 function sable.forget()
   state.at, state.last, state.yawRate = nil, nil, nil
-  return sable
+  --- Where the ship is, or nil where there is no ship.
+---
+--- Separate from read() because the SWEEP wants it as well as the flight page:
+--- a radar riding a vessel measures from the vessel, not from whoever happens
+--- to be standing on the deck. See scan.shipCentre.
+---@return table|nil { x, y, z }
+function sable.position(now)
+  local reading = sable.read(now)
+  return reading and reading.position or nil
+end
+
+return sable
 end
 
 --- Everything the flight page needs, in this program's units.
