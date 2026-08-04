@@ -3,6 +3,7 @@
 -- Columns are added as the display gets wider rather than truncated, so the
 -- same page is readable on a 15-cell pocket screen and on a 5x5 monitor.
 
+local config  = require("radar.config")
 local modules = require("radar.modules")
 local theme   = require("radar.theme")
 local ui      = require("radar.ui")
@@ -75,9 +76,8 @@ function view.build(container, app, root)
       if #app.contacts == 0 then
         buf:blit(1, 1, "All clear.", theme.dim, theme.bg)
         if h >= 3 then
-          buf:blit(1, 3, app.cfg.mode == "fixed" and "Watching" or "Watching",
-            theme.line, theme.bg)
-          buf:blit(1, 4, app.cfg.mode == "fixed" and "the base." or "you.",
+          buf:blit(1, 3, "Watching", theme.line, theme.bg)
+          buf:blit(1, 4, config.modeLabel(app.cfg, true):lower() .. ".",
             theme.line, theme.bg)
         end
         return
@@ -134,9 +134,7 @@ function view.build(container, app, root)
 
     if #app.contacts == 0 then
       buf:blit(2, 4, "No players detected.", theme.dim, theme.bg)
-      local hint = app.cfg.mode == "fixed"
-        and "Watching the base coordinates."
-        or "Watching your own position."
+      local hint = "Watching: " .. config.modeLabel(app.cfg)
       buf:blit(2, 5, util.shorten(hint, w - 2), theme.line, theme.bg)
       return
     end

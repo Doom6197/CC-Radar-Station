@@ -462,7 +462,10 @@ check("config.sanitise clamps rubbish", function()
     sound = { volume = 99 }, rs = { mode = "nope" }, displays = { m = 5 } })
   assert(cfg.rangeIndex == #config.RANGES, "range clamped")
   assert(cfg.rotation == 315, "rotation wrapped, got " .. cfg.rotation)
-  assert(cfg.mode == "fixed", "mode reset")
+  assert(cfg.mode == "base", "mode reset")
+  assert(config.sanitise({ mode = "fixed" }).mode == "base",
+    "and a pre-v8.19 file is migrated rather than reset")
+  assert(config.sanitise({ mode = "self" }).mode == "player", "both of them")
   assert(cfg.sound.volume == 3, "volume clamped")
   assert(cfg.rs.mode == "pulse", "redstone mode reset")
   assert(type(cfg.displays.m) == "table", "display entry repaired")
@@ -906,12 +909,12 @@ check("a profile will not switch on what it has no username for", function()
   cfg.myName = nil
 
   profiles.apply(cfg, "pocket", {})
-  assert(cfg.mode == "fixed", "SELF tracking needs a name, got " .. cfg.mode)
+  assert(cfg.mode == "base", "PLAYER tracking needs a name, got " .. cfg.mode)
   assert(cfg.orientation == "fixed", "and so does an unlocked scope")
 
   cfg.myName = "Steve"
   profiles.apply(cfg, "pocket", {})
-  assert(cfg.mode == "self", "with a name it does track you")
+  assert(cfg.mode == "player", "with a name it does track you")
   assert(cfg.orientation == "heading", "and the scope follows you")
 end)
 
@@ -2895,7 +2898,12 @@ check("key actions all run", function()
   terminalRoot:setPage("status", false)
   for _, action in pairs(getmetatable and {} or {}) do end
   -- registerKeys stored its table privately; drive the public equivalents.
-  app:rangeUp(); app:rangeDown(); app:rotate(45); app:toggleMode(); app:toggleMode()
+  app:rangeUp(); app:rangeDown(); app:rotate(45)
+  -- Three modes now, so a full cycle is what comes back to where it started.
+  local beforeMode = app.cfg.mode
+  for _ = 1, #config.MODES do app:toggleMode() end
+  assert(app.cfg.mode == beforeMode, "the T key cycles back round, got "
+    .. app.cfg.mode)
   app:toggleAlerts(); app:toggleAlerts(); app:ignoreNearest(); app:clearLog()
   app.alerts:play(); app.alerts:updateRedstone(); app.alerts:tick()
 end)
@@ -3005,6 +3013,7 @@ end)
 check("a ship renders a relayed sweep exactly as the base did", function()
   app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.mode = "base"
   app.contacts, app.myPos, app.heading = {}, nil, nil
 
   assert(app.link:handle(app, BASE_ID, SHIP_PAYLOAD, linkLib.PROTOCOL),
@@ -3410,8 +3419,8 @@ check("the heading is trimmed to the ship, because nothing can compute it", func
   local flightModule = modules.byId("flight")
   installSable()
 
-  local saved = app.cfg.flightHeadingTrim
-  app.cfg.flightHeadingTrim = 0
+  local saved = app.cfg.headingTrim
+  app.cfg.headingTrim = 0
 
   -- Built pointing east: identity means facing east, so the raw angle is 94
   -- degrees behind the course it is actually making.
@@ -3427,10 +3436,11 @@ check("the heading is trimmed to the ship, because nothing can compute it", func
   assert(math.abs(app.flight.course - 106) < 0.5,
     "while making good 106, got " .. app.flight.course)
 
-  local ok, message = flightModule.trimHeading(app)
-  assert(ok, "trimming worked: " .. message)
-  assert(math.abs(app.cfg.flightHeadingTrim - 94) < 1,
-    "ninety-four degrees of it, got " .. app.cfg.flightHeadingTrim)
+  local trim, problem = sableLib.trimFor()
+  assert(trim, "trimming worked: " .. tostring(problem))
+  assert(math.abs(trim - 94) < 1, "ninety-four degrees of it, got " .. trim)
+  app.cfg.headingTrim = trim
+  flightModule.readShip(app, 600.5)
   assert(math.abs(app.flight.heading - app.flight.course) < 1,
     "and now the nose agrees with the track, got " .. app.flight.heading
       .. " vs " .. app.flight.course)
@@ -3447,14 +3457,129 @@ check("the heading is trimmed to the ship, because nothing can compute it", func
 
   -- It refuses where it would calibrate an error in.
   SHIP.velocity = { x = 0.4, y = 0, z = 0.2 }          -- barely moving
-  flightModule.readShip(app, 602)
-  local refused, why = flightModule.trimHeading(app)
+  sableLib.forget()
+  local refused, why = sableLib.trimFor()
   assert(not refused, "too slow to trust the course")
   assert(why:find("slow", 1, true), "and says why, got " .. why)
 
-  app.cfg.flightHeadingTrim = saved or 0
+  -- And SHIP tracking turns the scope by the same number, which is why it
+  -- lives in core config rather than with the flight page.
+  local wasMode = app.cfg.mode
+  app.cfg.mode = "ship"
+  app.cfg.headingTrim = 94
+  -- Back on the original nose: raw 12, so trimmed 106.
+  SHIP.orientation = { w = math.cos(nose), x = 0, y = math.sin(nose), z = 0 }
+  SHIP.velocity = { x = 19.22, y = 0, z = 5.51 }
+  sableLib.forget()
+  app:readHeading()
+  assert(math.abs(app.heading - 106) < 1,
+    "the scope turns with the trimmed ship heading, got " .. tostring(app.heading))
+  app.cfg.mode = wasMode
+
+  app.cfg.headingTrim = saved or 0
   removeSable()
   app.flight:reset()
+end)
+
+check("the scope turns whatever else is on screen", function()
+  -- The bug: applyHeading left the drawn bearing to easeHeading, and that ran
+  -- only from the ANIMATION loop -- which turns over only while some visible
+  -- view is asking for frames. With smoothing AND animation on, and nothing
+  -- requesting them, the scope froze at the first bearing it ever saw and
+  -- never turned again. The AIRSHIP profile sets exactly that pair, and the
+  -- radar was reported dead on both an airship and a pocket computer.
+  local saved = { role = app.cfg.role, mode = app.cfg.mode, name = app.cfg.myName,
+                  smooth = app.cfg.headingSmooth, anim = app.cfg.animate,
+                  step = app.cfg.headingStep, orient = app.cfg.orientation }
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.myName = "Steve"
+  app.cfg.mode = "player"
+  app.cfg.orientation = "heading"
+  app.cfg.headingStep = 0
+
+  assert(app.animWanted == 0, "nothing is asking for animation frames")
+
+  -- Every combination has to turn, not just the ones that happened to work.
+  for _, smooth in ipairs({ false, true }) do
+    for _, anim in ipairs({ false, true }) do
+      app.cfg.headingSmooth, app.cfg.animate = smooth, anim
+      app.heading, app.headingShown = nil, nil
+
+      local rotations = {}
+      for _, yaw in ipairs({ 0, 90, 180, 270 }) do
+        app.link:handle(app, BASE_ID, {
+          t = "s", i = 1, n = "Steve", g = yaw,
+          c = { x = 0, y = 64, z = 0, d = "d" },
+          p = { x = 0, y = 64, z = 0, d = "d" },
+          l = {},
+        }, linkLib.PROTOCOL)
+        -- What the heading loop does on every poll, which is what the drawn
+        -- bearing must depend on rather than on somebody wanting a redraw.
+        app:easeHeading()
+        rotations[#rotations + 1] = app:rotation()
+      end
+
+      local moved = false
+      for i = 2, #rotations do
+        if rotations[i] ~= rotations[1] then moved = true end
+      end
+      assert(moved, ("smooth=%s animate=%s: the scope never turned, stuck at %s")
+        :format(tostring(smooth), tostring(anim), tostring(rotations[1])))
+    end
+  end
+
+  -- Locked still means locked, whatever the mode.
+  app.cfg.orientation = "fixed"
+  app.cfg.rotation = 45
+  app:easeHeading()
+  assert(app:rotation() == 45, "a locked scope holds its bearing, got "
+    .. app:rotation())
+
+  app.cfg.role, app.cfg.mode, app.cfg.myName = saved.role, saved.mode, saved.name
+  app.cfg.headingSmooth, app.cfg.animate = saved.smooth, saved.anim
+  app.cfg.headingStep, app.cfg.orientation = saved.step, saved.orient
+  app.scanError = nil
+end)
+
+check("SHIP tracking turns the scope with the vessel", function()
+  local saved = { mode = app.cfg.mode, trim = app.cfg.headingTrim,
+                  orient = app.cfg.orientation, step = app.cfg.headingStep,
+                  smooth = app.cfg.headingSmooth, heading = app.heading }
+  installSable()
+  app.cfg.orientation = "heading"
+  app.cfg.headingStep, app.cfg.headingSmooth = 0, false
+  app.cfg.headingTrim = 0
+  app.heading, app.headingShown = nil, nil
+
+  -- The ship points 12, the pilot is looking the other way entirely.
+  local nose = math.rad(-12) / 2
+  SHIP.orientation = { w = math.cos(nose), x = 0, y = math.sin(nose), z = 0 }
+  SHIP.velocity = { x = 0, y = 0, z = -10 }
+  app.link.headingRaw = 300
+
+  app.cfg.mode = "ship"
+  app:readHeading()
+  assert(math.abs(app.heading - 12) < 0.5,
+    "the scope follows the SHIP, got " .. tostring(app.heading))
+
+  app.cfg.mode = "player"
+  app:readHeading()
+  assert(math.abs(app.heading - 300) < 0.5,
+    "and PLAYER follows the operator, got " .. tostring(app.heading))
+
+  -- No Sub-Level: SHIP falls back to the operator rather than freezing.
+  app.cfg.mode = "ship"
+  removeSable()
+  app:readHeading()
+  assert(math.abs(app.heading - 300) < 0.5,
+    "with no ship it follows the operator, got " .. tostring(app.heading))
+
+  app.cfg.mode, app.cfg.headingTrim = saved.mode, saved.trim
+  app.cfg.orientation, app.cfg.headingStep = saved.orient, saved.step
+  app.cfg.headingSmooth, app.heading = saved.smooth, saved.heading
+  app.link.headingRaw = nil
 end)
 
 check("the radar on a ship is centred on the SHIP", function()
@@ -3486,7 +3611,7 @@ check("the radar on a ship is centred on the SHIP", function()
   app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
   app.cfg.myName = "Doom6197"
-  app.cfg.mode = "self"
+  app.cfg.mode = "ship"
 
   assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
   assert(app.centre.x == 2000 and app.centre.z == 2000,
@@ -3500,14 +3625,21 @@ check("the radar on a ship is centred on the SHIP", function()
   -- The pilot is still the pilot: "You" on the status page has not moved.
   assert(app.myPos and app.myPos.x == 2040, "and the operator is still tracked")
 
-  -- FIXED is unaffected: it measures from the base coordinates as ever.
-  app.cfg.mode = "fixed"
+  -- PLAYER deliberately still measures from the operator: somebody who has
+  -- chosen to be the middle of the picture gets to be it, ship or no ship.
+  app.cfg.mode = "player"
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(app.centre.x == 2040, "PLAYER is still the pilot, got " .. app.centre.x)
+
+  -- BASE is unaffected: it measures from the base coordinates as ever.
+  app.cfg.mode = "base"
   app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 0, 64, 0
   app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
   assert(app.centre.x == 0, "FIXED still measures from the base, got " .. app.centre.x)
 
-  -- And with no ship under it, SELF goes back to the pilot.
-  app.cfg.mode = "self"
+  -- And with no ship under it, SHIP falls back to the pilot rather than
+  -- having no centre at all.
+  app.cfg.mode = "ship"
   removeSable()
   app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
   assert(app.centre.x == 2040,
@@ -3959,7 +4091,7 @@ check("a mobile watching YOU measures from you, not from the base", function()
   app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
   app.cfg.myName = "Doom6197"
-  app.cfg.mode = "self"
+  app.cfg.mode = "player"
   app.cfg.baseFollow = true
 
   assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
@@ -3986,7 +4118,7 @@ check("a mobile watching YOU measures from you, not from the base", function()
     "so the same contact is a long way off, got " .. app.contacts[1].dist)
 
   -- SELF with nobody to find says so rather than quietly using the base.
-  app.cfg.mode = "self"
+  app.cfg.mode = "player"
   app.cfg.myName = "SomeoneNotHere"
   app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
   assert(app.scanError and app.scanError:find("SomeoneNotHere", 1, true),
@@ -4029,7 +4161,7 @@ check("a mobile follows its own pilot, not the base operator's", function()
   app:setRole("mobile")
   app:pairWithBase(BASE_ID, "Hangar")
   app.cfg.myName = "noobidoo"                  -- somebody the base can see
-  app.cfg.mode = "self"
+  app.cfg.mode = "player"
 
   assert(app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL), "the sweep landed")
   assert(app.centre.x == 500 and app.centre.z == 500,
@@ -5835,8 +5967,11 @@ check("a narrow screen stacks each value under its label", function()
   assert(button.y == label.y + 1, "the value is on the line below its label")
   assert(button.x == 1, "starting hard left, got x=" .. button.x)
   assert(button.width >= 24, "and nearly the whole width, got " .. button.width)
-  assert(button.text == "FIXED - watch the base",
-    "so the whole value fits, got " .. tostring(button.text))
+  local known = false
+  for _, entry in ipairs(config.MODES) do
+    if button.text == entry.label then known = true end
+  end
+  assert(known, "so the whole value fits, got " .. tostring(button.text))
 
   -- The three coordinate boxes share one line rather than running off the edge.
   local boxes = {}

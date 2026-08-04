@@ -166,7 +166,45 @@ end
 --- Forgets the cache and the held turn rate, for a rescan or a fresh start.
 function sable.forget()
   state.at, state.last, state.yawRate = nil, nil, nil
-  --- Where the ship is, or nil where there is no ship.
+  return sable
+end
+
+-- Below this the course cannot be trusted well enough to calibrate against.
+sable.TRIM_SPEED = 5
+
+--- Where the ship's nose points, with the per-ship trim already added.
+---
+--- The trim is what turns a raw orientation into a compass bearing; see
+--- headingFrom for why no formula could do it. SHIP tracking turns the whole
+--- scope by this, so it is read here rather than through the flight model --
+--- the radar has to work with the flight page switched off.
+---@return number|nil bearing 0..360
+function sable.heading(trim, now)
+  local reading = sable.read(now)
+  if not reading or not reading.heading then return nil end
+  return (reading.heading + (tonumber(trim) or 0)) % 360
+end
+
+--- The trim that would make the reported heading agree with the course.
+---
+--- Only ever right in STRAIGHT flight: it assumes the nose is pointed where
+--- the ship is going, which is the definition of no sideslip. In a turn, or
+--- crabbing, it calibrates the error in -- hence the speed floor, and the
+--- warning on the settings row.
+---@return number|nil trim
+---@return string|nil problem
+function sable.trimFor(now)
+  local reading = sable.read(now)
+  if not reading then return nil, "No Sub-Level under this computer" end
+  if not reading.heading then return nil, "The ship reports no orientation" end
+  if not reading.course then return nil, "No course to match it to" end
+  if (reading.speed or 0) < sable.TRIM_SPEED then
+    return nil, "Too slow - fly straight at speed first"
+  end
+  return math.floor((reading.course - reading.heading) % 360 + 0.5) % 360
+end
+
+--- Where the ship is, or nil where there is no ship.
 ---
 --- Separate from read() because the SWEEP wants it as well as the flight page:
 --- a radar riding a vessel measures from the vessel, not from whoever happens
@@ -175,9 +213,6 @@ function sable.forget()
 function sable.position(now)
   local reading = sable.read(now)
   return reading and reading.position or nil
-end
-
-return sable
 end
 
 --- Everything the flight page needs, in this program's units.

@@ -35,14 +35,18 @@ end
 
 --- Where distances are measured from.
 local function centreOf(cfg, myPos)
-  if cfg.mode == "fixed" and cfg.baseX then
+  if config.tracksBase(cfg) and cfg.baseX then
     return {
       x = cfg.baseX, y = cfg.baseY or 64, z = cfg.baseZ,
       dimension = cfg.baseDim,
     }
   end
-  -- SELF on a vessel that knows where it is means the VESSEL.
-  return scan.shipCentre(cfg, myPos) or myPos
+  -- SHIP asks the vessel. PLAYER never does, however capable the ship is:
+  -- somebody who has chosen to be the centre of the picture gets to be it.
+  if config.tracksShip(cfg) then
+    return scan.shipCentre(cfg, myPos) or myPos
+  end
+  return myPos
 end
 
 --- Reads the operator's own position, if a username is configured.

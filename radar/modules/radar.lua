@@ -163,7 +163,7 @@ function view.build(container, app)
     -- Range readout, top left.
     local ring = util.round(blocks)
     buf:blit(1, 1, config.rangeLabel(app.cfg) .. "  " ..
-      (app.cfg.mode == "fixed" and "FIXED" or "SELF"), theme.dim, theme.bg)
+      config.modeLabel(app.cfg, true), theme.dim, theme.bg)
     buf:blit(1, 2, ring .. "m ring", theme.line, theme.bg)
 
     -- Nearest contact, top right.

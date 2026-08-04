@@ -36,6 +36,7 @@ local alertsLib = require("radar.alerts")
 local linkLib = require("radar.link")
 local modules = require("radar.modules")
 local profiles = require("radar.profiles")
+local sable  = require("radar.sable")
 local scan   = require("radar.scan")
 local theme  = require("radar.theme")
 local util   = require("radar.util")
@@ -284,23 +285,84 @@ view.GROUPS = {
       nameInput:onBlur(commitName)
 
       ctx.note("Your own name is excluded from the radar. The scope's heading, "
-        .. "SELF tracking and the whole flight page are read against it.")
+        .. "PLAYER tracking and the whole flight page are read against it.")
 
-      ctx.row("Mode", function()
-        return cfg.mode == "fixed" and "FIXED - watch the base" or "SELF - watch you"
-      end, function() app:toggleMode() end)
+      -- What the scope is ABOUT: where its middle is, and what it turns with.
+      -- Whether it turns at all is the Scope setting, one group along.
+      ctx.row("Mode", function() return config.modeLabel(cfg, ctx.isNarrow()) end,
+        function()
+          ctx.openPicker("TRACKING MODE",
+            ctx.entriesOf(config.MODES,
+              function(m) return ctx.withHint(m.label, m.hint) end,
+              function(m) return m.id end),
+            cfg.mode,
+            function(value)
+              app:setMode(value)
+              ctx.rebuild()
+            end)
+        end, function()
+          if config.tracksShip(cfg) and not sable.available() then return theme.warn end
+          if config.tracksPlayer(cfg) and not cfg.myName then return theme.warn end
+          return theme.text
+        end)
+
+      ctx.note("Where the middle of the scope is, and what it turns with. "
+        .. "Whether it turns at all is Scope, in the next group -- lock it and "
+        .. "the picture holds a fixed bearing whichever mode this is.", true)
+
+      if config.tracksShip(cfg) and not sable.available() then
+        ctx.note("No Sub-Level under this computer, so it is following YOU "
+          .. "instead. SHIP needs CC: Sable and a Create: Simulated vessel.", true)
+      end
+      if config.tracksPlayer(cfg) and not cfg.myName then
+        ctx.note("PLAYER needs the username above, and on a MOBILE it has to "
+          .. "be one the main base can see.", true)
+      end
 
       -- A MOBILE decides this for itself. The main base relays raw positions
       -- and every station works out its own distances from them, so a pocket
-      -- computer set to SELF measures from the pilot even though the base it
+      -- computer set to PLAYER measures from the pilot even though the base it
       -- is paired to is measuring from a fixed point hundreds of blocks away.
       if config.isMobile(cfg) then
-        ctx.note("This station's own choice, not the base's. SELF measures "
-          .. "from you, wherever the main base is.")
-        if cfg.mode == "self" and not cfg.myName then
-          ctx.note("SELF needs the username above, and it has to be one the "
-            .. "main base can see.", true)
-        end
+        ctx.note("This station's own choice, not the base's.")
+      end
+
+      -- Only worth a row on a vessel that reports an orientation at all.
+      if sable.available() then
+        ctx.row("Heading trim", function()
+          local trim = cfg.headingTrim or 0
+          if trim == 0 then return "none - press while flying straight" end
+          return ("%+d deg"):format((trim > 180) and (trim - 360) or trim)
+        end, function()
+          local trim, problem = sable.trimFor()
+          if not trim then
+            root:toast(problem or "Cannot trim just now", "warning")
+            return
+          end
+          cfg.headingTrim = trim
+          app:saveConfig()
+          app:readHeading()
+          root:toast(("Heading trimmed %+d deg"):format(
+            (trim > 180) and (trim - 360) or trim), "success")
+        end, function()
+          return (cfg.headingTrim or 0) ~= 0 and theme.text or theme.warn
+        end)
+
+        ctx.note("A Sub-Level's orientation is measured from however its "
+          .. "blocks were laid out when it was assembled, so a ship built "
+          .. "pointing east reads ninety degrees off one built pointing "
+          .. "north. Nothing can work that out - it is a fact about the "
+          .. "shipyard.", true)
+        ctx.note("Fly straight and level at speed, then press it: HDG is set "
+          .. "to agree with CRS, and SHIP tracking turns the scope by the "
+          .. "same number. Doing it in a turn calibrates the error in.", true)
+
+        ctx.action("Clear the heading trim", function()
+          cfg.headingTrim = 0
+          app:saveConfig()
+          app:readHeading()
+          root:toast("Heading trim cleared", "info")
+        end)
       end
 
       ctx.row("Base", function()

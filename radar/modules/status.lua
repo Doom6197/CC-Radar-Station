@@ -140,18 +140,18 @@ function view.build(container, app)
     ly = row(leftX, ly, "Profile", config.profileLabel(app.cfg),
       app.cfg.profile and theme.text or theme.dim)
 
-    if app.cfg.mode == "fixed" and app.cfg.baseX then
+    if config.tracksBase(app.cfg) and app.cfg.baseX then
       ly = row(leftX, ly, "Base", ("%d, %d, %d"):format(
         app.cfg.baseX, app.cfg.baseY or 0, app.cfg.baseZ or 0), theme.good)
     else
-      ly = row(leftX, ly, "Base", app.cfg.mode == "fixed"
-        and "not set - press B" or "tracking you", theme.warn)
+      ly = row(leftX, ly, "Base", config.modeLabel(app.cfg, true) ..
+        (config.tracksBase(app.cfg) and " - not set, press B" or ""), theme.warn)
     end
 
     if app.myPos then
       local you = ("%d, %d, %d"):format(
         floor(app.myPos.x), floor(app.myPos.y), floor(app.myPos.z))
-      if app.cfg.mode == "fixed" and app.cfg.baseX then
+      if config.tracksBase(app.cfg) and app.cfg.baseX then
         local dx = app.myPos.x - app.cfg.baseX
         local dz = app.myPos.z - app.cfg.baseZ
         you = you .. ("  (%s)"):format(util.distanceLabel(math.sqrt(dx * dx + dz * dz)))

@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.18"
+config.VERSION = "8.19"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -90,6 +90,46 @@ config.HEADING_STEPS = {
 }
 
 config.HEADING_INTERVALS = { 0.25, 0.5, 1, 2 }
+
+-- ------------------------------------------------------------------ modes ---
+-- What the scope is ABOUT: where the middle of it is, and what it turns with.
+-- The Scope setting above decides whether it turns at all; this decides what
+-- it would follow if it did.
+
+-- The hints are kept to 28 cells so "LABEL - hint" fits the value column of a
+-- 51-cell terminal, which is 35. A mode whose description is cut in half on
+-- the row that sets it is worse than a terse one.
+config.MODES = {
+  { id = "base",   label = "BASE",
+    hint = "on the base coordinates" },
+  { id = "player", label = "PLAYER",
+    hint = "on you, turning with you" },
+  { id = "ship",   label = "SHIP",
+    hint = "on the ship, turning with it" },
+}
+
+-- What the modes were called before v8.19, when there were two of them and
+-- they were named for the wrong thing: "fixed" described the centre not
+-- moving, and "self" described the operator rather than what was tracked.
+config.LEGACY_MODES = { fixed = "base", self = "player" }
+
+function config.mode(cfg)
+  for _, entry in ipairs(config.MODES) do
+    if entry.id == cfg.mode then return entry end
+  end
+  return config.MODES[1]
+end
+
+--- @param short? boolean Drop the hint, for a screen with no room for it
+function config.modeLabel(cfg, short)
+  local entry = config.mode(cfg)
+  if short then return entry.label end
+  return entry.label .. " - " .. entry.hint
+end
+
+function config.tracksBase(cfg)   return cfg.mode == "base" end
+function config.tracksPlayer(cfg) return cfg.mode == "player" end
+function config.tracksShip(cfg)   return cfg.mode == "ship" end
 
 -- ------------------------------------------------------------------- roles ---
 -- A ship assembled by Create: Aeronautics is a contraption, not world blocks,
@@ -243,7 +283,15 @@ function config.defaults()
     pairedBaseName = nil,              -- its friendly name, for the UI
 
     myName = nil,
-    mode   = "fixed",                    -- "fixed" measures from baseX/Y/Z
+    mode   = "base",                     -- see config.MODES
+
+    -- Degrees added to the heading a Sub-Level reports. Its orientation is
+    -- measured from however its blocks were laid out when it was assembled, so
+    -- a ship built pointing east reads ninety degrees off one built pointing
+    -- north. Nothing can compute that -- it is set once per ship by matching
+    -- the heading to the course in straight flight. Core rather than a flight
+    -- setting because SHIP tracking turns the whole scope by it.
+    headingTrim = 0,
     baseX = nil, baseY = nil, baseZ = nil, baseDim = nil,
 
     -- A MOBILE takes its base coordinates from the main base it is paired
@@ -401,7 +449,19 @@ function config.sanitise(cfg)
   if not indexOfId(config.RS_MODES, cfg.rs.mode) then cfg.rs.mode = "pulse" end
   if type(cfg.rs.side) ~= "string" then cfg.rs.side = "back" end
 
-  if cfg.mode ~= "self" and cfg.mode ~= "fixed" then cfg.mode = "fixed" end
+  -- A settings file written before v8.19 names a mode by its old id.
+  if config.LEGACY_MODES[cfg.mode] then cfg.mode = config.LEGACY_MODES[cfg.mode] end
+  if not indexOfId(config.MODES, cfg.mode) then cfg.mode = "base" end
+
+  -- Moved out of the flight module in v8.19, when the scope started turning
+  -- by it as well as the flight page.
+  if cfg.flightHeadingTrim ~= nil then
+    if tonumber(cfg.flightHeadingTrim) and not tonumber(cfg.headingTrim) then
+      cfg.headingTrim = cfg.flightHeadingTrim
+    end
+    cfg.flightHeadingTrim = nil
+  end
+  cfg.headingTrim = (math.floor(tonumber(cfg.headingTrim) or 0)) % 360
   cfg.baseFollow = cfg.baseFollow ~= false
   if type(cfg.myName) ~= "string" or #cfg.myName == 0 then cfg.myName = nil end
 

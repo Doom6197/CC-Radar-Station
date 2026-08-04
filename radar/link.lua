@@ -276,16 +276,21 @@ end
 function link:centreFor(app, message, pilot)
   local cfg = app.cfg
 
-  if cfg.mode == "self" then
-    -- A mobile riding a Sub-Level measures from the SHIP. The pilot's fix is
-    -- still what arrives over the network -- it is what the base can see --
-    -- but on a vessel that can say where it is, where somebody happens to be
-    -- standing on the deck is not the centre of anything.
+  -- SHIP measures from the vessel. The pilot's fix still arrives over the
+  -- network -- it is what the base can see -- but on a hull that can say where
+  -- it is, where somebody happens to be standing on the deck is not the centre
+  -- of anything.
+  if config.tracksShip(cfg) then
     local ship = scan.shipCentre(cfg, pilot)
     if ship then return ship end
     if pilot then return pilot end
+    return nil, "No Sub-Level and no fix - Settings / Tracking"
+  end
+
+  if config.tracksPlayer(cfg) then
+    if pilot then return pilot end
     if not cfg.myName then
-      return nil, "SELF tracking needs your username - Settings / Tracking"
+      return nil, "PLAYER tracking needs your username - Settings / Tracking"
     end
     return nil, "Cannot find " .. cfg.myName .. " - out of the base's range?"
   end

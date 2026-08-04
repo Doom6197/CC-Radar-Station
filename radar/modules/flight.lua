@@ -38,13 +38,6 @@ view.defaults = {
   flightTarget = "home",
   flightX = nil, flightY = nil, flightZ = nil,
 
-  -- Degrees added to the heading the ship reports. A Sub-Level's orientation
-  -- is measured from however its blocks were laid out when it was assembled,
-  -- so a vessel built pointing east reads ninety degrees off a vessel built
-  -- pointing north. Nothing can compute that; it is set once per ship by
-  -- matching the heading to the course in straight flight.
-  flightHeadingTrim = 0,
-
   -- Which sides of the redstone relay the thruster groups are wired to, and
   -- how hard to fly. Whether the autopilot is ENGAGED is deliberately not
   -- here: see view.attach.
@@ -73,8 +66,6 @@ function view.sanitise(cfg)
      and not target:match("^contact:.") then
     cfg.flightTarget = "home"
   end
-
-  cfg.flightHeadingTrim = (floor(tonumber(cfg.flightHeadingTrim) or 0)) % 360
 
   for _, axis in ipairs({ "flightX", "flightY", "flightZ" }) do
     local value = tonumber(cfg[axis])
@@ -515,29 +506,7 @@ end
 function view.readShip(app, now)
   local reading = sable.read(now)
   if not reading then return false end
-  return app.flight:applyShip(reading, now, app.cfg.flightHeadingTrim)
-end
-
---- Sets the trim so the heading agrees with the course being made.
----
---- Only ever right in STRAIGHT flight: it assumes the nose is pointed where
---- the ship is going, which is the definition of no sideslip. Doing it in a
---- turn, or crabbing sideways, calibrates in the error.
----@return boolean set
----@return string message
-function view.trimHeading(app)
-  local model = app.flight
-  if not model.headingRaw then return false, "No ship heading to trim" end
-  if not model.course then return false, "No course to match it to" end
-  if (model.speed or 0) < 5 then
-    return false, "Too slow - fly straight at speed first"
-  end
-  local trim = floor((model.course - model.headingRaw) % 360 + 0.5) % 360
-  app.cfg.flightHeadingTrim = trim
-  app:saveConfig()
-  view.readShip(app, os.clock())
-  return true, ("Heading trimmed %+d deg"):format(
-    (trim > 180) and (trim - 360) or trim)
+  return app.flight:applyShip(reading, now, app.cfg.headingTrim)
 end
 
 --- One pass of the control loop: read the destination, decide, write.
@@ -1112,31 +1081,9 @@ function view.settings(ctx)
   ctx.note("Without it everything below still works, worked out from position "
     .. "as it changes.")
 
-  ctx.row("Heading trim", function()
-    local trim = cfg.flightHeadingTrim or 0
-    if trim == 0 then return "none - press while flying straight" end
-    return ("%+d deg"):format((trim > 180) and (trim - 360) or trim)
-  end, function()
-    local ok, message = view.trimHeading(app)
-    ctx.root:toast(message, ok and "success" or "warning")
-  end, function()
-    return (cfg.flightHeadingTrim or 0) ~= 0 and theme.text or theme.warn
-  end)
-
-  ctx.note("A Sub-Level's orientation is measured from however its blocks were "
-    .. "laid out when it was assembled, so a ship built pointing east reads "
-    .. "ninety degrees off one built pointing north. Nothing can work that "
-    .. "out - it is a fact about the shipyard.", true)
-  ctx.note("Fly straight and level at speed, then press this: it sets HDG to "
-    .. "agree with CRS. Do it in a turn, or crabbing sideways, and it "
-    .. "calibrates the error in.", true)
-
-  ctx.action("Clear the heading trim", function()
-    cfg.flightHeadingTrim = 0
-    app:saveConfig()
-    view.readShip(app, os.clock())
-    ctx.root:toast("Heading trim cleared", "info")
-  end)
+  ctx.note("HDG needs a one-off trim per ship, and it lives with the "
+    .. "tracking mode -- Settings / Tracking / Heading trim -- because SHIP "
+    .. "tracking turns the whole scope by the same number.")
 
   ctx.row("Reading", function()
     local model = app.flight

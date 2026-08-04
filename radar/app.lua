@@ -30,6 +30,7 @@ local hardware    = require("radar.hardware")
 local modules     = require("radar.modules")
 local scan        = require("radar.scan")
 local logbook     = require("radar.logbook")
+local sable       = require("radar.sable")
 local alertsLib   = require("radar.alerts")
 local environment = require("radar.environment")
 local linkLib     = require("radar.link")
@@ -192,11 +193,21 @@ function app:applyHeading(raw)
   return changed
 end
 
---- Re-reads the operator's yaw.
+--- Re-reads whatever the tracking mode says the scope should turn with.
 ---@return boolean changed True when the snapped heading moved
 function app:readHeading()
-  -- A ship has no detector to ask; the pilot's yaw arrives with every relayed
-  -- sweep, which is exactly what "heading up" on a moving scope needs.
+  -- SHIP tracking turns with the VESSEL, which knows its own orientation.
+  -- Read straight from the ship rather than through the flight model, so the
+  -- scope still turns with the flight page switched off.
+  if config.tracksShip(self.cfg) then
+    local heading = sable.heading(self.cfg.headingTrim)
+    if heading then return self:applyHeading(heading) end
+    -- No Sub-Level under us. Following the operator is a better answer than
+    -- freezing, and the settings row says which it fell back to.
+  end
+
+  -- A mobile has no detector to ask; the pilot's yaw arrives with every
+  -- relayed sweep, which is exactly what "heading up" on a moving scope needs.
   if config.isMobile(self.cfg) then
     return self:applyHeading(self.link.headingRaw)
   end
@@ -204,15 +215,27 @@ function app:readHeading()
   return self:applyHeading(pos and util.headingOf(pos.yaw) or nil)
 end
 
---- Advances the eased heading one animation frame.
+--- Advances the drawn heading toward the real one.
+---
+--- Called from the HEADING loop as well as the animation one. It used to be
+--- the animation loop's alone, and that loop only turns over while a visible
+--- view is asking for frames -- so with smoothing AND animation on, and
+--- nothing requesting them, the scope froze at the first bearing it ever saw
+--- and never turned again. The AIRSHIP profile sets exactly that pair.
+---
+--- What is drawn must not depend on whether something else wanted a redraw.
+---@return boolean moved
 function app:easeHeading()
-  if not config.isUnlocked(self.cfg) or not self.heading then return end
+  if not config.isUnlocked(self.cfg) or not self.heading then return false end
+  local before = self.headingShown
+
   if not self.cfg.headingSmooth then
     self.headingShown = self.heading
-    return
+  else
+    self.headingShown = util.approachAngle(
+      self.headingShown or self.heading, self.heading, HEADING_EASE)
   end
-  self.headingShown = util.approachAngle(
-    self.headingShown or self.heading, self.heading, HEADING_EASE)
+  return self.headingShown ~= before
 end
 
 -- ------------------------------------------------------------------ sweep ---
@@ -355,7 +378,12 @@ function app:start()
     while self.running do
       if config.isUnlocked(self.cfg) then
         local ok, changed = pcall(self.readHeading, self)
-        if ok and changed then self:emit("heading") end
+        -- Always eased here, not only when the animation loop happens to be
+        -- turning over: see easeHeading. The drawn bearing moving is itself a
+        -- reason to redraw, or a smoothed turn would be left half finished on
+        -- screen until something else asked for one.
+        local _, moved = pcall(self.easeHeading, self)
+        if (ok and changed) or moved then self:emit("heading") end
         sleep(self.cfg.headingSeconds)
       else
         sleep(1)
@@ -538,9 +566,27 @@ function app:toggleAlerts()
   self:saveConfig()
 end
 
-function app:toggleMode()
-  self.cfg.mode = (self.cfg.mode == "fixed") and "self" or "fixed"
+--- Switches what the scope is centred on and turns with.
+---@return string mode The one it landed on
+function app:setMode(id)
+  self.cfg.mode = id
+  config.sanitise(self.cfg)
+  -- A new centre and a new thing to turn with. Take a reading now rather than
+  -- leaving the scope pointing the old way until the loop next comes round.
+  self.headingShown = nil
+  pcall(self.readHeading, self)
   self:saveConfig()
+  return self.cfg.mode
+end
+
+--- Steps to the next mode. The T key and the settings row share this, so both
+--- walk the same order.
+function app:toggleMode()
+  local index = 1
+  for i, entry in ipairs(config.MODES) do
+    if entry.id == self.cfg.mode then index = i end
+  end
+  return self:setMode(config.MODES[(index % #config.MODES) + 1].id)
 end
 
 function app:setBase(x, y, z, dim)

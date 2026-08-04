@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.18                                    |  SETTINGS   v8.18
+ SETTINGS   v8.19                                    |  SETTINGS   v8.19
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -184,7 +184,7 @@ fills the page with that group.
 | Group | What is in it |
 |---|---|
 | **Station** | version, profile, role, modem, station name, pairing, broadcasting |
-| **Tracking** | your username, FIXED/SELF, the base coordinates, follow base |
+| **Tracking** | your username, the tracking mode, the base coordinates, follow base, the ship's heading trim |
 | **Scanning** | range, sweep rate, other worlds, the ignore list |
 | **Scope** | locked or unlocked, bearing up, heading steps and rate, eased turns, animation |
 | **Alerts** | master, alert range, flash, banner, chime, the sound, the redstone line |
@@ -733,7 +733,7 @@ Sub-Level, it stops being inferred:
 | `HDG` | the **ship's** nose, out of the pose's orientation quaternion — not where the pilot is looking |
 | `DFT` | which makes this real sideslip: nose against track |
 | position | the **vessel's**, not the pilot's |
-| **the sweep** | `SELF` tracking centres the scope on the **ship** — see below |
+| **the sweep** | `SHIP` tracking centres the scope on the vessel and turns it with the bow |
 
 The footer says `ship` instead of `relayed`, and *Settings → … → Flight →
 Sensor* reports which is in use.
@@ -782,18 +782,6 @@ a **dropout, not a still ship** — two in 197 samples while the vessel was doin
 ship *reports* needs no speed floor at all: it is a velocity vector, not two
 positions subtracted, so it is trustworthy at a crawl where a derived one is
 noise.
-
-#### The scope is centred on the ship
-
-Every distance, bearing and blip is measured from one point, and in `SELF`
-tracking that point was the **pilot**. On a vessel that meant the middle of the
-screen was wherever the operator was standing: walk to the stern and every
-contact moved, and the ship's own position was never the origin of anything.
-
-On a Sub-Level it is now the **ship**. `FIXED` is untouched — it measures from
-the base coordinates as it always has — and the pilot is still tracked and
-still shown as *You* on the status page. The dimension comes off the pilot,
-since the ship does not report one.
 
 None of it is required. Without the mod, off a Sub-Level, or on the pocket
 computer and the main base, everything falls back to the derived path exactly
@@ -1029,6 +1017,35 @@ actually says, so a sunset backdrop over a real thunderstorm still shows
 
 With no detector there is no live sky to follow, so the picture quietly falls
 back to the hour it was drawn with — which is what keeps this working on a ship.
+
+---
+
+## Tracking modes
+
+Two things about the scope: **where its middle is**, and **what it turns
+with**. One setting decides both.
+
+| Mode | Centred on | Turns with |
+|---|---|---|
+| **BASE** | the base coordinates | you, if the scope is unlocked |
+| **PLAYER** | you | you |
+| **SHIP** | the vessel | the vessel's bow |
+
+`SHIP` needs **CC: Sable** and a Create: Simulated Sub-Level under the
+computer — see [Reading the ship](#reading-the-ship). Without one it falls back
+to following you, and the settings row says so rather than quietly drawing
+nothing.
+
+`PLAYER` measures from the operator even on a capable ship: somebody who has
+chosen to be the middle of the picture gets to be it. The pilot is tracked and
+shown as *You* on the status page in every mode.
+
+**Whether the picture turns at all is still the Scope setting** — see below.
+Lock it and the scope holds a fixed bearing whichever mode this is; the mode
+only decides what it would follow if it were unlocked.
+
+`T` cycles the three. Settings files from before v8.19 are migrated: `fixed`
+becomes `BASE` and `self` becomes `PLAYER`.
 
 ---
 
@@ -1378,6 +1395,19 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.19 - three tracking modes, and the scope turns again.** Tracking was two
+modes named for the wrong thing, and the scope's rotation was a separate
+setting that did not follow either of them. It is now BASE, PLAYER and SHIP --
+where the middle of the scope is and what it turns with, in one choice -- with
+the Scope setting still deciding whether it turns at all.
+
+And it was not turning. applyHeading left the drawn bearing to easeHeading,
+which ran only from the ANIMATION loop -- and that loop turns over only while a
+visible view is asking for frames. With smoothing AND animation on, and nothing
+requesting them, the scope froze at the first bearing it ever saw. The AIRSHIP
+profile sets exactly that pair. It is eased from the heading loop now, so what
+is drawn does not depend on whether something else wanted a redraw.
 
 **v8.18 - the scope is centred on the ship.** Every distance, bearing and blip
 is measured from one point, and in SELF tracking that was the pilot -- so on a

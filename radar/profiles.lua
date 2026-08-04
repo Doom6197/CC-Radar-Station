@@ -41,7 +41,7 @@ profiles.LIST = {
       "you walk away from it.",
     },
     cfg = {
-      mode         = "fixed",
+      mode         = "base",
       orientation  = "fixed",
       headingStep  = 0,
       scanIndex    = 2,        -- one second
@@ -73,7 +73,7 @@ profiles.LIST = {
       "main base can see.",
     },
     cfg = {
-      mode           = "self",
+      mode           = "player",
       orientation    = "heading",
       headingStep    = 45,
       headingSeconds = 1,
@@ -92,21 +92,21 @@ profiles.LIST = {
     label = "AIRSHIP / VEHICLE",
     hint = "aboard something that moves",
     blurb = {
-      "A radar on a contraption. The scope follows the",
-      "pilot's heading and eases into turns, so the top",
-      "of the picture is always the way you are going.",
+      "A radar on a contraption. The scope centres on the",
+      "ship and turns with it, so the top of the picture",
+      "is always the way the bow is pointing.",
       "",
-      "A ship assembled by Create: Aeronautics cannot",
-      "scan for itself, so with a modem this runs as",
-      "MOBILE, ready to pair with the main base on the",
-      "ground.",
-      "",
-      "Distances are measured from the PILOT, not from",
-      "the base, so it needs a username the main base",
+      "That needs CC: Sable and a Create: Simulated",
+      "Sub-Level. Without one it falls back to tracking",
+      "the PILOT, which needs a username the main base",
       "can see.",
+      "",
+      "A ship cannot scan for itself, so with a modem",
+      "this runs as MOBILE, ready to pair with the main",
+      "base on the ground.",
     },
     cfg = {
-      mode           = "self",
+      mode           = "ship",
       orientation    = "heading",
       headingStep    = 0,
       headingSeconds = 0.5,
@@ -186,10 +186,14 @@ function profiles.apply(cfg, id, kit)
     if off then cfg.modulesOff[module] = true end
   end
 
-  -- SELF tracking and an unlocked scope both read the operator's own position,
-  -- which needs a username. Without one they would silently draw nothing, so
-  -- fall back rather than leave a station that looks broken.
-  if cfg.mode == "self" and not cfg.myName then cfg.mode = "fixed" end
+  -- Each tracking mode needs something to track. SHIP needs a Sub-Level
+  -- under the computer, PLAYER needs a username for the detector to look up.
+  -- Without them the scope would silently draw nothing, so fall back rather
+  -- than leave a station that looks broken.
+  if cfg.mode == "ship" and not require("radar.sable").available() then
+    cfg.mode = "player"
+  end
+  if cfg.mode == "player" and not cfg.myName then cfg.mode = "base" end
   if cfg.orientation == "heading" and not cfg.myName then cfg.orientation = "fixed" end
 
   -- The role is the one thing a profile cannot decide on its own, because it
