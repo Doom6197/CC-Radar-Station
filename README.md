@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.15                                    |  SETTINGS   v8.15
+ SETTINGS   v8.16                                    |  SETTINGS   v8.16
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -730,6 +730,8 @@ Sub-Level, it stops being inferred:
 | `SPD` `VS` | straight off the ship's linear velocity, in blocks/second |
 | `CRS` | the direction of that velocity — where it is going *this instant* |
 | turn rate | the ship's angular velocity, exact and current |
+| `HDG` | the **ship's** nose, out of the pose's orientation quaternion — not where the pilot is looking |
+| `DFT` | which makes this real sideslip: nose against track |
 | position | the **vessel's**, not the pilot's |
 
 The footer says `ship` instead of `relayed`, and *Settings → … → Flight →
@@ -747,6 +749,13 @@ its course rotates.
 Getting that sign wrong would not have been subtle: the rate term would add to
 the heading error instead of opposing it, and the autopilot would diverge on
 its first correction.
+
+`HDG` is the one reading here **not** confirmed against an independent
+measurement — it assumes an unrotated Sub-Level faces north. Nothing steers on
+it (the autopilot is not allowed a heading at all), so being wrong shows a
+wrong number rather than flying the ship into something. The check is one
+glance: **straight and level with no sideslip, `HDG` should read what `CRS`
+reads.**
 
 Two smaller things the same log turned up. An exact `0,0,0` angular reading is
 a **dropout, not a still ship** — two in 197 samples while the vessel was doing
@@ -1338,6 +1347,14 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.16 - HDG is the ship's nose.** It was still the PILOT's facing, because
+that was the only heading a computer riding a contraption ever had -- so it
+read 340 while the vessel flew 272. The pose carries the ship's own orientation
+now, so `HDG` comes out of that quaternion, and `DFT` becomes real sideslip
+instead of a note on which way somebody happens to be looking. The heading's
+sign convention is made to agree with the turn rate's, which was measured: a
+rotation about +Y is a turn to the left on both.
 
 **v8.15 - the flight page reads the ship.** With CC: Sable on a computer
 riding a Create: Simulated Sub-Level, speed, climb, course, turn rate and

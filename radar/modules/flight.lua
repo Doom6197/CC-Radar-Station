@@ -431,7 +431,7 @@ view.RECORD_FILE = "radar_flight.csv"
 view.RECORD_LIMIT = 2000
 
 view.RECORD_COLUMNS = {
-  "t", "phase", "src", "dist", "bearing", "course", "err", "rate", "want",
+  "t", "phase", "src", "dist", "bearing", "course", "hdg", "err", "rate", "want",
   "steer", "left", "right", "lvlL", "lvlR", "speed",
 }
 
@@ -469,6 +469,7 @@ function view.record(app, now, result, distance, bearing)
     csv(distance),
     csv(bearing),
     csv(model.course),
+    csv(view.heading(app)),
     csv(result.error),
     csv(result.turnRate, 2),
     csv(result.wanted, 2),
@@ -483,6 +484,17 @@ function view.record(app, now, result, distance, bearing)
 
   state.recorded = (state.recorded or 0) + 1
   return true
+end
+
+--- Where the nose points.
+---
+--- The SHIP's, where the vessel can report its own orientation. Otherwise the
+--- PILOT's facing, which is all a computer riding a contraption ever had --
+--- and which is why HDG used to read the way you were looking rather than the
+--- way the ship was pointing.
+---@return number|nil bearing
+function view.heading(app)
+  return app.flight.heading or app.heading
 end
 
 --- Takes a reading off the ship itself, where there is one to take.
@@ -721,12 +733,15 @@ local function readings(app, wide)
   -- being pushed sideways these differ, which is the point of showing both.
   -- Both carry their compass point: reading a heading off a number takes a
   -- moment, and off "SW" it does not.
-  push("HDG", app.heading and flightLib.formatCompass(app.heading) or "---",
-    app.heading and theme.accent or theme.dim)
+  local heading = view.heading(app)
+  push("HDG", heading and flightLib.formatCompass(heading) or "---",
+    heading and theme.accent or theme.dim)
   push("CRS", model.course and flightLib.formatCompass(model.course) or "---",
     model.moving and theme.accent or theme.dim)
 
-  local drift = model:drift(app.heading)
+  -- Nose against track. With the ship's own heading this is real sideslip;
+  -- with the pilot's it is mostly which way they happen to be looking.
+  local drift = model:drift(view.heading(app))
   if wide and drift then
     push("DFT", ("%+d"):format(util.round(drift)),
       math.abs(drift) > 20 and theme.warn or theme.dim)

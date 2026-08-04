@@ -3275,13 +3275,18 @@ local SHIP = {
   position = { x = 9470.06, y = 221.02, z = -402.41 },
   velocity = { x = 0, y = 0, z = 0 },
   angular  = { x = 0, y = 0, z = 0 },
+  -- Printed exactly as a real pose prints one, so the parser is tested on the
+  -- spelling rather than on a table somebody assumed it uses.
+  orientation = "-0.98936814069747925 - 1.1756540061469423e-06i "
+    .. "+ 0.14532884955406189j - 0.0054978989064693451k",
 }
 
 local function installSable()
   _G.sublevel = {
     isInPlotGrid = function() return SHIP.onSubLevel end,
     getLogicalPose = function()
-      return { scale = { x = 1, y = 1, z = 1 }, position = SHIP.position }
+      return { scale = { x = 1, y = 1, z = 1 }, position = SHIP.position,
+               orientation = SHIP.orientation }
     end,
     getLinearVelocity = function() return SHIP.velocity end,
     getAngularVelocity = function() return SHIP.angular end,
@@ -3344,6 +3349,57 @@ check("angular velocity is radians a second, negative for a right turn", functio
     "and the course is where it is actually going, got " .. moving.course)
   assert(moving.position.x == 9470.06, "with the SHIP's position, not the pilot's")
   removeSable()
+end)
+
+check("the ship reports where its nose points, not where the pilot looks", function()
+  installSable()
+
+  -- Both spellings of a quaternion: the one a pose prints, and a plain table.
+  local printed = sableLib.headingFrom(SHIP.orientation)
+  local table_ = sableLib.headingFrom({
+    w = -0.98936814069747925, x = -1.1756540061469423e-06,
+    y = 0.14532884955406189, z = -0.0054978989064693451,
+  })
+  assert(printed and math.abs(printed - table_) < 0.001,
+    "parsed the same either way, got " .. tostring(printed)
+      .. " and " .. tostring(table_))
+  assert(math.abs(printed - 16.71) < 0.01, "16.7 degrees, got " .. printed)
+
+  -- The conventions have to agree with the turn rate's, or the panel would
+  -- say the ship was pointing one way while claiming it was turning the other.
+  assert(math.abs(sableLib.headingFrom({ w = 1, x = 0, y = 0, z = 0 })) < 0.001,
+    "an unrotated Sub-Level faces north")
+  local quarter = math.rad(45) / 2
+  assert(math.abs(sableLib.headingFrom({
+    w = math.cos(quarter), x = 0, y = math.sin(quarter), z = 0 }) - 315) < 0.01,
+    "and a positive rotation about +Y is a turn to the LEFT, as the angular "
+      .. "velocity sign says it is")
+
+  assert(sableLib.headingFrom("not a quaternion") == nil, "junk is no heading")
+  assert(sableLib.headingFrom(nil) == nil, "and neither is nothing")
+
+  -- Through the model and onto the page.
+  local flightModule = modules.byId("flight")
+  SHIP.velocity = { x = 0, y = 0, z = -14 }
+  local saved = app.heading
+  app.heading = 340                       -- the pilot, looking over the rail
+
+  app.flight:reset()
+  assert(flightModule.readShip(app, 500), "read the ship")
+  assert(math.abs(app.flight.heading - 16.71) < 0.01,
+    "the model carries the SHIP's heading, got " .. tostring(app.flight.heading))
+  assert(math.abs(flightModule.heading(app) - 16.71) < 0.01,
+    "and that is what the page uses, not the pilot's 340")
+
+  -- Lose the ship and it goes back to the pilot rather than showing where the
+  -- vessel was pointing a minute ago.
+  app.flight:sample({ x = 0, y = 70, z = 0, dimension = "d" }, 501)
+  assert(app.flight.heading == nil, "a stale ship heading is dropped")
+  assert(flightModule.heading(app) == 340, "back to the pilot's facing")
+
+  app.heading = saved
+  removeSable()
+  app.flight:reset()
 end)
 
 check("a dropped angular reading is held, not believed", function()

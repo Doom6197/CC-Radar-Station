@@ -72,6 +72,10 @@ function flight:reset()
   self.vertical = nil       -- blocks per second, positive is climbing
   self.course = nil         -- true bearing of travel, nil when stationary
   self.turnRate = nil       -- degrees per second, positive is turning right
+  -- Where the NOSE points, which only a vessel that can report its own
+  -- orientation knows. nil everywhere else, and the page falls back to the
+  -- pilot's facing.
+  self.heading = nil
   self.moving = false
 
   self.courseAt = nil       -- when `course` was last set, for the turn rate
@@ -129,6 +133,10 @@ function flight:sample(pos, now)
   -- -- disassembled, or the operator has stepped onto one that is not a
   -- Sub-Level -- must not go on claiming these are the vessel's own readings.
   self.source = "pilot"
+  -- And a heading nobody is reporting any more is not a heading. Dropped
+  -- rather than left standing, so the page goes back to the pilot's facing
+  -- instead of showing where the ship was pointing a minute ago.
+  self.heading = nil
   self:update(now)
   return true
 end
@@ -249,6 +257,7 @@ function flight:applyShip(reading, now)
     self.lastCourse, self.courseAt = reading.course, now
   end
   if reading.yawRate then self.turnRate = reading.yawRate end
+  self.heading = reading.heading
 
   if not self.since then self.since = now end
   return true

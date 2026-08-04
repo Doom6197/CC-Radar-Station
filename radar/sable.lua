@@ -78,6 +78,60 @@ end
 
 sable.xyz = xyz
 
+--- The four parts of an orientation quaternion.
+---
+--- The pose prints one as "w + xi + yj + zk", so that spelling is parsed as
+--- well as a plain table -- the field names a quaternion object uses are the
+--- one thing about this API that was not established by measurement.
+---@return number|nil w, number x, number y, number z
+local function quaternion(value)
+  if type(value) == "table" then
+    local w = tonumber(value.w) or tonumber(value.W)
+    local x, y, z = tonumber(value.x), tonumber(value.y), tonumber(value.z)
+    if w and x and y and z then return w, x, y, z end
+  end
+
+  local text = tostring(value)
+  local w = tonumber(text:match("^%s*(%-?[^%s]+)"))
+  local function part(letter)
+    local sign, magnitude = text:match("([%+%-])%s*([^%s]+)" .. letter)
+    local number = tonumber(magnitude)
+    if not number then return nil end
+    return (sign == "-") and -number or number
+  end
+  local x, y, z = part("i"), part("j"), part("k")
+  if w and x and y and z then return w, x, y, z end
+  return nil
+end
+
+sable.quaternion = quaternion
+
+--- The compass bearing the ship's nose points along.
+---
+--- Yaw out of the quaternion is the rotation about the vertical axis:
+---
+---   yaw = atan2(2(wy + xz), 1 - 2(yy + zz))
+---
+--- and then NEGATED, for the same reason the turn rate is. A rotation about
+--- +Y is anticlockwise seen from above and a compass runs the other way -- the
+--- angular velocity measurement settled that convention, and a heading that
+--- disagreed with the turn rate about which way is right would be worse than
+--- no heading at all.
+---
+--- Unlike the velocity readings, this one is NOT confirmed against an
+--- independent measurement: it assumes an unrotated Sub-Level faces north.
+--- Nothing steers on it -- the autopilot is not allowed a heading at all -- so
+--- being wrong here shows a wrong number rather than flying the ship into
+--- anything, and flying straight with no sideslip is the check: HDG should
+--- read what CRS reads.
+---@return number|nil bearing 0..360
+function sable.headingFrom(orientation)
+  local w, x, y, z = quaternion(orientation)
+  if not w then return nil end
+  local yaw = math.atan(2 * (w * y + x * z), 1 - 2 * (y * y + z * z))
+  return (-math.deg(yaw)) % 360
+end
+
 --- The `sublevel` global, or nil where there is none.
 ---
 --- Read through _G rather than named directly, so this file is honest about
@@ -120,9 +174,16 @@ function sable.read(now)
   local reading = {}
 
   local ok, pose = pcall(api.getLogicalPose)
-  if ok and type(pose) == "table" and pose.position then
-    local x, y, z = xyz(pose.position)
-    if x then reading.position = { x = x, y = y, z = z } end
+  if ok and type(pose) == "table" then
+    if pose.position then
+      local x, y, z = xyz(pose.position)
+      if x then reading.position = { x = x, y = y, z = z } end
+    end
+    -- Where the ship's NOSE points, which is a different thing from where it
+    -- is going and a very different thing from where the pilot is looking.
+    if pose.orientation then
+      reading.heading = sable.headingFrom(pose.orientation)
+    end
   end
 
   local gotVelocity, velocity = pcall(api.getLinearVelocity)
