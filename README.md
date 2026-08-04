@@ -121,6 +121,7 @@ Basalt itself: `wget run https://basalt.madefor.cc/2.5/install.lua minified`
 | **Speaker(s)** | every speaker on the network plays the alert |
 | **Redstone Relay** (CC: Tweaked), on a wired modem | the flight page's [autopilot](#autopilot): two sides driving the left and right thruster groups |
 | Any redstone contraption on a side of the computer | the redstone output |
+| **CC: Sable**, on a computer riding a Create: Simulated Sub-Level | the flight page reads the **ship itself** — see [Reading the ship](#reading-the-ship) |
 
 Peripherals are matched on **what they can do**, not on their type name, so a
 Player Detector works whether it is bolted to the computer, built into a pocket
@@ -166,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.14                                    |  SETTINGS   v8.14
+ SETTINGS   v8.15                                    |  SETTINGS   v8.15
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -712,6 +713,52 @@ pastebin put radar_flight.csv
   down. A ship still under power with nothing left running to steer it is the
   one outcome worth writing code to prevent.
 
+### Reading the ship
+
+Everything above is *inferred*: position arrives once a second, a course is
+averaged over three, a turn rate is differentiated out of that and smoothed.
+That is about four seconds of lag on the number the autopilot's inner loop runs
+on, and a logged flight had it reading roughly half the true value. Every
+softener in the control law — the lead term, the rate cap, the dither, the
+speed floors — exists to survive that sensor.
+
+With **CC: Sable** installed and the computer standing on a Create: Simulated
+Sub-Level, it stops being inferred:
+
+| | |
+|---|---|
+| `SPD` `VS` | straight off the ship's linear velocity, in blocks/second |
+| `CRS` | the direction of that velocity — where it is going *this instant* |
+| turn rate | the ship's angular velocity, exact and current |
+| position | the **vessel's**, not the pilot's |
+
+The footer says `ship` instead of `relayed`, and *Settings → … → Flight →
+Sensor* reports which is in use.
+
+**The units and the sign were measured, not assumed.** Angular velocity is
+radians per second about each axis, and with `+Y` up the `y` component is the
+yaw — **negative for a turn to the right**, because it is a right-handed frame
+and a compass is not. Regressing a logged flight's reported `y` against the yaw
+rate implied by its velocity vector — an independent measurement — gave
+`-53.9 deg/s` per unit against `-57.296` for radians, the remaining 6% being
+the ship's sideslip, since a vessel crabbing sideways yaws slightly faster than
+its course rotates.
+
+Getting that sign wrong would not have been subtle: the rate term would add to
+the heading error instead of opposing it, and the autopilot would diverge on
+its first correction.
+
+Two smaller things the same log turned up. An exact `0,0,0` angular reading is
+a **dropout, not a still ship** — two in 197 samples while the vessel was doing
+18 b/s — so the last good rate is held rather than believed. And a course the
+ship *reports* needs no speed floor at all: it is a velocity vector, not two
+positions subtracted, so it is trustworthy at a crawl where a derived one is
+noise.
+
+None of it is required. Without the mod, off a Sub-Level, or on the pocket
+computer and the main base, everything falls back to the derived path exactly
+as before.
+
 ### What it cannot know
 
 - **It is the pilot's position, not the ship's.** Walking the deck reads as a
@@ -1204,6 +1251,7 @@ radar/
   environment.lua      Environment Detector -> snapshot + scene description
   power.lua            energy peripherals -> rates, buffer, history, alarms
   autopilot.lua        the autopilot's control law: differential thrust
+  sable.lua            reading the ship itself, where CC: Sable can (optional)
   biomes.lua           biome id -> ground profile, and its colours by mood
   backdrops.lua        hand-picked scenes for the weather page, and the cycle
   alerts.lua           sound, redstone and flash; the shared alarm channels
@@ -1290,6 +1338,17 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.15 - the flight page reads the ship.** With CC: Sable on a computer
+riding a Create: Simulated Sub-Level, speed, climb, course, turn rate and
+position come from the VESSEL -- current and exact -- instead of being inferred
+from a pilot position that arrives once a second and is then averaged over
+three. The autopilot's inner loop had about four seconds of lag on the one
+number it runs on; now it has none. Units and sign were measured off a real
+flight rather than assumed: radians per second, y negative for a right turn. An
+exact 0,0,0 is treated as a dropped reading rather than a still ship, and a
+course the ship reports is trusted at a crawl where a derived one is noise.
+Everything falls back to the old path without the mod.
 
 **v8.14 - the drift at cruise.** Two faults, both in getting a decision onto
 a wire that carries sixteen values. Rounding each side on its own meant that at

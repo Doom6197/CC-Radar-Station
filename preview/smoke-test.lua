@@ -3263,6 +3263,164 @@ check("it can still steer at full cruise", function()
   end
 end)
 
+-- CC: Sable ------------------------------------------------------------------
+-- A `sublevel` global, exactly the shape a real one has: vectors with x/y/z,
+-- a pose whose position is world coordinates, angular velocity in RADIANS PER
+-- SECOND about each axis with y negative for a turn to the right.
+
+local sableLib = require("radar.sable")
+
+local SHIP = {
+  onSubLevel = true,
+  position = { x = 9470.06, y = 221.02, z = -402.41 },
+  velocity = { x = 0, y = 0, z = 0 },
+  angular  = { x = 0, y = 0, z = 0 },
+}
+
+local function installSable()
+  _G.sublevel = {
+    isInPlotGrid = function() return SHIP.onSubLevel end,
+    getLogicalPose = function()
+      return { scale = { x = 1, y = 1, z = 1 }, position = SHIP.position }
+    end,
+    getLinearVelocity = function() return SHIP.velocity end,
+    getAngularVelocity = function() return SHIP.angular end,
+  }
+  sableLib.forget()
+end
+
+local function removeSable()
+  _G.sublevel = nil
+  sableLib.forget()
+end
+
+check("the ship is read only where there is a ship to read", function()
+  removeSable()
+  assert(not sableLib.available(), "no sublevel global, nothing to read")
+  assert(sableLib.read(1) == nil, "and no reading")
+
+  installSable()
+  assert(sableLib.available(), "with one, and standing on a Sub-Level, there is")
+
+  -- The mod can be installed on a computer bolted to the ground. Both halves
+  -- have to be true or none of the readings mean anything.
+  SHIP.onSubLevel = false
+  sableLib.forget()
+  assert(not sableLib.available(), "off a Sub-Level it reports nothing")
+  assert(sableLib.read(1) == nil, "and reads nothing")
+  SHIP.onSubLevel = true
+  removeSable()
+end)
+
+check("angular velocity is radians a second, negative for a right turn", function()
+  -- Measured, not assumed: a logged flight regressed the reported y against
+  -- the yaw rate implied by the velocity vector and came out at -53.9 deg/s
+  -- per unit against -57.296 for radians, the rest being the ship's sideslip.
+  --
+  -- Getting this sign wrong is not subtle. The rate term would ADD to the
+  -- heading error instead of opposing it, and the autopilot would diverge on
+  -- its first correction.
+  installSable()
+  SHIP.velocity = { x = 0, y = 0, z = -17 }        -- due north at 17 b/s
+  SHIP.angular  = { x = 0, y = -0.302, z = 0 }     -- from the real log
+
+  local reading = sableLib.read(100)
+  assert(reading, "there is a reading")
+  assert(reading.yawRate > 0, "negative y is a turn to the RIGHT, got "
+    .. reading.yawRate)
+  assert(math.abs(reading.yawRate - 17.3) < 0.1,
+    "0.302 rad/s is 17.3 deg/s, got " .. reading.yawRate)
+
+  SHIP.angular = { x = 0, y = 0.302, z = 0 }
+  assert(sableLib.read(101).yawRate < 0, "and positive y is a turn to the left")
+
+  -- Speed, climb and course come straight off the velocity vector.
+  SHIP.velocity = { x = 3, y = 1.5, z = -4 }
+  local moving = sableLib.read(102)
+  assert(math.abs(moving.speed - 5) < 0.001, "speed is the ground component, got "
+    .. moving.speed)
+  assert(moving.vertical == 1.5, "climb is the y component")
+  assert(math.abs(moving.course - 36.87) < 0.1,
+    "and the course is where it is actually going, got " .. moving.course)
+  assert(moving.position.x == 9470.06, "with the SHIP's position, not the pilot's")
+  removeSable()
+end)
+
+check("a dropped angular reading is held, not believed", function()
+  -- A real log had two exact 0,0,0 readings in 197 samples while the vessel
+  -- was doing 18 blocks a second. An autopilot that believed them would decide
+  -- the turn had stopped and put in a correction nobody asked for.
+  installSable()
+  SHIP.velocity = { x = 0, y = 0, z = -18 }
+  SHIP.angular  = { x = -0.003, y = -0.25, z = 0.007 }
+  local turning = sableLib.read(200)
+  assert(turning.yawRate > 14, "turning, got " .. turning.yawRate)
+
+  SHIP.angular = { x = 0, y = 0, z = 0 }
+  local dropped = sableLib.read(201)
+  assert(dropped.held, "the dropout is flagged")
+  assert(math.abs(dropped.yawRate - turning.yawRate) < 0.001,
+    "and the last good rate is held, got " .. tostring(dropped.yawRate))
+
+  SHIP.angular = { x = -0.003, y = -0.20, z = 0.007 }
+  local resumed = sableLib.read(202)
+  assert(not resumed.held, "a real reading is not held")
+  assert(math.abs(resumed.yawRate - 11.46) < 0.05, "and is used, got "
+    .. resumed.yawRate)
+  removeSable()
+end)
+
+check("the ship's own readings replace the derived ones", function()
+  local model = flightLib.new()
+
+  -- The derived path first: a pilot walking about, sampled from position.
+  for i = 0, 5 do
+    model:sample({ x = i * 3, y = 70, z = 0, dimension = "d" }, i)
+  end
+  assert(model.source == "pilot", "derived from the pilot, got " .. model.source)
+  assert(not model:fromShip(), "and says so")
+  local derived = model.speed
+
+  model:applyShip({
+    position = { x = 500, y = 200, z = -300 },
+    speed = 17.5, vertical = -1.2, course = 265, yawRate = 6.4,
+  }, 10)
+
+  assert(model:fromShip(), "now it is the ship's")
+  assert(model.speed == 17.5, "the ship's speed wins, got " .. model.speed)
+  assert(model.speed ~= derived, "which is not what walking about produced")
+  assert(model.vertical == -1.2, "and its climb")
+  assert(model.course == 265, "and its course")
+  assert(model.turnRate == 6.4, "and its turn rate, with nothing differentiated")
+  assert(model.position.x == 500, "and its position -- the SHIP, not the pilot")
+  assert(model.moving, "moving at 17.5 b/s")
+
+  -- The fix history is untouched, so losing the ship falls back rather than
+  -- starting from nothing.
+  model:sample({ x = 18, y = 70, z = 0, dimension = "d" }, 11)
+  assert(model.source == "pilot", "a plain sample goes back to deriving")
+
+  assert(flightLib.new().source == "pilot", "a fresh model derives")
+end)
+
+check("a course the ship reported is trusted at a crawl", function()
+  -- The speed floors exist because a course derived from position deltas is
+  -- noise below about a block a second. A velocity vector is not.
+  local function phaseAt(speed, trusted)
+    return autopilotLib.step({
+      engaged = true, distance = 500, bearing = 90, course = 90, turnRate = 0,
+      moving = speed >= 0.15, speed = speed, trusted = trusted, probing = 0,
+      cfg = { cruise = 0.6 },
+    }).phase
+  end
+
+  assert(phaseAt(0.3, false) == "probe", "derived: a crawl is not a course")
+  assert(phaseAt(0.3, true) == "steer", "reported: it is")
+  assert(phaseAt(2.0, false) == "steer", "derived, with speed to spare")
+  assert(phaseAt(0.01, true) == "probe",
+    "though a ship that is not moving at all still has no course")
+end)
+
 check("a throttle becomes a redstone level", function()
   assert(autopilotLib.level(0) == 0, "off is off")
   assert(autopilotLib.level(1) == 15, "full is fifteen")
@@ -3471,6 +3629,58 @@ check("the autopilot records what it did, one row per pass", function()
   flightModule.setAutopilot(app, false)
   auto.record = false
   FILES[flightModule.RECORD_FILE] = nil
+end)
+
+check("the autopilot flies on the ship's own readings when it can", function()
+  local flightModule = modules.byId("flight")
+
+  -- Without a Sub-Level: derived from the pilot, as ever.
+  removeSable()
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 - i * 10, y = 70, z = 0,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+  assert(not app.flight:fromShip(), "derived to start with")
+  assert(not flightModule.readShip(app, CLOCK), "and there is nothing to read")
+
+  -- With one, the vessel's numbers replace them.
+  installSable()
+  SHIP.velocity = { x = 0, y = 0.4, z = -14 }        -- north at 14 b/s, climbing
+  SHIP.angular  = { x = 0, y = -0.14, z = 0 }        -- coming round to the right
+  SHIP.position = { x = 300, y = 180, z = -900 }
+
+  assert(flightModule.readShip(app, CLOCK + 10), "the ship was read")
+  assert(app.flight:fromShip(), "and the model says where from")
+  assert(math.abs(app.flight.speed - 14) < 0.01, "its speed, got " .. app.flight.speed)
+  assert(app.flight.vertical == 0.4, "its climb")
+  assert(math.abs(app.flight.course - 0) < 0.01, "its course, got " .. app.flight.course)
+  assert(math.abs(app.flight.turnRate - 8.02) < 0.05,
+    "and its turn rate in deg/s, got " .. app.flight.turnRate)
+  assert(app.flight.position.x == 300, "at the SHIP's position")
+
+  -- Which is what the control law is then handed.
+  app.cfg.autopilot.left, app.cfg.autopilot.right = "left", "right"
+  app.cfg.autopilot.range = false
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 300, 180, -2000
+  app.cfg.flightTarget = "home"
+  app.lastScanAt = CLOCK + 10
+
+  assert(flightModule.setAutopilot(app, true), "engaged")
+  local result = flightModule.control(app, CLOCK + 10, 0.5)
+  assert(result.phase == "steer", "steering on the ship's course, got " .. result.phase)
+  assert(math.abs(result.turnRate - app.flight.turnRate) < 0.001,
+    "with the ship's turn rate, not a differentiated one")
+
+  -- A ship reporting a crawl is still steerable, where a derived crawl is not.
+  SHIP.velocity = { x = 0, y = 0, z = -0.3 }
+  flightModule.readShip(app, CLOCK + 11)
+  assert(flightModule.control(app, CLOCK + 11, 0.5).phase == "steer",
+    "0.3 b/s is a course when the ship says so")
+
+  flightModule.setAutopilot(app, false)
+  removeSable()
+  app.flight:reset()
 end)
 
 check("a fault stops the ship and goes in the alert log", function()

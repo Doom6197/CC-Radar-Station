@@ -80,6 +80,10 @@ function flight:reset()
   self.position = nil       -- the most recent fix
   self.dimension = nil
   self.since = nil          -- when this leg started, for a settling hint
+
+  -- "pilot" when everything above was worked out from where the operator is
+  -- standing, "ship" when the vessel reported it itself. See applyShip.
+  self.source = "pilot"
   return self
 end
 
@@ -121,6 +125,10 @@ function flight:sample(pos, now)
   if not self.since then self.since = now end
 
   self.position = pos
+  -- Back to inferring it. A ship that was reporting for itself and has stopped
+  -- -- disassembled, or the operator has stepped onto one that is not a
+  -- Sub-Level -- must not go on claiming these are the vessel's own readings.
+  self.source = "pilot"
   self:update(now)
   return true
 end
@@ -205,6 +213,50 @@ function flight:setCourse(course, now)
   self.lastCourse, self.courseAt = course, now
   return self
 end
+
+-- ------------------------------------------------------------ the ship ---
+
+--- Takes the readings straight from the vessel, where it can report them.
+---
+--- Everything above this line exists to INFER these numbers from a position
+--- that arrives once a second: a course averaged over three seconds, a turn
+--- rate differentiated out of that and then smoothed. CC: Sable hands them
+--- over instead -- current, exact, and about the SHIP rather than about
+--- whoever happens to be standing on it. See radar/sable.lua.
+---
+--- The fix history is deliberately left alone. Nothing here needs it while a
+--- reading is arriving, and leaving it intact means that if the ship is
+--- disassembled, or the operator walks onto one that is not a Sub-Level, the
+--- derived path picks up where it left off rather than from nothing.
+---@param reading table from sable.read()
+---@return boolean applied
+function flight:applyShip(reading, now)
+  if type(reading) ~= "table" then return false end
+  now = now or os.clock()
+
+  self.source = "ship"
+  if reading.position then self.position = reading.position end
+  if reading.speed then
+    self.speed = reading.speed
+    self.moving = reading.speed >= flight.MOVING_SPEED
+  end
+  if reading.vertical then self.vertical = reading.vertical end
+
+  if reading.course then
+    -- Set rather than passed through setCourse: that DERIVES a turn rate from
+    -- the change, and there is a real one here that does not need guessing at.
+    self.course = reading.course
+    self.lastCourse, self.courseAt = reading.course, now
+  end
+  if reading.yawRate then self.turnRate = reading.yawRate end
+
+  if not self.since then self.since = now end
+  return true
+end
+
+--- Whether the readings are the ship's own rather than inferred from the
+--- pilot's position. Read by the page, so it can say which.
+function flight:fromShip() return self.source == "ship" end
 
 -- ---------------------------------------------------------------- readings ---
 

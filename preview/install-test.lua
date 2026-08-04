@@ -211,6 +211,7 @@ check("every project lua file is in the manifest", function()
     "radar/theme.lua", "radar/pixel.lua", "radar/chart.lua",
     "radar/glyphs.lua", "radar/sky.lua", "radar/util.lua",
     "radar/modules.lua", "radar/power.lua", "radar/profiles.lua",
+    "radar/sable.lua",
     "radar/setup.lua",
     "radar/modules/status.lua", "radar/modules/radar.lua",
     "radar/modules/contacts.lua", "radar/modules/weather.lua",

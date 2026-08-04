@@ -12,6 +12,7 @@
 local autopilot = require("radar.autopilot")
 local config    = require("radar.config")
 local flightLib = require("radar.flight")
+local sable     = require("radar.sable")
 local theme     = require("radar.theme")
 local ui        = require("radar.ui")
 local util      = require("radar.util")
@@ -430,7 +431,7 @@ view.RECORD_FILE = "radar_flight.csv"
 view.RECORD_LIMIT = 2000
 
 view.RECORD_COLUMNS = {
-  "t", "phase", "dist", "bearing", "course", "err", "rate", "want",
+  "t", "phase", "src", "dist", "bearing", "course", "err", "rate", "want",
   "steer", "left", "right", "lvlL", "lvlR", "speed",
 }
 
@@ -464,6 +465,7 @@ function view.record(app, now, result, distance, bearing)
   handle.write(table.concat({
     csv(now, 2),
     tostring(result.phase),
+    model.source or "pilot",
     csv(distance),
     csv(bearing),
     csv(model.course),
@@ -483,6 +485,18 @@ function view.record(app, now, result, distance, bearing)
   return true
 end
 
+--- Takes a reading off the ship itself, where there is one to take.
+---
+--- Called on the control loop's cadence rather than the sweep's, because the
+--- whole point of these numbers is that they are current -- and on the sweep
+--- as well, so the page is right with the autopilot off.
+---@return boolean read
+function view.readShip(app, now)
+  local reading = sable.read(now)
+  if not reading then return false end
+  return app.flight:applyShip(reading, now)
+end
+
 --- One pass of the control loop: read the destination, decide, write.
 ---@param now number os.clock()
 ---@param elapsed number seconds since the previous pass
@@ -496,6 +510,11 @@ function view.control(app, now, elapsed)
   if destination and not destination.lost then
     distance, bearing = model:vectorTo(destination.x, destination.z)
   end
+
+  -- Freshest possible, and cheap: it is the ship's own state rather than a
+  -- peripheral call. With no Sub-Level under us this does nothing and the
+  -- model keeps whatever the sweep derived.
+  view.readShip(app, now)
 
   local result = autopilot.step({
     engaged  = state.engaged,
@@ -511,6 +530,9 @@ function view.control(app, now, elapsed)
     -- going in long after the nose is pointed the right way, and the ship
     -- swings through the heading instead of settling on it.
     turnRate = model.turnRate,
+    -- A course the SHIP reported does not need speed to be believable. The
+    -- derived one does, which is what the speed floors are for.
+    trusted  = model:fromShip(),
     moving   = model.moving,
     sinceFix = (app.lastScanAt > 0) and (now - app.lastScanAt) or nil,
     probing  = state.probing,
@@ -552,10 +574,16 @@ function view.start(app)
   basalt.schedule(function()
     while app.running do
       sleep(interval)
-      if app.autopilot.engaged
-         and require("radar.modules").isEnabled(app.cfg, "flight") then
-        local ok, err = pcall(view.control, app, os.clock(), interval)
-        if not ok then app.autopilot.message = tostring(err) end
+      if require("radar.modules").isEnabled(app.cfg, "flight") then
+        local now = os.clock()
+        if app.autopilot.engaged then
+          local ok, err = pcall(view.control, app, now, interval)
+          if not ok then app.autopilot.message = tostring(err) end
+        else
+          -- Worth reading with the autopilot off too: the page shows the
+          -- ship's own speed, climb and course either way.
+          pcall(view.readShip, app, now)
+        end
       end
     end
   end)
@@ -601,9 +629,12 @@ function view.attach(app)
     -- Free in server-call terms -- the fix has already been read -- but a
     -- station with the page switched off has no use for the history, and a
     -- fixed base would fill it with the operator walking around.
-    if app.myPos and modules.isEnabled(app.cfg, "flight") then
-      app.flight:sample(app.myPos, os.clock())
-    end
+    if not modules.isEnabled(app.cfg, "flight") then return end
+    local now = os.clock()
+    -- The vessel's own reading wins. Sampling the pilot on top of it would put
+    -- somebody walking the deck back into the numbers.
+    if view.readShip(app, now) then return end
+    if app.myPos then app.flight:sample(app.myPos, now) end
   end)
 
   -- Whatever else is going on, a station shutting down leaves the thrusters
@@ -830,7 +861,10 @@ function view.build(container, app, root)
 
     if y <= h and h >= 6 then
       local note = model.moving and "under way" or "stopped"
-      if config.isMobile(app.cfg) then note = note .. "   relayed" end
+      -- Where the numbers came from. On a Sub-Level they are the vessel's own,
+      -- which is a different and better thing from a relayed fix.
+      if model:fromShip() then note = note .. "   ship"
+      elseif config.isMobile(app.cfg) then note = note .. "   relayed" end
 
       -- Buttons along the bottom row, laid out from the right.
       --
@@ -1013,6 +1047,24 @@ function view.settings(ctx)
   end, ctx.onOffColor(function() return cfg.flightHome end))
 
   ctx.note("Distance, bearing and ETA to the destination.")
+
+  ctx.row("Sensor", function()
+    if app.flight:fromShip() then return "the ship itself" end
+    if sable.api() then return "the pilot - not on a Sub-Level" end
+    return "the pilot's position"
+  end, function()
+    sable.forget()
+    local read = view.readShip(app, os.clock())
+    ctx.root:toast(read and "Reading the ship"
+      or "No Sub-Level under this computer", read and "success" or "info")
+  end, function() return app.flight:fromShip() and theme.good or theme.dim end)
+
+  ctx.note("With CC: Sable, a computer standing on a Create: Simulated "
+    .. "Sub-Level gets the VESSEL's own speed, climb, course and turn rate -- "
+    .. "current and exact, instead of inferred from where the pilot is "
+    .. "standing a second ago. The autopilot is a great deal steadier on it.", true)
+  ctx.note("Without it everything below still works, worked out from position "
+    .. "as it changes.")
 
   ctx.row("Reading", function()
     local model = app.flight

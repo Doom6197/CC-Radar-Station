@@ -109,6 +109,11 @@ autopilot.COURSE_SPEED = 1.0
 -- which slows the ship on purpose, would bounce it in and out of the probe.
 autopilot.COURSE_SPEED_LOW = 0.5
 
+-- And none of that applies to a course the SHIP reported. That is a velocity
+-- vector, not two positions subtracted, so it does not need speed to be
+-- trustworthy -- only to exist. See radar/sable.lua.
+autopilot.COURSE_SPEED_TRUSTED = 0.05
+
 -- Degrees per second of rate error for full thrust difference. Fixed rather
 -- than exposed: the inner loop is self-adjusting -- a sluggish ship saturates
 -- it and gets everything `turnPower` allows, an agile one never does -- and a
@@ -220,6 +225,7 @@ autopilot.slew = slew
 ---   moving   boolean     whether the course means anything yet
 ---   lost     boolean     the destination is a contact that has gone
 ---   speed    number|nil  blocks a second, for whether the course is trusted
+---   trusted  boolean     the course is a direct reading, not derived
 ---   steering boolean     whether the last pass was steering, for hysteresis
 ---   sinceFix number|nil  seconds since the last position fix
 ---   probing  number      seconds spent pushing with no course yet
@@ -270,9 +276,17 @@ function autopilot.step(s)
   -- noise is a heading the autopilot will chase into a wall. Hysteresis, so a
   -- hard turn slowing the ship does not bounce it in and out of the probe.
   local speed = tonumber(s.speed) or 0
-  local floorSpeed = (s.steering == true)
-    and autopilot.COURSE_SPEED_LOW or autopilot.COURSE_SPEED
-  if not s.course or not s.moving or speed < floorSpeed then
+  local floorSpeed
+  if s.trusted then
+    floorSpeed = autopilot.COURSE_SPEED_TRUSTED
+  else
+    floorSpeed = (s.steering == true)
+      and autopilot.COURSE_SPEED_LOW or autopilot.COURSE_SPEED
+  end
+  -- `moving` is about the derived path having enough travel to work with. A
+  -- ship reporting its own velocity is moving if the velocity says so.
+  local underway = s.trusted and (speed >= floorSpeed) or s.moving
+  if not s.course or not underway or speed < floorSpeed then
     if (tonumber(s.probing) or 0) >= autopilot.PROBE_SECONDS then
       return stop("stalled")
     end

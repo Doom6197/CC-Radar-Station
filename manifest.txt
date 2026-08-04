@@ -30,6 +30,7 @@ radar/modules.lua
 radar/pixel.lua
 radar/power.lua
 radar/profiles.lua
+radar/sable.lua
 radar/scan.lua
 radar/setup.lua
 radar/sky.lua
