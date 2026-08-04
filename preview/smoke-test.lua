@@ -3402,6 +3402,61 @@ check("the ship reports where its nose points, not where the pilot looks", funct
   app.flight:reset()
 end)
 
+check("the heading is trimmed to the ship, because nothing can compute it", function()
+  -- A Sub-Level's orientation is measured from however its blocks were laid
+  -- out when it was assembled. A real airship read HDG 012 while making good
+  -- 106 -- ninety-four degrees out, because it was not built facing north.
+  -- There is no formula for that: it is a fact about the shipyard.
+  local flightModule = modules.byId("flight")
+  installSable()
+
+  local saved = app.cfg.flightHeadingTrim
+  app.cfg.flightHeadingTrim = 0
+
+  -- Built pointing east: identity means facing east, so the raw angle is 94
+  -- degrees behind the course it is actually making.
+  local nose = math.rad(-12) / 2
+  SHIP.orientation = { w = math.cos(nose), x = 0, y = math.sin(nose), z = 0 }
+  SHIP.velocity = { x = 19.22, y = 0, z = 5.51 }       -- making good 106
+  SHIP.angular = { x = 0, y = 0, z = 0 }
+
+  app.flight:reset()
+  assert(flightModule.readShip(app, 600), "read the ship")
+  assert(math.abs(app.flight.heading - 12) < 0.5,
+    "untrimmed it reads the raw angle, got " .. app.flight.heading)
+  assert(math.abs(app.flight.course - 106) < 0.5,
+    "while making good 106, got " .. app.flight.course)
+
+  local ok, message = flightModule.trimHeading(app)
+  assert(ok, "trimming worked: " .. message)
+  assert(math.abs(app.cfg.flightHeadingTrim - 94) < 1,
+    "ninety-four degrees of it, got " .. app.cfg.flightHeadingTrim)
+  assert(math.abs(app.flight.heading - app.flight.course) < 1,
+    "and now the nose agrees with the track, got " .. app.flight.heading
+      .. " vs " .. app.flight.course)
+
+  -- The trim is an OFFSET, not a one-off answer: turn the ship and the
+  -- heading follows, still agreeing.
+  local turned = math.rad(-102) / 2
+  SHIP.orientation = { w = math.cos(turned), x = 0, y = math.sin(turned), z = 0 }
+  SHIP.velocity = { x = 0.0, y = 0, z = 20 }           -- making good 180
+  flightModule.readShip(app, 601)
+  assert(math.abs(app.flight.heading - 196) < 1,
+    "a ninety degree turn moves the heading ninety degrees, got "
+      .. app.flight.heading)
+
+  -- It refuses where it would calibrate an error in.
+  SHIP.velocity = { x = 0.4, y = 0, z = 0.2 }          -- barely moving
+  flightModule.readShip(app, 602)
+  local refused, why = flightModule.trimHeading(app)
+  assert(not refused, "too slow to trust the course")
+  assert(why:find("slow", 1, true), "and says why, got " .. why)
+
+  app.cfg.flightHeadingTrim = saved or 0
+  removeSable()
+  app.flight:reset()
+end)
+
 check("a dropped angular reading is held, not believed", function()
   -- A real log had two exact 0,0,0 readings in 197 samples while the vessel
   -- was doing 18 blocks a second. An autopilot that believed them would decide

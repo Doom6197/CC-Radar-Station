@@ -118,12 +118,22 @@ sable.quaternion = quaternion
 --- disagreed with the turn rate about which way is right would be worse than
 --- no heading at all.
 ---
---- Unlike the velocity readings, this one is NOT confirmed against an
---- independent measurement: it assumes an unrotated Sub-Level faces north.
---- Nothing steers on it -- the autopilot is not allowed a heading at all -- so
---- being wrong here shows a wrong number rather than flying the ship into
---- anything, and flying straight with no sideslip is the check: HDG should
---- read what CRS reads.
+--- WHAT THIS CANNOT KNOW is which way the ship was BUILT.
+---
+--- The quaternion is the rotation from the Sub-Level's own frame to the
+--- world's, and that frame is however the blocks were laid out when the vessel
+--- was assembled. Build an airship pointing east and its identity orientation
+--- means "facing east"; the same maths on a ship built pointing north gives an
+--- answer ninety degrees away. A real one read HDG 012 while making good 106,
+--- which is exactly that.
+---
+--- So this returns the RAW angle and the flight module adds a per-ship trim,
+--- set once by matching it to the course in straight flight. There is no
+--- formula that could have got it right: the offset is a fact about the
+--- shipyard, not about the physics.
+---
+--- The SIGN is not in question. It shares a frame with the angular velocity,
+--- which was measured, and both make a rotation about +Y a turn to the left.
 ---@return number|nil bearing 0..360
 function sable.headingFrom(orientation)
   local w, x, y, z = quaternion(orientation)

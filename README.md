@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.16                                    |  SETTINGS   v8.16
+ SETTINGS   v8.17                                    |  SETTINGS   v8.17
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -750,12 +750,30 @@ Getting that sign wrong would not have been subtle: the rate term would add to
 the heading error instead of opposing it, and the autopilot would diverge on
 its first correction.
 
-`HDG` is the one reading here **not** confirmed against an independent
-measurement — it assumes an unrotated Sub-Level faces north. Nothing steers on
-it (the autopilot is not allowed a heading at all), so being wrong shows a
-wrong number rather than flying the ship into something. The check is one
-glance: **straight and level with no sideslip, `HDG` should read what `CRS`
-reads.**
+#### `HDG` needs trimming once, per ship
+
+The quaternion is the rotation from the **Sub-Level's own frame** to the
+world's — and that frame is however the blocks were laid out when the vessel
+was assembled. Build an airship pointing east and its identity orientation
+*means* facing east; the same maths on one built pointing north lands ninety
+degrees away. There is no formula for it. It is a fact about the shipyard.
+
+So **fly straight and level at speed, then press *Settings → … → Flight →
+Heading trim***:
+
+```
+        before                after one press        after turning 90 deg
+   |HDG      012 N |        |HDG      106 E |        |HDG      196 S |
+   |CRS      106 E |        |CRS      106 E |        |CRS      180 S |
+```
+
+It sets `HDG` to agree with `CRS`, which is the definition of no sideslip. The
+trim is an **offset**, not a one-off answer — turn the ship and the heading
+follows. Doing it in a turn, or while crabbing sideways, calibrates the error
+in; it refuses below 5 b/s for the same reason.
+
+Nothing steers on the heading — the autopilot is not allowed one at all — so an
+untrimmed ship shows a wrong number rather than flying into anything.
 
 Two smaller things the same log turned up. An exact `0,0,0` angular reading is
 a **dropout, not a still ship** — two in 197 samples while the vessel was doing
@@ -1347,6 +1365,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.17 - the heading needs trimming, once, per ship.** v8.16 computed the
+heading from the pose and assumed an unrotated Sub-Level faces north. It does
+not: the orientation is measured from however the blocks were laid out when the
+vessel was assembled, so an airship built pointing east read HDG 012 while
+making good 106. There is no formula for that, so there is a per-ship trim
+instead -- fly straight and press once, and it sets HDG to agree with CRS. It
+is an offset rather than an answer, so the heading still follows the ship
+round, and it refuses to calibrate below 5 b/s where the course cannot be
+trusted.
 
 **v8.16 - HDG is the ship's nose.** It was still the PILOT's facing, because
 that was the only heading a computer riding a contraption ever had -- so it

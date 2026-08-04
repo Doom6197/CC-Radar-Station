@@ -76,6 +76,9 @@ function flight:reset()
   -- orientation knows. nil everywhere else, and the page falls back to the
   -- pilot's facing.
   self.heading = nil
+  -- The same before the ship's trim was added. Kept so the trim can be worked
+  -- out from a course without having to undo itself first.
+  self.headingRaw = nil
   self.moving = false
 
   self.courseAt = nil       -- when `course` was last set, for the turn rate
@@ -136,7 +139,7 @@ function flight:sample(pos, now)
   -- And a heading nobody is reporting any more is not a heading. Dropped
   -- rather than left standing, so the page goes back to the pilot's facing
   -- instead of showing where the ship was pointing a minute ago.
-  self.heading = nil
+  self.heading, self.headingRaw = nil, nil
   self:update(now)
   return true
 end
@@ -237,8 +240,10 @@ end
 --- disassembled, or the operator walks onto one that is not a Sub-Level, the
 --- derived path picks up where it left off rather than from nothing.
 ---@param reading table from sable.read()
+---@param trim number|nil degrees to add to the reported heading; see
+---  radar/sable.lua for why a ship needs one at all
 ---@return boolean applied
-function flight:applyShip(reading, now)
+function flight:applyShip(reading, now, trim)
   if type(reading) ~= "table" then return false end
   now = now or os.clock()
 
@@ -257,7 +262,13 @@ function flight:applyShip(reading, now)
     self.lastCourse, self.courseAt = reading.course, now
   end
   if reading.yawRate then self.turnRate = reading.yawRate end
-  self.heading = reading.heading
+
+  self.headingRaw = reading.heading
+  if reading.heading then
+    self.heading = (reading.heading + (tonumber(trim) or 0)) % 360
+  else
+    self.heading = nil
+  end
 
   if not self.since then self.since = now end
   return true
