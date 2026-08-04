@@ -3635,6 +3635,67 @@ check("SHIP tracking turns the scope with the vessel", function()
   app.link.headingRaw = nil
 end)
 
+check("a relayed sweep cannot overwrite the heading the mode chose", function()
+  -- The bug: link:applyScan wrote the relayed PILOT bearing straight into
+  -- app.heading on every sweep, whatever the tracking mode said. On a ship
+  -- that fought the heading loop -- one writing the vessel's nose at 2 Hz and
+  -- the other the operator's facing at 1 Hz -- and the reading flickered
+  -- between the two, which is exactly what was reported.
+  local saved = { role = app.cfg.role, mode = app.cfg.mode, name = app.cfg.myName,
+                  step = app.cfg.headingStep, trim = app.cfg.headingTrim,
+                  smooth = app.cfg.headingSmooth, orient = app.cfg.orientation }
+
+  installSable()
+  -- The ship points 12; the operator is looking over the rail at 300.
+  local nose = math.rad(-12) / 2
+  SHIP.orientation = { w = math.cos(nose), x = 0, y = math.sin(nose), z = 0 }
+  SHIP.velocity = { x = 0, y = 0, z = -10 }
+  SHIP.position = { x = 2000, y = 100, z = 2000 }
+
+  app:setRole("mobile")
+  app:pairWithBase(BASE_ID, "Hangar")
+  app.cfg.myName = "Doom6197"
+  app.cfg.mode = "ship"
+  app.cfg.headingStep, app.cfg.headingTrim = 0, 0
+  app.cfg.headingSmooth, app.cfg.orientation = false, "heading"
+  app.heading, app.headingShown = nil, nil
+
+  local wire = {
+    t = "s", i = 1, n = "Doom6197", g = 300,
+    c = { x = 0, y = 64, z = 0, d = "minecraft:overworld" },
+    p = { x = 2000, y = 101, z = 2000, d = "minecraft:overworld" },
+    l = {},
+  }
+
+  -- Alternate what the two loops do, which is what happens in flight.
+  local seen = {}
+  for _ = 1, 6 do
+    app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)   -- the sweep
+    seen[#seen + 1] = app.heading
+    app:readHeading()                                        -- the heading loop
+    seen[#seen + 1] = app.heading
+  end
+
+  for index, heading in ipairs(seen) do
+    assert(heading and math.abs(util.angleDelta(heading, 12)) < 0.5,
+      ("reading %d was %s -- SHIP tracking must not flicker to the operator's "
+        .. "300"):format(index, tostring(heading)))
+  end
+
+  -- PLAYER still takes the relayed bearing, which is the whole point of it
+  -- arriving with the sweep.
+  app.cfg.mode = "player"
+  app.link:handle(app, BASE_ID, wire, linkLib.PROTOCOL)
+  assert(math.abs(util.angleDelta(app.heading, 300)) < 0.5,
+    "PLAYER follows the operator, got " .. tostring(app.heading))
+
+  removeSable()
+  app.cfg.role, app.cfg.mode, app.cfg.myName = saved.role, saved.mode, saved.name
+  app.cfg.headingStep, app.cfg.headingTrim = saved.step, saved.trim
+  app.cfg.headingSmooth, app.cfg.orientation = saved.smooth, saved.orient
+  app.scanError = nil
+end)
+
 check("the radar on a ship is centred on the SHIP", function()
   -- Every distance, bearing and blip on the scope is measured from
   -- app.centre. In SELF mode that was the PILOT, so the middle of the screen

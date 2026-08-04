@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.20                                    |  SETTINGS   v8.20
+ SETTINGS   v8.21                                    |  SETTINGS   v8.21
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      FIXED   120, 64, -340                |  MAIN BASE
@@ -760,6 +760,12 @@ two different ways and disagree under the same three letters.
 
 It is not the same as what the scope is *drawn* at. That is the eased value,
 which lags on purpose and never quite settles while the source moves.
+
+**Only one function decides where it comes from.** A relayed sweep carries the
+pilot's bearing — it is free with the fix — but writing that straight in used
+to override whatever the tracking mode had chosen, so on a ship the sweep and
+the heading loop fought at 1 Hz against 2 Hz and the reading flickered between
+the vessel's nose and the operator's facing.
 
 The heading is also worked out by **rotating the bow** and taking the bearing
 of where it lands, rather than by pulling an Euler yaw out of the quaternion.
@@ -1416,6 +1422,12 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.21 - the heading stops flickering between the ship and the pilot.** A
+relayed sweep wrote the PILOT's bearing straight into the heading on arrival,
+whatever the tracking mode said -- so on a ship it fought the heading loop, one
+writing the vessel's nose and the other the operator's facing, and the reading
+alternated between them. The sweep asks the mode now, like everything else.
 
 **v8.20 - the heading stops wandering, and both pages agree on it.** Three
 things were wrong at once. The heading came out of an Euler yaw, which mixes in

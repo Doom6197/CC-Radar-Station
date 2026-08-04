@@ -174,8 +174,13 @@ function app:rotation()
   return self.cfg.rotation
 end
 
---- Takes a raw bearing -- read locally, or relayed by a base -- and snaps it
---- to this station's own heading step.
+--- Takes a raw bearing and snaps it to this station's own heading step.
+---
+--- CALL readHeading, NOT THIS. This only stores what it is given; deciding
+--- WHERE a heading comes from is readHeading's job and belongs in one place.
+--- The relayed sweep used to write the pilot's bearing in here directly, which
+--- on a ship fought the heading loop -- one writing the vessel's nose, the
+--- other the operator's facing -- and the reading flickered between them.
 ---@return boolean changed True when the snapped heading moved
 function app:applyHeading(raw)
   local heading = raw and util.snapAngle(raw, self.cfg.headingStep) or nil

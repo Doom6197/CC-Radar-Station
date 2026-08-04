@@ -330,7 +330,12 @@ function link:applyScan(app, message)
     -- stale distances drawn as if they were live are worse than none.
     app.contacts = {}
     app:applyScan(myPos, {}, nil, problem)
-    if app:applyHeading(self.headingRaw) then app:emit("heading") end
+    -- readHeading, NOT applyHeading. The relayed bearing is the PILOT's, and
+    -- writing it straight in overrode whatever the tracking mode had chosen:
+    -- on a ship it fought the heading loop, one of them writing the vessel's
+    -- nose and the other the operator's facing, and the reading flickered
+    -- between the two. One function decides where a heading comes from.
+    if app:readHeading() then app:emit("heading") end
     return true
   end
 
@@ -356,7 +361,8 @@ function link:applyScan(app, message)
 
   app:applyScan(myPos, contacts, centre,
     type(message.e) == "string" and message.e or nil)
-  if app:applyHeading(self.headingRaw) then app:emit("heading") end
+  -- See above: the mode decides what the heading follows, not the wire.
+  if app:readHeading() then app:emit("heading") end
   return true
 end
 
