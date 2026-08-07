@@ -167,7 +167,7 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.22                                    |  SETTINGS   v8.22
+ SETTINGS   v8.23                                    |  SETTINGS   v8.23
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
  TRACKING      BASE   120, 64, -340                 |  MAIN BASE
@@ -301,7 +301,7 @@ a glance.
 | Page | What a 1×1 gets |
 |---|---|
 | **Status** | link, contacts, speed, altitude, power, time, alerts — the things that change on their own. The range, tracking mode and bearing-up are settings, and settings do not surprise you |
-| **Flight** | all eight instruments; it is designed for this size first |
+| **Flight** | all eight instruments; it is designed for this size first. No `[ MARK ]` and no `[ EDIT ]` — the destination row is already the button |
 | **Radar** | the scope, the compass and the heading. The range label and the ring size are settings, and they sat over the top left quarter of the picture |
 | **Contacts** | names and distances, hard against both edges |
 | **Weather** | six rows of sky, then clock, conditions, biome — and the buffer percentage hard right, when there is a power reading to have |
@@ -483,9 +483,44 @@ an airship has:
   tell you it worked, so the panel changing to `WPT` in front of you is how you
   know. It is **not** on a 1×1 — eight cells of button is half that screen —
   and needs about thirty cells of width before it appears.
+- **`[ EDIT ]` keys coordinates in**, for somewhere you are not.
 
-Typed-in coordinates are still under **Settings → Flight → Waypoint XYZ**;
-`[ MARK ]` is the version that works on a monitor, which has no keyboard.
+### The waypoint keypad
+
+`[ EDIT ]` takes the page over with a panel:
+
+```
+ WAYPOINT  a row, then the keys
+>X     -1234
+ Y       128
+ Z      5678
+  7  8  9    [ SET ]
+  4  5  6    [CANCEL]
+  1  2  3
+  0  -  <    Y is optional
+```
+
+Press a row to aim at it — the `>` says which, because on a non-advanced
+monitor every colour flattens to the nearest of sixteen — then key the number
+in. `-` flips the sign and takes it back again; `<` deletes. It opens on the
+current waypoint, or on **where the ship is** when there is none, since
+adjusting a number you can see is worth several presses on a keypad.
+
+`SET` writes it and flies to it. X and Z make a place; the height is optional,
+because a bearing does not use one. Anything short of that is refused with the
+panel still up, so digits already keyed are never thrown away by a press that
+could not have worked.
+
+**It is a keypad rather than a text box on purpose.** A monitor has no
+keyboard, so a text field on one is a box you can look at and never fill in —
+and a bulkhead monitor is where this page mostly lives. One implementation
+works under a mouse on the terminal and a right-click on a monitor, and it
+cannot collide with the number keys that switch pages.
+
+The button appears where the panel fits: **22 cells wide and 8 tall**. A 1×1
+gets neither the button nor the panel, and a pocket computer's footer has no
+room for it beside `[ MARK ]` — on a screen with a keyboard,
+**Settings → Flight → Waypoint XYZ** is the better tool anyway.
 
 A press that does either of those does **not** also move a monitor to the next
 page: the page gets first refusal on a tap, and only what it does not claim
@@ -1350,9 +1385,12 @@ Monitors have no keyboard, so the screen is the control:
 - **A page gets first refusal on a tap.** Pressing a name on CONTACTS makes
   them the flight destination; pressing the destination on FLIGHT swaps
   between `HOME` and the waypoint, `[ MARK ]` drops the waypoint where you
-  are, and `[ RESET ]` on POWER starts the graph again. None of those also
-  move the monitor along. Everything else falls through to the page change
-  above.
+  are, `[ EDIT ]` keys one in on a keypad, and `[ RESET ]` on POWER starts the
+  graph again. None of those also move the monitor along. Everything else
+  falls through to the page change above.
+- **A dialog claims everything inside it**, hit or miss. Missing a key on the
+  waypoint keypad would otherwise fall through as an unclaimed tap and move
+  the monitor to the next page, taking the panel away mid-entry.
 - Monitors big enough for a tab strip can be pressed on a tab to jump straight
   to that page.
 - **Auto-cycle** walks a monitor through its pages on a timer — per monitor,
@@ -1420,7 +1458,7 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 200 checks
+lua preview/smoke-test.lua .        # 204 checks
 lua preview/install-test.lua .      # 18 checks
 lua preview/render-preview.lua . preview
 ```
@@ -1478,6 +1516,16 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.23 - a waypoint can be keyed in on the flight page.** `[ EDIT ]` opens a
+keypad: three fields, ten digits, a sign and a backspace, seeded from the
+current waypoint or from where the ship is. It is a keypad rather than a text
+box because a monitor has no keyboard, and a bulkhead monitor is where the
+flight page mostly lives -- so one implementation works under a mouse and
+under a right-click, and cannot collide with the number keys that switch
+pages. `SET` needs an X and a Z, refuses anything less with the panel still
+up, and flies to what it wrote. The button appears only where the panel fits,
+which leaves a 1x1 exactly as it was.
 
 **v8.22 - "Alert within" means what it says, and six smaller things.** The
 alert range only ever gated the sound and the redstone pulse; the banner, the

@@ -779,12 +779,56 @@ local function readings(app, wide)
   return out
 end
 
+-- ----------------------------------------------------------- the waypoint ---
+-- Coordinates typed on the page itself, rather than three levels into the
+-- settings.
+--
+-- It is a KEYPAD, not a text box. A monitor has no keyboard, so a text field
+-- on one is a box you can look at and never fill in -- and a bulkhead monitor
+-- is where this page mostly lives. Everything goes through the same touch()
+-- handler the rest of the page uses, so one implementation works under a mouse
+-- on the terminal and under a right-click on a monitor, and neither can
+-- collide with the number keys that switch pages.
+
+local KEYPAD = { "7", "8", "9", "4", "5", "6", "1", "2", "3", "0", "-", "<" }
+local FIELDS = { "X", "Y", "Z" }
+
+-- Wide enough for the sign and seven digits, which is past the world border
+-- in every direction.
+local COORD_DIGITS = 8
+
+-- What the panel needs. Below this the button is not offered at all, rather
+-- than opening something that would draw off the edge -- which is what keeps a
+-- 1x1 monitor exactly as it was.
+view.EDITOR_WIDTH, view.EDITOR_HEIGHT = 22, 8
+
+function view.editorFits(w, h)
+  return not ui.isTiny(w) and w >= view.EDITOR_WIDTH and h >= view.EDITOR_HEIGHT
+end
+
+--- One keypad press against the text of one field.
+---@return string text
+function view.typeInto(text, key)
+  text = text or ""
+  if key == "<" then return text:sub(1, #text - 1) end
+  -- One press to make it negative and the same press to take it back, which
+  -- is a third of the presses a minus key you have to position would cost.
+  if key == "-" then
+    return (text:sub(1, 1) == "-") and text:sub(2) or ("-" .. text)
+  end
+  if #text >= COORD_DIGITS then return text end
+  return text .. key
+end
+
 function view.build(container, app, root)
   -- Where the pressable rows ended up, rebuilt on every draw. Recording them
   -- as the page is laid out is the only honest way to know what a tap at a
   -- given cell is pointing at: the rows move with the screen size, whether
   -- there is a destination at all, and which column the layout put it in.
   local hits = {}
+
+  -- { field = 1..3, values = { "120", "64", "-340" } } while the editor is up.
+  local editor = nil
 
   local canvas = container:addCanvas({
     x = 1, y = 1,
@@ -793,10 +837,75 @@ function view.build(container, app, root)
     background = theme.bg,
   })
 
+  --- The panel, which takes the whole page while it is open.
+  local function drawEditor(buf, w, h)
+    local left = 2
+    local fieldX, fieldW = left + 2, COORD_DIGITS + 1
+    local fieldEnd = fieldX + fieldW - 1
+    local buttonX = left + 12
+
+    buf:blit(left, 1, "WAYPOINT", theme.accent, theme.bg)
+    -- Beside the title rather than hard right, where it would read as a
+    -- separate thing floating in the empty half of a wide screen.
+    local hint = "a row, then the keys"
+    if w >= left + 10 + #hint then
+      buf:blit(left + 10, 1, hint, theme.line, theme.bg)
+    end
+
+    for index, name in ipairs(FIELDS) do
+      local y = 1 + index
+      local active = (index == editor.field)
+      local text = editor.values[index] or ""
+      local background = active and theme.panel or theme.bg
+
+      -- Which field the next digit lands in, said three ways: a caret, a
+      -- brighter label, and the box painted AS a box. On a non-advanced
+      -- monitor every colour flattens to the nearest of sixteen, so the one
+      -- that carries it there is the caret.
+      if active then buf:blit(left - 1, y, ">", theme.accent, theme.bg) end
+      buf:blit(left, y, name, active and theme.accent or theme.dim, theme.bg)
+      buf:fill(fieldX, y, fieldW, 1, " ", theme.text, background)
+      if #text > 0 then
+        buf:blit(fieldEnd - #text + 1, y, text,
+          active and theme.text or theme.dim, background)
+      end
+      hits[#hits + 1] = { x1 = left, x2 = fieldEnd, y = y, key = "field:" .. index }
+    end
+
+    for index, key in ipairs(KEYPAD) do
+      local row = math.floor((index - 1) / 3)
+      local column = (index - 1) % 3
+      local x, y = left + column * 3, 5 + row
+      if y <= h then
+        buf:blit(x + 1, y, key, theme.text, theme.panel)
+        hits[#hits + 1] = { x1 = x, x2 = x + 2, y = y, key = "pad:" .. key }
+      end
+    end
+
+    -- Y is optional, so SET stays live on two fields out of three; the height
+    -- is not used by a bearing and never was. See view.hasWaypoint.
+    local ready = tonumber(editor.values[1]) and tonumber(editor.values[3])
+    buf:blit(buttonX, 5, "[ SET ]", ready and theme.good or theme.dim, theme.bg)
+    hits[#hits + 1] = { x1 = buttonX, x2 = buttonX + 6, y = 5, key = "set" }
+
+    buf:blit(buttonX, 6, "[CANCEL]", theme.warn, theme.bg)
+    hits[#hits + 1] = { x1 = buttonX, x2 = buttonX + 7, y = 6, key = "cancel" }
+
+    if h >= 8 and w >= buttonX + 20 then
+      buf:blit(buttonX, 8, "Y is optional", theme.line, theme.bg)
+    end
+  end
+
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
     hits = {}
+
+    -- A screen that cannot hold the panel does not keep it open. Nothing
+    -- resizes at runtime, but a page rebuilt at another size would otherwise
+    -- draw half a dialog.
+    if editor and not view.editorFits(w, h) then editor = nil end
+    if editor then return drawEditor(buf, w, h) end
 
     local tiny = ui.isTiny(w)
     local model = app.flight
@@ -893,6 +1002,13 @@ function view.build(container, app, root)
       if not tiny then
         local swap = view.swapLabel(app.cfg)
         if swap then buttons[#buttons + 1] = { label = swap, key = "dest" } end
+        -- Typed coordinates, where there is room for the panel they open.
+        -- Left of MARK, so a narrowing screen drops this one first: MARK is a
+        -- single press and needs no room at all, which makes it the one worth
+        -- keeping on the smallest screen that has any buttons.
+        if view.editorFits(w, h) then
+          buttons[#buttons + 1] = { label = "[ EDIT ]", key = "edit" }
+        end
         buttons[#buttons + 1] = { label = "[ MARK ]", key = "mark" }
       end
 
@@ -955,7 +1071,7 @@ function view.build(container, app, root)
   --- Drops the waypoint where the pilot is standing, and flies to it. Setting
   --- it as the destination as well is what makes this readable on a monitor,
   --- which has no banner to tell you it worked: the panel changes to WPT in
-  --- front of you. Typed-in coordinates are still under Settings / Flight.
+  --- front of you. For somewhere you are NOT, press EDIT.
   local function markWaypoint()
     local pos = app.flight and app.flight.position
     if not pos then
@@ -974,22 +1090,107 @@ function view.build(container, app, root)
     return true
   end
 
+  --- Opens the editor on the waypoint, or on where the ship is when there is
+  --- none. Adjusting a coordinate you can see beats entering four digits from
+  --- memory, and on a keypad that is the difference between two presses and
+  --- eight.
+  local function openEditor()
+    local cfg = app.cfg
+    local pos = app.flight and app.flight.position
+    local function seed(value, fallback)
+      value = value or fallback
+      return value and tostring(floor(value)) or ""
+    end
+    editor = {
+      field = 1,
+      values = {
+        seed(cfg.flightX, pos and pos.x),
+        seed(cfg.flightY, pos and pos.y),
+        seed(cfg.flightZ, pos and pos.z),
+      },
+    }
+    canvas:markRenderDirty()
+    return true
+  end
+
+  local function closeEditor()
+    editor = nil
+    canvas:markRenderDirty()
+    return true
+  end
+
+  --- Commits what has been keyed in, and flies to it.
+  ---
+  --- X and Z make a place; the height is optional, exactly as it is under
+  --- Settings / Flight -- a bearing does not use it. Anything short of that is
+  --- refused with the panel left open, so the digits already entered are not
+  --- thrown away by a press that could not have worked.
+  local function commitEditor()
+    local cfg = app.cfg
+    local x, y, z = tonumber(editor.values[1]), tonumber(editor.values[2]),
+                    tonumber(editor.values[3])
+    if not (x and z) then
+      if root then root:toast("A waypoint needs an X and a Z", "warning") end
+      return true
+    end
+
+    cfg.flightX, cfg.flightZ = floor(x), floor(z)
+    cfg.flightY = y and floor(y) or nil
+    -- Flown to as well as stored, for the reason markWaypoint does it: on a
+    -- monitor there is no banner, and the panel changing to WPT is the only
+    -- confirmation there is.
+    cfg.flightTarget = "custom"
+    app:saveConfig()
+    if root then
+      root:toast(("Waypoint %d, %d"):format(cfg.flightX, cfg.flightZ), "success")
+    end
+    return closeEditor()
+  end
+
   return {
     refresh = function() canvas:markRenderDirty() end,
-    --- Three presses on this page. The destination -- either the row or the
+
+    -- Leaving the page puts the panel away. Coming back to a dialog somebody
+    -- opened four pages ago, over the instruments, is not what they wanted.
+    hidden = closeEditor,
+
+    --- Every press on this page. The destination -- either the row or the
     --- button beside the footer -- swaps between HOME and the waypoint, MARK
-    --- drops the waypoint where you are, and the A/P row engages the
-    --- autopilot. The last one is the reason the A/P row is drawn first: on a
-    --- 1x1 monitor it is the only switch there is.
+    --- drops the waypoint where you are, EDIT opens the keypad for somewhere
+    --- you are not, and the A/P row engages the autopilot. That last one is
+    --- why the A/P row is drawn first: on a 1x1 monitor it is the only switch
+    --- there is.
     touch = function(x, y)
       for _, hit in ipairs(hits) do
         if y == hit.y and x >= hit.x1 and x <= hit.x2 then
           if hit.key == "mark" then return markWaypoint() end
           if hit.key == "dest" then return swapDestination() end
           if hit.key == "auto" then return toggleAuto() end
+          if hit.key == "edit" then return openEditor() end
+          if hit.key == "set" then return commitEditor() end
+          if hit.key == "cancel" then return closeEditor() end
+
+          local field = hit.key:match("^field:(%d)$")
+          if field then
+            editor.field = tonumber(field)
+            canvas:markRenderDirty()
+            return true
+          end
+
+          local key = hit.key:match("^pad:(.)$")
+          if key then
+            editor.values[editor.field] =
+              view.typeInto(editor.values[editor.field], key)
+            canvas:markRenderDirty()
+            return true
+          end
         end
       end
-      return false
+
+      -- A press that hit nothing INSIDE the panel is still the panel's. On a
+      -- monitor an unclaimed tap moves to the next page, which would take the
+      -- dialog away mid-entry every time somebody missed a key.
+      return editor ~= nil
     end,
   }
 end

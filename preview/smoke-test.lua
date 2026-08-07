@@ -5778,6 +5778,167 @@ check("MARK drops the waypoint where the pilot is, and is not on a 1x1", functio
   cfg.flightTarget, cfg.flightX, cfg.flightY, cfg.flightZ = "home", nil, nil, nil
 end)
 
+check("keying a coordinate in: digits, sign and backspace", function()
+  local flight = modules.byId("flight")
+  local text = ""
+  for _, key in ipairs({ "1", "2", "3" }) do text = flight.typeInto(text, key) end
+  assert(text == "123", "digits append, got " .. text)
+
+  text = flight.typeInto(text, "-")
+  assert(text == "-123", "one press makes it negative, got " .. text)
+  text = flight.typeInto(text, "-")
+  assert(text == "123", "and the same press takes it back, got " .. text)
+
+  text = flight.typeInto(text, "<")
+  assert(text == "12", "backspace deletes, got " .. text)
+  text = flight.typeInto(flight.typeInto(text, "<"), "<")
+  assert(text == "", "down to nothing")
+  assert(flight.typeInto(text, "<") == "", "and stops there rather than erroring")
+
+  -- Past the world border in every direction, and it stops accepting rather
+  -- than storing a number the game could not have a block at.
+  local long = ""
+  for _ = 1, 12 do long = flight.typeInto(long, "9") end
+  assert(#long == 8, "eight digits is the limit, got " .. #long .. ": " .. long)
+end)
+
+check("the flight page takes typed waypoint coordinates", function()
+  local cfg = app.cfg
+  cfg.flightTarget = "home"
+  cfg.flightX, cfg.flightY, cfg.flightZ = nil, nil, nil
+  app.flight:reset()
+  for i = 0, 5 do
+    app.flight:sample({ x = 1000 + i * 4, y = 2200, z = -777,
+      dimension = "minecraft:overworld" }, CLOCK + i)
+  end
+
+  local view = terminalRoot.views.flight
+  local drawn = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(drawn:find("[ EDIT ]", 1, true), "the button is drawn:\n" .. drawn)
+
+  -- The footer lays out from the right: MARK at 44-51, EDIT at 36-43.
+  assert(view.touch(40, 17), "pressing EDIT was claimed")
+
+  local panel = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(panel:find("WAYPOINT", 1, true), "the panel opened:\n" .. panel)
+  assert(panel:find("[ SET ]", 1, true), "with a way to commit it")
+  assert(panel:find("[CANCEL]", 1, true), "and a way out")
+  assert(not panel:find("SPD", 1, true), "and it has the page to itself")
+
+  -- Seeded from where the ship is, since there is no waypoint to edit yet:
+  -- on a keypad, adjusting a number you can see is worth several presses.
+  assert(panel:find("1020", 1, true), "seeded with the position:\n" .. panel)
+  assert(panel:find("-777", 1, true), "all three of them")
+
+  --- The keypad, laid out 7-8-9 / 4-5-6 / 1-2-3 / 0 - < from (2,5).
+  local KEY_AT = {
+    ["7"] = { 3, 5 }, ["8"] = { 6, 5 }, ["9"] = { 9, 5 },
+    ["4"] = { 3, 6 }, ["5"] = { 6, 6 }, ["6"] = { 9, 6 },
+    ["1"] = { 3, 7 }, ["2"] = { 6, 7 }, ["3"] = { 9, 7 },
+    ["0"] = { 3, 8 }, ["-"] = { 6, 8 }, ["<"] = { 9, 8 },
+  }
+  local function key(k)
+    local at = KEY_AT[k]
+    assert(view.touch(at[1], at[2]), "pressing " .. k .. " was claimed")
+  end
+  local function field(index) assert(view.touch(3, 1 + index), "picking a field") end
+
+  -- X: clear the seeded 1020 and key in -500.
+  for _ = 1, 4 do key("<") end
+  key("5"); key("0"); key("0"); key("-")
+
+  -- Z: clear -777 and key in 123.
+  field(3)
+  for _ = 1, 4 do key("<") end
+  key("1"); key("2"); key("3")
+
+  local typed = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(typed:find("-500", 1, true), "what was keyed in shows:\n" .. typed)
+  assert(typed:find("123", 1, true), "in both fields")
+
+  assert(view.touch(16, 5), "pressing SET was claimed")
+  assert(cfg.flightX == -500 and cfg.flightZ == 123,
+    "the waypoint is where it was keyed, got "
+      .. tostring(cfg.flightX) .. ", " .. tostring(cfg.flightZ))
+  assert(cfg.flightY == 2200, "with the seeded height left alone")
+  assert(cfg.flightTarget == "custom",
+    "and the panel flies to it, so a monitor shows that it worked")
+
+  local closed = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(closed:find("SPD", 1, true), "the panel closed behind it:\n" .. closed)
+  assert(not closed:find("WAYPOINT", 1, true), "and the instruments are back")
+
+  cfg.flightTarget, cfg.flightX, cfg.flightY, cfg.flightZ = "home", nil, nil, nil
+end)
+
+check("the waypoint panel refuses half a place, and can be walked away from", function()
+  local cfg = app.cfg
+  cfg.flightTarget = "home"
+  cfg.flightX, cfg.flightY, cfg.flightZ = 11, 22, 33
+  local view = terminalRoot.views.flight
+
+  drawPage(terminalRoot, "flight", 51, 19)
+  assert(view.touch(40, 17), "opened")
+
+  -- Empty the X. A waypoint needs an X and a Z to be a place at all.
+  for _ = 1, 8 do assert(view.touch(9, 8), "backspace") end
+  assert(view.touch(16, 5), "pressing SET was still claimed")
+  assert(cfg.flightX == 11, "nothing was written, got " .. tostring(cfg.flightX))
+
+  local open = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(open:find("WAYPOINT", 1, true),
+    "and the panel stayed up, so the digits already keyed are not lost:\n" .. open)
+
+  -- A press that lands on nothing INSIDE the panel is still the panel's: on a
+  -- monitor an unclaimed tap moves to the next page, which would take the
+  -- dialog away every time somebody missed a key.
+  assert(view.touch(40, 12), "a miss inside the panel is swallowed")
+
+  assert(view.touch(16, 6), "pressing CANCEL was claimed")
+  local closed = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(not closed:find("WAYPOINT", 1, true), "which puts it away:\n" .. closed)
+  assert(cfg.flightX == 11 and cfg.flightY == 22 and cfg.flightZ == 33,
+    "leaving the waypoint exactly as it was")
+
+  -- Leaving the page puts it away too, rather than keeping a dialog open over
+  -- the instruments until somebody comes back to it.
+  drawPage(terminalRoot, "flight", 51, 19)
+  assert(view.touch(40, 17), "opened again")
+  terminalRoot:setPage("status", false)
+  local back = table.concat(drawPage(terminalRoot, "flight", 51, 19).texts, "|")
+  assert(not back:find("WAYPOINT", 1, true), "gone on the way back:\n" .. back)
+
+  cfg.flightTarget, cfg.flightX, cfg.flightY, cfg.flightZ = "home", nil, nil, nil
+end)
+
+check("a 1x1 flight screen is left exactly as it was", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local flight = modules.byId("flight")
+
+  -- Fifteen cells is below the panel's width, so the button is never offered
+  -- and there is nothing a press could open.
+  assert(not flight.editorFits(15, 9), "a 1x1 cannot hold the panel")
+  assert(not flight.editorFits(51, 6), "nor can a short one")
+  assert(flight.editorFits(51, 17), "a terminal can")
+
+  local tiny = tinyScreen(monitorRoot, "flight")
+  assert(not tiny.text:find("EDIT", 1, true),
+    "no button on a fifteen-cell screen:\n" .. tiny.text)
+  assert(tiny.text:find("SPD", 1, true), "and the instruments are all it draws")
+  assert(#tiny.overflow == 0, "with nothing off the edge")
+
+  -- Every row of the panel would have to fit, and none of them can: pressing
+  -- where the button would be on a bigger screen still does nothing here.
+  local view = monitorRoot.views.flight
+  local before = tinyScreen(monitorRoot, "flight").text
+  view.touch(12, 9)
+  assert(tinyScreen(monitorRoot, "flight").text == before,
+    "a press where the button is not changes nothing")
+end)
+
 ------------------------------------------------------------ the alert log --
 
 check("the alert log takes alarms as well as arrivals", function()

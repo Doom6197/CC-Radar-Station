@@ -1126,6 +1126,8 @@ view.GROUPS = {
       ctx.note("A name on CONTACTS becomes the flight destination.", true)
       ctx.note("The destination on FLIGHT swaps HOME and the waypoint.", true)
       ctx.note("MARK on FLIGHT drops the waypoint where you are.", true)
+      ctx.note("EDIT on FLIGHT keys a waypoint in on a keypad.", true)
+      ctx.note("RESET on POWER starts the graph again.", true)
       ctx.spacer()
     end,
   },
