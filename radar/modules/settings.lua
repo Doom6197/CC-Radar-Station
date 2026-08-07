@@ -259,15 +259,20 @@ view.GROUPS = {
   {
     id = "tracking",
     title = "TRACKING",
+    -- Reports whichever of the three modes is set. It used to test
+    -- `cfg.mode ~= "fixed"`, and there has been no mode called "fixed" since
+    -- v8.19 renamed them -- so the index called every station SELF, including
+    -- one sitting on its base coordinates.
     summary = function(app, narrow)
       local cfg = app.cfg
-      if cfg.mode ~= "fixed" then
-        if narrow then return "SELF" end
-        return "SELF - " .. (cfg.myName or "no username set")
+      local label = config.modeLabel(cfg, true)
+      if not config.tracksBase(cfg) then
+        if narrow or not config.tracksPlayer(cfg) then return label end
+        return label .. " - " .. (cfg.myName or "no username set")
       end
-      if not cfg.baseX then return "FIXED - base not set" end
-      if narrow then return ("FIXED %d, %d"):format(cfg.baseX, cfg.baseZ or 0) end
-      return ("FIXED   %d, %d, %d"):format(cfg.baseX, cfg.baseY or 0, cfg.baseZ or 0)
+      if not cfg.baseX then return label .. " - base not set" end
+      if narrow then return ("%s %d, %d"):format(label, cfg.baseX, cfg.baseZ or 0) end
+      return ("%s   %d, %d, %d"):format(label, cfg.baseX, cfg.baseY or 0, cfg.baseZ or 0)
     end,
     build = function(ctx)
       local app, root, cfg = ctx.app, ctx.root, ctx.app.cfg
@@ -655,6 +660,19 @@ view.GROUPS = {
           end)
       end)
 
+      -- Always shown: it is the line that says these two ranges are different
+      -- questions, which is the thing that was not obvious when one of them
+      -- was quietly answering for both.
+      ctx.note(("Nothing past this makes a sound, flashes a screen, pops a "
+        .. "banner or moves the redstone line. Separate from the scan range "
+        .. "(%s), which only decides how far the station LOOKS."):format(
+          config.rangeLabel(cfg)), true)
+
+      if config.alertRange(cfg) > config.range(cfg) then
+        ctx.note("Wider than the scan range, so it never comes into play - "
+          .. "everything found is already inside it.", true)
+      end
+
       ctx.row("Screen flash", function() return ctx.onOff(cfg.flash) end, function()
         cfg.flash = not cfg.flash
         app:saveConfig()
@@ -665,13 +683,15 @@ view.GROUPS = {
         app:saveConfig()
       end, ctx.onOffColor(function() return cfg.toast end))
 
-      ctx.row("Unread chime", function() return ctx.onOff(cfg.chime) end, function()
-        cfg.chime = not cfg.chime
-        app:saveConfig()
-      end, ctx.onOffColor(function() return cfg.chime end))
+      ctx.row("Chime beyond", function() return ctx.onOff(cfg.chimeBeyond) end,
+        function()
+          cfg.chimeBeyond = not cfg.chimeBeyond
+          app:saveConfig()
+        end, ctx.onOffColor(function() return cfg.chimeBeyond end))
 
-      ctx.note("One note when something goes in the alert log without setting "
-        .. "the alarm off - an arrival outside the alert range, mostly.")
+      ctx.note("One quiet note for somebody who turned up inside the scan "
+        .. "range but outside the alert range. Off, so the range above means "
+        .. "what it says; on, if you would rather know either way.")
       ctx.spacer()
 
       -- sound -----------------------------------------------------------------
@@ -1081,7 +1101,7 @@ view.GROUPS = {
         { "Up / Dn", "scan range up / down",          "range up/down" },
         { "R",       "rotate the picture 45 deg",     "rotate 45 deg" },
         { "L",       "lock / unlock the orientation", "lock/unlock scope" },
-        { "T",       "FIXED / SELF tracking",         "FIXED / SELF" },
+        { "T",       "next tracking mode",            "tracking mode" },
         { "A",       "mute or unmute alerts",         "mute alerts" },
         { "P",       "test the alert sound",          "test the sound" },
         { "N",       "ignore the nearest contact",    "ignore nearest" },
@@ -1125,6 +1145,8 @@ function view.moduleGroup(entry)
   return {
     id = MODULE_PREFIX .. entry.id,
     title = entry.title,
+    -- PAGES is the only way in, so it is where back goes.
+    parent = "pages",
     module = entry,
     build = function(ctx)
       local app, root, cfg = ctx.app, ctx.root, ctx.app.cfg
@@ -1569,8 +1591,24 @@ function view.build(container, app, root)
     end, theme.alarm)
   end
 
+  --- One screen: where you are, the way back, then the group itself.
+  ---
+  --- The back button used to be labelled with the group you were IN and always
+  --- returned to the index, so from PAGES / POWER one press threw away two
+  --- levels and the button named neither of them. It names its DESTINATION
+  --- now and goes exactly one level up, with the trail above it saying where
+  --- that is from -- which is also the only thing on a module screen that
+  --- names the module before its own settings start.
   local function buildGroup(group)
-    action("<  " .. group.title, function() openGroup(nil) end)
+    local parent = group.parent and view.groupById(group.parent) or nil
+    -- A narrow screen gets the group name alone. The button under it already
+    -- names the way back, and a full trail wraps onto two lines of a 26-cell
+    -- pocket screen to say something the next row is about to say anyway.
+    note(narrow and group.title or ("SETTINGS / %s%s"):format(
+      parent and (parent.title .. " / ") or "", group.title), true)
+    action("<  " .. (parent and parent.title or "SETTINGS"), function()
+      openGroup(parent and parent.id or nil)
+    end)
     spacer()
     local ok, err = pcall(group.build, ctx)
     if not ok then

@@ -286,8 +286,14 @@ function view.build(container, app)
     end
 
     -- Footer hint, only where there is room for it.
+    --
+    -- M and H were advertised here and bound to nothing: there has never been
+    -- a settings key -- settings is a page, reached by its number like every
+    -- other -- and the help never existed at all. A shortcut list is only
+    -- worth having if pressing what is on it does something.
     if h >= 8 and w >= 40 then
-      local hint = "1-6 pages   M settings   H help   Q quit"
+      local hint = ("1-%d pages   T tracking   L lock   Q quit"):format(
+        math.min(9, #config.terminalPages(app.cfg)))
       buf:blit(max(1, w - #hint), h, util.shorten(hint, w - 1), theme.line, theme.bg)
     end
 

@@ -22,7 +22,7 @@ local function modules() return require("radar.modules") end
 
 local config = {}
 
-config.VERSION = "8.21"
+config.VERSION = "8.22"
 
 config.FILES = {
   cfg    = "radar.cfg",
@@ -57,6 +57,64 @@ config.RANGES = {
 config.MAX_RANGE_INDEX = #config.RANGES
 
 config.SCAN_INTERVALS = { 0.5, 1, 2, 3, 5 }
+
+-- ------------------------------------------------------------------ icons ---
+-- What a contact is drawn as on the scope.
+--
+-- Every blip is a dot, which is the right answer until two of the six people
+-- on the server matter more than the other four. A name can be given a symbol
+-- of its own, and then the picture says WHO as well as where -- without a
+-- label beside every blip, which is what a fifteen-cell screen cannot afford.
+--
+-- Stored against the NAME rather than against a contact, because a contact
+-- only exists while somebody is in range and the whole point of the setting is
+-- to still be there when they come back.
+config.ICONS = {
+  { id = "dot",     label = "Dot",     hint = "the default blip" },
+  { id = "star",    label = "Star",    symbol = "*" },
+  { id = "plus",    label = "Plus",    symbol = "+" },
+  { id = "cross",   label = "Cross",   symbol = "x" },
+  { id = "ring",    label = "Ring",    symbol = "o" },
+  { id = "block",   label = "Block",   symbol = "#" },
+  { id = "at",      label = "At",      symbol = "@" },
+  { id = "arrow",   label = "Arrow",   symbol = "^" },
+  { id = "bang",    label = "Bang",    symbol = "!" },
+  { id = "query",   label = "Query",   symbol = "?" },
+  { id = "money",   label = "Money",   symbol = "$" },
+  { id = "percent", label = "Percent", symbol = "%" },
+  { id = "amp",     label = "And",     symbol = "&" },
+  { id = "equals",  label = "Equals",  symbol = "=" },
+  { id = "initial", label = "Initial", hint = "the first letter of the name" },
+}
+
+function config.icon(id)
+  for _, entry in ipairs(config.ICONS) do
+    if entry.id == id then return entry end
+  end
+  return config.ICONS[1]
+end
+
+--- How an icon reads in a list: the symbol itself where there is one, so the
+--- picker shows what the scope will actually draw.
+function config.iconLabel(entry)
+  if entry.symbol then return ("%s   %s"):format(entry.symbol, entry.label) end
+  return entry.label
+end
+
+--- The character a name is drawn as, or nil for the ordinary dot.
+---@return string|nil symbol One cell wide
+function config.iconFor(cfg, name)
+  local id = (type(cfg.icons) == "table") and cfg.icons[name] or nil
+  if not id then return nil end
+  local entry = config.icon(id)
+  if entry.symbol then return entry.symbol end
+  -- INITIAL is not a fixed character, so it is resolved here rather than
+  -- stored: renaming nobody, it still follows whoever it was set against.
+  if entry.id == "initial" and type(name) == "string" and #name > 0 then
+    return name:sub(1, 1):upper()
+  end
+  return nil
+end
 
 -- ------------------------------------------------------------------- pages ---
 -- The page list is whatever modules are registered and enabled, so it changes
@@ -312,8 +370,16 @@ function config.defaults()
     alert     = true,                    -- master alert switch
     flash     = true,                    -- flash every screen red
     toast     = true,                    -- pop a banner on the terminal
-    chime     = true,                    -- one note when something goes unread
     dimFilter = true,                    -- hide players in other dimensions
+
+    -- One quiet note for an arrival too far away to be worth an alert. OFF:
+    -- "alert within 1000" has to mean silence at 1001, or the setting is a
+    -- suggestion rather than a limit. See app:processDetections.
+    chimeBeyond = false,
+
+    -- Scope symbol per player name; see config.ICONS. Anyone not in here is
+    -- an ordinary dot, which is nearly everybody.
+    icons = {},
 
     env        = true,                   -- poll the environment detector
     envSeconds = 2,                      -- how often, in seconds
@@ -481,8 +547,21 @@ function config.sanitise(cfg)
     cfg.pairedBaseName = nil
   end
 
-  cfg.tapCycle = cfg.tapCycle ~= false
-  cfg.chime    = cfg.chime ~= false
+  cfg.tapCycle    = cfg.tapCycle ~= false
+  cfg.chimeBeyond = cfg.chimeBeyond == true
+
+  -- Per-name scope symbols. Only names carrying an id that still exists: one
+  -- written by a later version is dropped rather than drawn as a blank cell.
+  local icons = {}
+  if type(cfg.icons) == "table" then
+    for name, id in pairs(cfg.icons) do
+      if type(name) == "string" and type(id) == "string"
+         and id ~= "dot" and indexOfId(config.ICONS, id) then
+        icons[name] = id
+      end
+    end
+  end
+  cfg.icons = icons
 
   -- A profile that no longer exists -- an install rolled back, or a file
   -- carried over from a fork -- is forgotten rather than obeyed. The station
@@ -596,6 +675,13 @@ end
 
 local function migrate(cfg)
   migratePages(cfg)
+
+  -- `chime` was one note for an arrival OUTSIDE the alert range, and it was on
+  -- by default -- which is most of why "Alert within 1k" still made a noise at
+  -- 10k. The replacement asks a narrower question and answers no by default,
+  -- so the old key is DROPPED rather than carried across: an operator who had
+  -- it on had never been offered the choice this one is offering.
+  cfg.chime = nil
 
   if cfg.termStyleIndex and not config.isPage(cfg, cfg.terminalPage) then
     cfg.terminalPage = V3_STYLE_TO_PAGE[tonumber(cfg.termStyleIndex) or 5] or "status"

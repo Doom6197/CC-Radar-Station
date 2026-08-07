@@ -53,7 +53,12 @@ function logbook:push(entry)
 end
 
 --- Records a contact. Called once per player, when they first appear.
-function logbook:add(contact)
+---
+--- `quiet` writes it down as already seen: it happened, it is on the page, and
+--- it does not put the unread marker on every screen in the station. That is
+--- what an arrival outside the ALERT range gets -- still scanned, still
+--- recorded, just not shouted about. See app:processDetections.
+function logbook:add(contact, quiet)
   return self:push({
     kind = "contact",
     time = timestamp(),
@@ -62,6 +67,7 @@ function logbook:add(contact)
     zone = theme.zoneFor(contact.dist),
     dir  = util.directionOf(contact.dx, contact.dz),
     dim  = contact.dim,
+    seen = quiet or nil,
   })
 end
 

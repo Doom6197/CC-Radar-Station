@@ -23,7 +23,7 @@ over rednet — along with energy readings collected from any number of
 - [Install](#install)
 - [Hardware](#hardware)
 - [Profiles](#profiles) — base, pocket, airship
-- [Pages](#pages)
+- [Pages](#pages) — and a symbol per contact on the scope
 - [Settings](#settings) — the index, and why it is two levels
 - [Modules](#modules) — the plugin system, and how to write one
 - [Flight](#flight) — speed, climb and course from the pilot's position, and the autopilot
@@ -31,7 +31,7 @@ over rednet — along with energy readings collected from any number of
 - [Weather and backdrops](#weather-and-backdrops)
 - [Orientation](#orientation-locked-or-unlocked)
 - [The network: main base, mobiles and power clients](#the-network-main-base-mobiles-and-power-clients)
-- [Alerts and the alert log](#alerts-and-the-alert-log) — and the unread marker
+- [Alerts and the alert log](#alerts-and-the-alert-log) — the unread marker, and what "alert within" covers
 - [Keyboard and monitors](#keyboard-and-monitors)
 - [Project layout](#project-layout)
 - [Development](#development)
@@ -167,12 +167,12 @@ state — so it is a report on the station as much as it is a menu. Pressing one
 fills the page with that group.
 
 ```
- SETTINGS   v8.21                                    |  SETTINGS   v8.21
+ SETTINGS   v8.22                                    |  SETTINGS   v8.22
  -------------------------------------------------  |  ---------------------
  STATION       MAIN BASE "Hangar"                   |  STATION
- TRACKING      FIXED   120, 64, -340                |  MAIN BASE
+ TRACKING      BASE   120, 64, -340                 |  MAIN BASE
  SCANNING      10k   every 1s   1 ignored           |  TRACKING
- SCOPE         locked - 45 deg, NE up               |  FIXED 120, -340
+ SCOPE         locked - 45 deg, NE up               |  BASE 120, -340
  ALERTS        ON   sound, flash, banner, redstone  |  SCANNING
  DISPLAYS      terminal: status   1 monitor         |  10k   1s
  PAGES         9 of 9 on                            |  SCOPE
@@ -187,7 +187,7 @@ fills the page with that group.
 | **Tracking** | your username, the tracking mode, the base coordinates, follow base, the ship's heading trim |
 | **Scanning** | range, sweep rate, other worlds, the ignore list |
 | **Scope** | locked or unlocked, bearing up, heading steps and rate, eased turns, animation |
-| **Alerts** | master, alert range, flash, banner, chime, the sound, the redstone line |
+| **Alerts** | master, alert range, flash, banner, chime beyond, the sound, the redstone line |
 | **Displays** | this page's layout and hints, the terminal page, every monitor |
 | **Pages** | which modules are on — and each module's own settings, one press further |
 | **Keyboard** | the shortcut list and what a monitor tap does |
@@ -209,6 +209,21 @@ pressing it opens a screen holding its switch *and* its settings — so
 `Power ON` and the power thresholds are finally in the same place. A module
 that is switched off keeps its screen, so there is somewhere to turn it back
 on from.
+
+Every screen opens with the trail it is on and a button naming where **back**
+goes, which is **one level**:
+
+```
+ SETTINGS / PAGES / POWER
+ <  PAGES
+
+ Module        ON
+ ...
+```
+
+Before v8.22 that button was labelled with the group you were already *in* and
+returned to the index whatever depth you were at — so from `PAGES / POWER` one
+press threw away two levels and the button named neither of them.
 
 ### Hints
 
@@ -235,7 +250,7 @@ That is automatic, and **Settings → Displays → Layout** overrides it either 
 | Key | Page | What it shows |
 |---|---|---|
 | `1` | **Status** | Everything at a glance: profile, base, your position, ranges, alerts, sound, redstone, power, hardware, environment, contacts, recent alerts |
-| `2` | **Radar** | Polar scope with range rings, a rotating sweep, and colour-coded blips |
+| `2` | **Radar** | Polar scope with range rings, a rotating sweep, and colour-coded blips — or a symbol per contact, see [Contact icons](#contact-icons) |
 | `3` | **Flight** | Speed, climb rate, heading, course, altitude and the way home |
 | `4` | **Contacts** | Table of every contact — distance, bearing, altitude, band, position, health |
 | `5` | **Weather** | Live sky and biome scenery, big clock, day number, moon phase, light levels |
@@ -246,6 +261,33 @@ That is automatic, and **Settings → Displays → Layout** overrides it either 
 The number keys follow the tab strip rather than a fixed table, so switching a
 module off does not leave a hole in the numbering. Monitors can show any page
 except Settings — a monitor has no keyboard, and that page is mostly typing.
+
+### Contact icons
+
+Every blip is a dot, which is the right answer until two of the six people on
+the server matter more than the other four. **Settings → Pages → Contacts →
+Icons** gives a name a symbol of its own, and the scope draws that instead:
+
+```
+        N                    * is Noobido, x is whoever
+     .  x                    keeps turning up at the mine
+   .    |
+ W -----+----- E             the colour still says how close:
+        |                    red under 50m, amber under 150,
+     *  .                    teal under 300, grey beyond
+        S
+```
+
+The symbol says **who**, the colour goes on saying **how close**, and neither
+costs a label beside the blip — which is what a fifteen-cell screen cannot
+afford. `Initial` is resolved from the name rather than stored, so it follows
+whoever it was set against.
+
+Anyone the station has ever detected is on the list, and so is anyone already
+holding an icon — a symbol set against somebody who has since logged off would
+otherwise be impossible to change back. Icons are stored against the **name**,
+not against a contact, because a contact only exists while they are in range
+and the point of the setting is to still be there when they come back.
 
 ### On a 1×1 monitor
 
@@ -260,9 +302,10 @@ a glance.
 |---|---|
 | **Status** | link, contacts, speed, altitude, power, time, alerts — the things that change on their own. The range, tracking mode and bearing-up are settings, and settings do not surprise you |
 | **Flight** | all eight instruments; it is designed for this size first |
+| **Radar** | the scope, the compass and the heading. The range label and the ring size are settings, and they sat over the top left quarter of the picture |
 | **Contacts** | names and distances, hard against both edges |
 | **Weather** | six rows of sky, then clock, conditions, biome — and the buffer percentage hard right, when there is a power reading to have |
-| **Power** | percentage, gauge, net rate, and the rest given to the graph |
+| **Power** | percentage, gauge, net rate, and the rest given to the graph. No `[ RESET ]`: nine cells of button is most of the screen |
 | **Alerts** | clock and what happened, nine entries deep |
 
 ```
@@ -1256,17 +1299,29 @@ does it explicitly, and `C` clears the whole log.
 Unread state is stored on the entry rather than as a running total, so a
 restart cannot lose track of which ones had been seen.
 
-### The chime
+### Alert within, and what is beyond it
 
-An arrival **outside the alert range** is logged but does not set the alarm
-off, and without a sound the first anyone knows of it is the next time they
-happen to look at a screen. So anything that goes unread **without** ringing
-the alarm gets one note, once, at half volume — *Settings → Alerts → Unread
-chime*.
+Two ranges, two questions. **Scan range** decides how far the station *looks*;
+**alert within** decides how close something has to be before it *says*
+anything. Set the first to `10k` and the second to `1k` and a player appearing
+eight kilometres out is drawn on the scope, listed on CONTACTS and written to
+the alert log — silently. Nothing sounds, nothing flashes, no banner, and the
+redstone line does not move.
 
-It never doubles up: if the alarm fired for that same event, the chime does
-not. A muted station is silent either way — muting silences the alarm, it does
-not mean the entry is not written down.
+Everything the station shouts through reads that one range, through
+`alerts:within()`, which hands its caller the arrivals it may shout about and
+the ones it may not. Before v8.22 only the sound and the redstone pulse asked;
+the banner and the chime were fired against the whole arrival list, so the
+setting looked broken because from where the operator sat it was.
+
+An arrival beyond the range is logged **as already seen**, so it does not put
+the `!` marker on every screen in the station either. It is a record of who
+came past, which is worth keeping and is not worth interrupting anybody about.
+
+**Chime beyond** — *Settings → Alerts* — gives those one quiet note if you
+would rather know either way. It is **off** by default: an alert range that
+makes a noise past itself is not a range. A muted station is silent whatever
+this says.
 
 ---
 
@@ -1278,7 +1333,7 @@ Left/Right previous / next page
 Up/Down    scan range up / down
 R          rotate the picture 45 degrees
 L          lock / unlock the scope orientation
-T          toggle FIXED / SELF tracking
+T          next tracking mode: BASE, PLAYER, SHIP
 A          mute or unmute alerts
 P          test the alert sound
 N          ignore the nearest contact
@@ -1294,9 +1349,10 @@ Monitors have no keyboard, so the screen is the control:
   **Settings → Displays → Tap to change**.
 - **A page gets first refusal on a tap.** Pressing a name on CONTACTS makes
   them the flight destination; pressing the destination on FLIGHT swaps
-  between `HOME` and the waypoint, and `[ MARK ]` drops the waypoint where you
-  are. None of those also move the monitor along. Everything else falls
-  through to the page change above.
+  between `HOME` and the waypoint, `[ MARK ]` drops the waypoint where you
+  are, and `[ RESET ]` on POWER starts the graph again. None of those also
+  move the monitor along. Everything else falls through to the page change
+  above.
 - Monitors big enough for a tab strip can be pressed on a tab to jump straight
   to that page.
 - **Auto-cycle** walks a monitor through its pages on a timer — per monitor,
@@ -1364,8 +1420,8 @@ Only `radar.lua` and `radar/` end up on the computer.
 Everything runs on a desktop Lua 5.x, with no Minecraft and no network:
 
 ```
-lua preview/smoke-test.lua .        # 139 checks
-lua preview/install-test.lua .      # 16 checks
+lua preview/smoke-test.lua .        # 200 checks
+lua preview/install-test.lua .      # 18 checks
 lua preview/render-preview.lua . preview
 ```
 
@@ -1422,6 +1478,22 @@ everything still renders, just flatter.
 ---
 
 ## Version history
+
+**v8.22 - "Alert within" means what it says, and six smaller things.** The
+alert range only ever gated the sound and the redstone pulse; the banner, the
+chime and the unread marker were fired against every arrival the sweep found,
+so a station scanning 10k blocks announced somebody at 10k with the range set
+to 1k. One function splits an arrival list by that range now and every channel
+reads it, with anything beyond written to the log and left there quietly. The
+old `chime` setting -- one note for an arrival outside the alert range, ON by
+default -- is `Chime beyond`, off, because a range that makes a noise past
+itself is not a range. Back from a module's settings goes ONE level, to PAGES
+rather than to the index, with a trail above it saying where you are. Contacts
+can be given a **symbol of their own** on the scope, set from CONTACTS, still
+coloured by distance. The power page has a RESET for its graph, where you are
+when you want it. A 1x1 radar drops the range readout that covered the top left
+quarter of the picture with two settings that do not change on their own. And
+the status footer no longer advertises M and H, which were bound to nothing.
 
 **v8.21 - the heading stops flickering between the ship and the pilot.** A
 relayed sweep wrote the PILOT's bearing straight into the heading on arrival,

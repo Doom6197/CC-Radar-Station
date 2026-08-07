@@ -50,15 +50,15 @@ function alerts:queue()
   self.sound.nextAt = 0            -- fire on the next tick
 end
 
---- One note, once, at half volume: "there is something unread", as opposed to
---- the alarm's repeated burst of "something is happening now".
+--- One note, once, at half volume: "somebody came past", as opposed to the
+--- alarm's repeated burst of "something is happening now".
 ---
---- This is what an arrival OUTSIDE the alert range gets. It goes in the log
---- and puts the marker in every header, and without a chime the first anyone
---- would know of it is the next time they happened to look at a screen.
+--- This is what an arrival OUTSIDE the alert range gets, and only if it has
+--- been asked for -- see cfg.chimeBeyond. Off by default, because an alert
+--- range means nothing if the station makes a noise past it anyway.
 ---@return boolean played
 function alerts:chime()
-  if not self.cfg.alert or not self.cfg.chime then return false end
+  if not self.cfg.alert or not self.cfg.chimeBeyond then return false end
   if not self.cfg.sound.enabled or #self.kit.speakers == 0 then return false end
   local s = config.sound(self.cfg)
   local played = false
@@ -180,20 +180,39 @@ function alerts:fire(reason)
   return true
 end
 
+--- Splits arrivals into the ones close enough to be worth shouting about and
+--- the ones that are not. THE one place that asks the alert range.
+---
+--- Two separate questions used to share one answer. The scan range decides who
+--- is worth WATCHING and the alert range decides who is worth SHOUTING about,
+--- and only this second one was ever consulted -- by trigger(), for the sound
+--- and the redstone pulse. The banner and the chime were fired by the caller
+--- against the whole arrival list, so a station sweeping 10k blocks popped a
+--- banner and rang a note at 10k however low the alert range was set. Handing
+--- the caller two lists is what stops there being a channel that forgot to ask.
+---@return table near, table far
+function alerts:within(contacts)
+  local limit = config.alertRange(self.cfg)
+  local near, far = {}, {}
+  for _, contact in ipairs(contacts or {}) do
+    local list = (contact.dist <= limit) and near or far
+    list[#list + 1] = contact
+  end
+  return near, far
+end
+
 --- Fires every enabled alert channel for a set of newly arrived contacts.
+--- Anything outside the alert range is ignored, whether or not the caller
+--- filtered it out first.
 function alerts:trigger(newContacts)
   if not self.cfg.alert then return false end
 
-  local inRange = false
-  local limit = config.alertRange(self.cfg)
-  for _, contact in ipairs(newContacts) do
-    if contact.dist <= limit then inRange = true break end
-  end
-  if not inRange then return false end
+  local near = self:within(newContacts)
+  if #near == 0 then return false end
 
   self:pulse()
   self:queue()
-  if self.onFlash then self.onFlash(newContacts) end
+  if self.onFlash then self.onFlash(near) end
   return true
 end
 

@@ -264,14 +264,29 @@ function app:processDetections(contacts, hadError)
   end
   if #arrivals == 0 then return end
 
-  for _, contact in ipairs(arrivals) do self.log:add(contact) end
-  -- An arrival outside the alert range is logged but does not set the alarm
-  -- off. It still went unread, so it still gets the chime -- otherwise the
-  -- first anyone knows of it is the next time they happen to look at a screen.
-  local sounded = self.alerts:trigger(arrivals)
-  if not sounded then self.alerts:chime() end
+  -- ALERT WITHIN decides what is worth shouting about; the SCAN RANGE decides
+  -- what is worth watching. Every channel is gated on the first of those now.
+  -- The sound and the redstone pulse always were, but the banner and the chime
+  -- were fired against the whole arrival list -- so a station sweeping 10k
+  -- blocks announced somebody at 10k with the alert range set to 1k, which
+  -- made the setting look broken because from where the operator sat it was.
+  local near, far = self.alerts:within(arrivals)
+
+  -- Everything is written down, in the order it was found. The ALERTS page is
+  -- a record of who came past and that is worth keeping either way; what the
+  -- range decides is whether the entry SAYS anything -- a far one goes in
+  -- already marked seen, so it does not put the ! on every screen in the
+  -- station for somebody nine kilometres off.
+  local quiet = {}
+  for _, contact in ipairs(far) do quiet[contact] = true end
+  for _, contact in ipairs(arrivals) do self.log:add(contact, quiet[contact]) end
+  if #far > 0 then self.alerts:chime() end
+
   self:emit("log")
-  self:emit("contact", arrivals)
+  if #near > 0 then
+    self.alerts:trigger(near)
+    self:emit("contact", near)
+  end
 end
 
 --- Raises an alarm about something that is not a contact: a power buffer
@@ -287,8 +302,10 @@ function app:alarm(text, source)
   -- Logged whether or not the station is muted: muting silences the alarm,
   -- it does not mean the thing did not happen.
   self.log:alarm(text, source)
+  -- No chime fallback: an alarm has no distance, so there is no "too far to
+  -- shout about" case for it to fall into. fire() returns false only when the
+  -- station is muted, and a muted station stays muted.
   local fired = self.alerts:fire(text)
-  if not fired then self.alerts:chime() end
   self:emit("log")
   return fired
 end

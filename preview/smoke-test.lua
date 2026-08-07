@@ -5076,7 +5076,15 @@ check("a module's switch and its settings are finally on one screen", function()
   assert(has(own, "Module"), "with its ON/OFF switch at the top")
   assert(has(own, "Threshold"), "and its own row")
   assert(has(own, tostring(app.cfg.addonThreshold)), "showing its value")
-  assert(has(own, "<  ADDON"), "and a way back")
+
+  -- Back goes ONE level, to the screen this was opened from, and says so.
+  -- It used to be labelled with the group you were already in and return to
+  -- the index whatever depth you were at, so PAGES / ADDON threw two levels
+  -- away in one press and the button named neither of them.
+  assert(has(own, "<  PAGES"),
+    "back names where it goes:\n  " .. table.concat(own, "\n  "))
+  assert(not has(own, "<  ADDON"), "not where it already is")
+  assert(has(own, "SETTINGS / PAGES / ADDON"), "and the trail says how you got here")
 
   -- A module switched off is not asked for settings at all.
   built = addonState.settingsBuilt
@@ -5088,6 +5096,42 @@ check("a module's switch and its settings are finally on one screen", function()
     "but its switch is still there to turn it back on")
 
   app:toggleModule("addon")
+  view.openGroup(nil)
+end)
+
+check("back from a module screen lands on PAGES, not the index", function()
+  local settingsModule = modules.byId("settings")
+  terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+
+  local function press(label)
+    local found
+    local function walk(element)
+      if element.__kind == "Button" and element.text == label then found = element end
+      for _, child in ipairs(rawget(element, "_children") or {}) do walk(child) end
+    end
+    walk(view.container)
+    assert(found, "there is a " .. label .. " button")
+    rawget(found, "_handlers").onClick(found)
+  end
+
+  view.openGroup(settingsModule.MODULE_PREFIX .. "power")
+  assert(view.currentGroup() == settingsModule.MODULE_PREFIX .. "power", "on POWER")
+
+  press("<  PAGES")
+  assert(view.currentGroup() == "pages",
+    "one press up to PAGES, got " .. tostring(view.currentGroup()))
+
+  press("<  SETTINGS")
+  assert(view.currentGroup() == nil,
+    "the next one to the index, got " .. tostring(view.currentGroup()))
+
+  -- A top-level group still goes straight back to the index, because that is
+  -- where it was opened from.
+  view.openGroup("scanning")
+  press("<  SETTINGS")
+  assert(view.currentGroup() == nil, "SCANNING is one level down and knows it")
+
   view.openGroup(nil)
 end)
 
@@ -5830,9 +5874,9 @@ check("a speaker sounds once for something that went unread", function()
   PERIPHERALS.speaker_0.playSound = function(...) played = played + 1; return true end
   app:rescan()
 
-  local saved = { alert = app.cfg.alert, chime = app.cfg.chime,
+  local saved = { alert = app.cfg.alert, chime = app.cfg.chimeBeyond,
                   sound = app.cfg.sound.enabled }
-  app.cfg.alert, app.cfg.chime, app.cfg.sound.enabled = true, true, true
+  app.cfg.alert, app.cfg.chimeBeyond, app.cfg.sound.enabled = true, true, true
 
   -- An alarm rings the alarm, which is queued for the tick loop rather than
   -- played here -- so it must not ALSO chime, or every alert would be two
@@ -5853,7 +5897,7 @@ check("a speaker sounds once for something that went unread", function()
   app.cfg.alert = true
 
   -- An arrival outside the alert range is logged without setting the alarm
-  -- off, and that is exactly what the chime is for: one note, once.
+  -- off, and asking for a chime is the way to hear about it anyway.
   local distant
   for _, contact in ipairs(app.contacts) do
     if contact.dist > 100 then distant = contact end
@@ -5870,15 +5914,16 @@ check("a speaker sounds once for something that went unread", function()
   assert(app.alerts.sound.left == 0, "the alarm stayed quiet")
   assert(played == 1, "one chime, once, got " .. played)
 
-  -- Switched off, it is silent.
-  app.cfg.chime = false
+  -- Off, which is the default: an alert range that made a noise past itself
+  -- would not be an alert range.
+  app.cfg.chimeBeyond = false
   played = 0
   app.previous, app.firstScan = {}, false
   app:processDetections({ distant }, false)
   assert(played == 0, "the chime honours its setting, got " .. played)
 
   app.cfg.alertRangeIndex = wasRange
-  app.cfg.alert, app.cfg.chime = saved.alert, saved.chime
+  app.cfg.alert, app.cfg.chimeBeyond = saved.alert, saved.chime
   app.cfg.sound.enabled = saved.sound
   PERIPHERALS.speaker_0.playSound = previous
   app:rescan()
@@ -6996,6 +7041,268 @@ check("the power page is drawn on a monitor too", function()
     local ok, err = pcall(drawTree, monitorRoot.root, buffer)
     if not ok then error("monitor power: " .. tostring(err), 0) end
   end
+end)
+
+----------------------------------------------------------------- v8.22 --
+
+check("the alert range gates every channel, not just the sound", function()
+  -- The bug this exists for: scanning 10k with the alert range at 1k still
+  -- popped a banner, rang the chime and put the unread marker on every screen
+  -- for somebody 9km away, because only the sound and the redstone pulse ever
+  -- consulted the range. From where the operator sat, "Alert within" did
+  -- nothing at all.
+  app:setRole("standalone")
+  app.cfg.alert, app.cfg.toast = true, true
+  app.cfg.chimeBeyond = false
+  app.cfg.rangeIndex = config.MAX_RANGE_INDEX      -- watch everything
+  app.cfg.alertRangeIndex = 3                      -- shout about 100 blocks
+  app:clearLog()
+
+  local banners = {}
+  local previousToast = terminalRoot.toast
+  terminalRoot.toast = function(_, message) banners[#banners + 1] = message end
+
+  local near = { name = "Close", dist = 40,  dx = 40,  dz = 0, dy = 0, dim = nil }
+  local far  = { name = "Far",   dist = 9000, dx = 9000, dz = 0, dy = 0, dim = nil }
+
+  app.alerts.sound.left = 0
+  app.previous, app.firstScan = {}, false
+  app:processDetections({ near, far }, false)
+
+  -- Both are on the page: the scan found them, so the log records them.
+  assert(app.log:count() == 2, "both were written down, got " .. app.log:count())
+
+  -- One of them is worth interrupting you about.
+  assert(app:unreadAlerts() == 1,
+    "only the near one is unread, got " .. app:unreadAlerts())
+  assert(#banners == 1, "one banner, got " .. #banners .. ": "
+    .. table.concat(banners, " | "))
+  assert(banners[1]:find("Close", 1, true),
+    "and it is the near one, got " .. banners[1])
+  assert(app.alerts.sound.left > 0, "the alarm was queued for the near one")
+
+  -- With the alert range wide open the same pair alerts twice, which is what
+  -- proves the range is what made the difference and not the distance itself.
+  app.cfg.alertRangeIndex = config.MAX_RANGE_INDEX
+  app:clearLog()
+  banners = {}
+  app.previous, app.firstScan = {}, false
+  app:processDetections({ near, far }, false)
+  assert(app:unreadAlerts() == 2, "both unread now, got " .. app:unreadAlerts())
+  assert(#banners == 1, "one banner for the pair, got " .. #banners)
+
+  terminalRoot.toast = previousToast
+  app:clearLog()
+  app.previous, app.firstScan = {}, true
+end)
+
+check("a contact can be given a symbol of its own on the scope", function()
+  app:setRole("standalone")
+  app.cfg.myName = "Steve"
+  app.ignore = {}
+  app:sweep()
+  assert(#app.contacts > 0, "somebody to name")
+
+  local target = app.contacts[1].name
+  app.cfg.icons = {}
+
+  -- Nothing set: the scope draws blips and writes no contact symbols.
+  local plain = drawPage(terminalRoot, "radar", 51, 19)
+  local before = table.concat(plain.texts, "\n")
+
+  app.cfg.icons[target] = "star"
+  assert(config.iconFor(app.cfg, target) == "*",
+    "the star resolves to its character, got "
+      .. tostring(config.iconFor(app.cfg, target)))
+  assert(config.iconFor(app.cfg, "Nobody") == nil, "and nobody else is named")
+
+  local marked = drawPage(terminalRoot, "radar", 51, 19)
+  local after = table.concat(marked.texts, "\n")
+  assert(after:find("*", 1, true), "the scope drew it:\n" .. after)
+  assert(not before:find("*", 1, true), "and did not before:\n" .. before)
+
+  -- INITIAL is worked out from the name rather than stored, so it follows
+  -- whoever it was set against.
+  app.cfg.icons[target] = "initial"
+  assert(config.iconFor(app.cfg, target) == target:sub(1, 1):upper(),
+    "the initial is the first letter, got "
+      .. tostring(config.iconFor(app.cfg, target)))
+
+  -- An id from a version that has more of them is dropped, not drawn blank.
+  app.cfg.icons[target] = "hologram"
+  config.sanitise(app.cfg)
+  assert(app.cfg.icons[target] == nil, "an unknown symbol is forgotten")
+
+  app.cfg.icons = {}
+end)
+
+check("the icon picker offers everyone who has been seen", function()
+  local settingsModule = modules.byId("settings")
+  terminalRoot:setPage("settings", false)
+  local view = terminalRoot.views.settings
+
+  app:setRole("standalone")
+  app.ignore = {}
+  app:sweep()
+  app.cfg.icons = { Ghost = "star" }
+
+  view.openGroup(settingsModule.MODULE_PREFIX .. "contacts")
+  local captions = captionsOf(view.container)
+  local found = false
+  for _, text in ipairs(captions) do
+    if text == "Icons" then found = true end
+  end
+  assert(found, "CONTACTS has the icon row:\n  " .. table.concat(captions, "\n  "))
+
+  --- A row is a label and the button beside it, so pressing one means finding
+  --- the label and taking its neighbour.
+  local function pressRow(label)
+    local pressed = false
+    local function walk(element)
+      local children = rawget(element, "_children") or {}
+      for index, child in ipairs(children) do
+        if child.__kind == "Label" and child.text == label then
+          local button = children[index + 1]
+          if button and button.__kind == "Button" then
+            rawget(button, "_handlers").onClick(button)
+            pressed = true
+          end
+        end
+        walk(child)
+      end
+    end
+    walk(view.container)
+    assert(pressed, "pressed the " .. label .. " row")
+  end
+
+  --- Whatever the open picker is listing.
+  local function pickerItems()
+    local items
+    local function walk(element)
+      if element.__kind == "List" then items = rawget(element, "_p").items end
+      for _, child in ipairs(rawget(element, "_children") or {}) do walk(child) end
+    end
+    walk(view.container)
+    local texts = {}
+    for _, item in ipairs(items or {}) do texts[#texts + 1] = item.text end
+    return texts
+  end
+
+  -- Ghost is not in range and never has been, but the icon set against them
+  -- is -- so they stay reachable, or it could never be changed back.
+  pressRow("Icons")
+  local listed = table.concat(pickerItems(), "\n")
+  assert(listed:find("Ghost", 1, true), "the offline name is offered:\n" .. listed)
+  assert(listed:find("*", 1, true), "showing the symbol it already has")
+  assert(listed:find(app.contacts[1].name, 1, true), "and so is somebody in range")
+
+  app.cfg.icons = {}
+  view.openGroup(nil)
+end)
+
+check("a 1x1 radar spends its rows on the picture", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+
+  app.cfg.rangeIndex = 6                          -- "1k"
+  local shot = tinyScreen(monitorRoot, "radar")
+
+  -- Two of the nine rows went on settings that do not change on their own,
+  -- over the top left quarter of the only thing the screen is for.
+  assert(not shot.text:find("ring", 1, true),
+    "no range ring readout:\n" .. shot.text)
+  assert(not shot.text:find("1k", 1, true), "and no range label:\n" .. shot.text)
+
+  -- The compass and the heading are readings, and they stay.
+  assert(shot.text:find("N", 1, true), "the compass survives:\n" .. shot.text)
+
+  -- A terminal has the rows to spare and keeps them.
+  local wide = drawPage(terminalRoot, "radar", 51, 19)
+  local text = table.concat(wide.texts, "\n")
+  assert(text:find("ring", 1, true), "a full screen still says its ring:\n" .. text)
+end)
+
+check("the power page resets its own graph", function()
+  terminalRoot:setPage("power", false)
+  app.power:poll(app.cfg, CLOCK)
+  for i = 1, 20 do app.power:poll(app.cfg, CLOCK + i) end
+
+  local before = #({ app.power.history:series() })[1]
+  assert(before > 0, "there is a graph to reset, got " .. before)
+
+  local buffer = drawPage(terminalRoot, "power", 51, 19)
+  local text = table.concat(buffer.texts, "\n")
+  assert(text:find("RESET", 1, true), "the button is drawn:\n" .. text)
+
+  local view = terminalRoot.views.power
+  assert(type(view.touch) == "function", "and the page takes presses")
+
+  -- Missing it does nothing, which matters: the rest of that row is text, and
+  -- on a monitor a press the page does not want moves it to the next page.
+  assert(view.touch(3, 17) == false, "a press on the footer text is not the button")
+
+  -- The button sits at the right-hand end of the bottom row of the CONTENT
+  -- frame, which is one shorter than the screen.
+  assert(view.touch(50, 17), "pressing it claims the press")
+
+  local after = ({ app.power.history:series() })[1]
+  local filled = 0
+  for _, value in ipairs(after) do if value ~= nil then filled = filled + 1 end end
+  assert(filled <= 1, "the history started again, got " .. filled .. " samples")
+end)
+
+check("a 1x1 power page has no room for the button, and does not draw one", function()
+  local monitorRoot
+  for _, root in ipairs(roots) do
+    if root.monitor then monitorRoot = root end
+  end
+  local shot = tinyScreen(monitorRoot, "power")
+  assert(not shot.text:find("RESET", 1, true),
+    "fifteen cells is no place for a button:\n" .. shot.text)
+end)
+
+check("the status footer only advertises keys that do something", function()
+  -- M and H were on this list and bound to nothing: there has never been a
+  -- settings key -- settings is a page, reached by its number -- and the help
+  -- never existed at all.
+  local buffer = drawPage(terminalRoot, "status", 82, 40)
+  local text = table.concat(buffer.texts, "\n")
+  assert(text:find("Q quit", 1, true), "the footer is there:\n" .. text)
+  assert(not text:find("M settings", 1, true), "M is gone:\n" .. text)
+  assert(not text:find("H help", 1, true), "and so is H")
+
+  -- Everything it does advertise is a real binding.
+  for letter in text:gmatch("(%u) %l") do
+    if letter ~= "Q" then
+      assert(keys[letter:lower()], letter .. " is a key")
+    end
+  end
+end)
+
+check("the tracking group reports the mode it is actually in", function()
+  local settingsModule = modules.byId("settings")
+  local group
+  for _, entry in ipairs(settingsModule.GROUPS) do
+    if entry.id == "tracking" then group = entry end
+  end
+
+  -- It tested `cfg.mode ~= "fixed"`, and there has been no mode called
+  -- "fixed" since v8.19 renamed them -- so the index called every station
+  -- SELF, including one sitting still on its base coordinates.
+  app.cfg.baseX, app.cfg.baseY, app.cfg.baseZ = 120, 64, -340
+  for _, mode in ipairs(config.MODES) do
+    app.cfg.mode = mode.id
+    for _, narrow in ipairs({ true, false }) do
+      local text = group.summary(app, narrow)
+      assert(text:find(mode.label, 1, true),
+        mode.id .. " names itself, got " .. text)
+    end
+  end
+  assert(not group.summary(app, false):find("SELF", 1, true),
+    "and nothing is called SELF any more")
+  app.cfg.mode = "base"
 end)
 
 --------------------------------------------------------------------- report --

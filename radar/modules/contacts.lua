@@ -28,6 +28,27 @@ local function heightTag(dy)
   return "  0", theme.dim
 end
 
+--- Every name worth offering an icon to: whoever is in range now, whoever has
+--- been logged, and anyone already given one.
+---
+--- That last source is what matters: a symbol set for somebody who has since
+--- logged off would otherwise be unreachable, so the only way to change it
+--- would be to wait for them to come back.
+local function knownNames(app)
+  local seen, names = {}, {}
+  local function add(name)
+    if type(name) == "string" and #name > 0 and not seen[name] then
+      seen[name] = true
+      names[#names + 1] = name
+    end
+  end
+  for _, contact in ipairs(app.contacts) do add(contact.name) end
+  for name in pairs(app.cfg.icons or {}) do add(name) end
+  for _, row in ipairs(app.log:stats()) do add(row.name) end
+  table.sort(names)
+  return names
+end
+
 --- A five-cell health bar, painted as coloured cells rather than characters so
 --- it does not depend on which block glyphs a font happens to have.
 local function healthBar(buf, x, y, health, maxHealth)
@@ -214,6 +235,95 @@ function view.build(container, app, root)
       return true
     end,
   }
+end
+
+-- ---------------------------------------------------------------- settings ---
+
+--- Who gets drawn as what.
+---
+--- It lives with CONTACTS rather than with the scope because the question is
+--- about a PERSON, not about the picture: the list of names is here, and this
+--- is the page you are already looking at when you decide that one of them is
+--- worth telling apart from the rest.
+function view.settings(ctx)
+  local app, root = ctx.app, ctx.root
+  local cfg = app.cfg
+
+  ctx.heading("SCOPE ICONS")
+
+  --- Second picker: which symbol, for the name just chosen.
+  local function editIcon(name)
+    local entries = {}
+    for _, entry in ipairs(config.ICONS) do
+      entries[#entries + 1] = {
+        label = ctx.withHint(config.iconLabel(entry), entry.hint),
+        value = entry.id,
+      }
+    end
+    ctx.openPicker("ICON FOR " .. util.shorten(name, 14), entries,
+      cfg.icons[name] or "dot", function(id)
+        -- The default is stored as absence, so the table only ever holds the
+        -- handful of names that were actually given something.
+        cfg.icons[name] = (id ~= "dot") and id or nil
+        app:saveConfig()
+        local symbol = config.iconFor(cfg, name)
+        root:toast(symbol
+          and ("%s is now %s"):format(util.shorten(name, 12), symbol)
+          or ("%s is a plain blip again"):format(util.shorten(name, 12)), "success")
+        ctx.refreshRows()
+      end)
+  end
+
+  ctx.row("Icons", function()
+    local named = 0
+    for _ in pairs(cfg.icons) do named = named + 1 end
+    if named == 0 then return "everyone is a dot" end
+    if ctx.isNarrow() then return ("%d named"):format(named) end
+
+    -- The symbols themselves, which is the fastest way to see what is set.
+    local shown = {}
+    for name in pairs(cfg.icons) do
+      shown[#shown + 1] = config.iconFor(cfg, name) or "?"
+    end
+    table.sort(shown)
+    return ("%d named   %s"):format(named, table.concat(shown, " "))
+  end, function()
+    local names = knownNames(app)
+    if #names == 0 then
+      root:toast("Nobody has been detected yet", "info")
+      return
+    end
+    local entries = {}
+    for _, name in ipairs(names) do
+      entries[#entries + 1] = {
+        label = ("%s  %s"):format(config.iconFor(cfg, name) or ".",
+          util.shorten(name, 18)),
+        value = name,
+      }
+    end
+    ctx.openPicker("PICK A CONTACT", entries, nil, editIcon)
+  end, function() return next(cfg.icons) and theme.accent or theme.dim end)
+
+  ctx.note("Press a name to give them a symbol of their own. The scope draws "
+    .. "that instead of a blip, still coloured by how close they are, so the "
+    .. "picture says who as well as where.")
+  ctx.note("Anyone detected once is on the list, whether or not they are in "
+    .. "range now.")
+
+  ctx.action("Everyone back to plain blips", function()
+    local named = 0
+    for _ in pairs(cfg.icons) do named = named + 1 end
+    if named == 0 then
+      root:toast("Nothing to clear", "info")
+      return
+    end
+    cfg.icons = {}
+    app:saveConfig()
+    root:toast(("Cleared %d icon%s"):format(named, named == 1 and "" or "s"), "info")
+    ctx.refreshRows()
+  end)
+
+  ctx.spacer()
 end
 
 return view

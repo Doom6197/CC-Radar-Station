@@ -369,8 +369,12 @@ local function drawTiny(buf, grid, app, w, h)
   end
 end
 
-function view.build(container, app)
+function view.build(container, app, root)
   local grid = pixel.new(1, 1, PALETTE)
+
+  -- Where the graph reset landed on this draw, in the shape the flight page
+  -- uses. Rebuilt every frame, because it moves with the width of the screen.
+  local hits = {}
 
   local canvas = container:addCanvas({
     x = 1, y = 1,
@@ -382,6 +386,7 @@ function view.build(container, app)
   canvas.draw = function(self, buf)
     local w, h = self.width, self.height
     buf:fill(1, 1, w, h, " ", theme.text, theme.bg)
+    hits = {}
 
     if ui.isTiny(w) then
       return drawTiny(buf, grid, app, w, h)
@@ -576,13 +581,50 @@ function view.build(container, app)
         parts[#parts + 1] = "rate from storage"
       end
 
+      -- The graph reset, on the page rather than three levels into the
+      -- settings. The window is minutes long, so a spike from something that
+      -- has since been fixed sits there squashing the scale flat until it
+      -- ages out -- and wanting rid of it is exactly when you are looking at
+      -- the graph, not when you are in a menu.
       local footer = table.concat(parts, "   ")
-      buf:blit(2, h, util.shorten(footer, max(1, w - 2)),
+      local label = "[ RESET ]"
+      local edge = w + 1
+      if w >= #label + 12 then
+        edge = w + 1 - #label
+        buf:blit(edge, h, label, theme.accent, theme.bg)
+        hits[#hits + 1] = { x1 = edge, x2 = w, y = h, key = "reset" }
+        edge = edge - 1
+      end
+
+      buf:blit(2, h, util.shorten(footer, max(1, edge - 2)),
         model.error and theme.alarm or theme.line, theme.bg)
     end
   end
 
-  return { refresh = function() canvas:markRenderDirty() end }
+  --- Throws the history away and starts the graph again from now.
+  local function resetGraph()
+    app.power.history:clear()
+    -- Straight back to a reading rather than an empty panel: the poll loop is
+    -- seconds away and a graph that blanks on press looks like a fault.
+    pcall(app.power.poll, app.power, app.cfg)
+    canvas:markRenderDirty()
+    if root then root:toast("Graph reset", "info") end
+    return true
+  end
+
+  return {
+    refresh = function() canvas:markRenderDirty() end,
+    resetGraph = resetGraph,
+
+    --- One press on this page, and only where it was drawn: a 1x1 monitor has
+    --- no room for the button, and there a tap still moves the screen on.
+    touch = function(x, y)
+      for _, hit in ipairs(hits) do
+        if y == hit.y and x >= hit.x1 and x <= hit.x2 then return resetGraph() end
+      end
+      return false
+    end,
+  }
 end
 
 -- ---------------------------------------------------------------- settings ---
@@ -824,10 +866,13 @@ function view.settings(ctx)
       count > 0 and "success" or "warning")
   end)
 
-  ctx.action("Clear the graph", function()
+  ctx.action("Reset the graph", function()
     app.power.history:clear()
-    root:toast("Graph cleared", "info")
+    root:toast("Graph reset", "info")
   end)
+
+  ctx.note("The RESET button on the page itself does the same thing, which is "
+    .. "where you will want it.")
 
   ctx.spacer()
 end

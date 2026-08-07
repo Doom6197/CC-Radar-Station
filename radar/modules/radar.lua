@@ -6,6 +6,7 @@
 
 local pixel = require("radar.pixel")
 local theme = require("radar.theme")
+local ui    = require("radar.ui")
 local util  = require("radar.util")
 local config = require("radar.config")
 
@@ -120,6 +121,12 @@ function view.build(container, app)
 
     local rotation = app:rotation()
 
+    -- Contacts given a symbol of their own. Collected here and drawn in the
+    -- text pass below, because a character has to go into the CELL buffer --
+    -- the sub-pixel grid has no idea what a letter is -- and the grid is
+    -- blitted over the top of anything written before it.
+    local marks = {}
+
     -- Contacts, furthest first so the nearest wins the pixel.
     for i = #app.contacts, 1, -1 do
       local contact = app.contacts[i]
@@ -134,7 +141,16 @@ function view.build(container, app)
       end
 
       local index = blipIndex(contact)
-      if offRim then
+      local symbol = config.iconFor(app.cfg, contact.name)
+
+      if symbol then
+        -- No disc under it: the character replaces its whole cell, so a blip
+        -- drawn as well would only be the parts of it that stuck out.
+        marks[#marks + 1] = { px = px, py = py, symbol = symbol, index = index }
+        -- The nearest still gets its ring, which sits a cell clear of the
+        -- character rather than under it.
+        if i == 1 and not offRim then grid:ring(px, py, 3, index) end
+      elseif offRim then
         grid:set(px, py, index)
       else
         grid:disc(px, py, 1.2, index)
@@ -149,6 +165,13 @@ function view.build(container, app)
       return util.clamp(floor(px / 2) + 1, 1, cellW), util.clamp(floor(py / 3) + 1, 1, cellH)
     end
 
+    -- The named contacts, in the same colour their blip would have been: the
+    -- symbol says WHO, and the colour goes on saying how close.
+    for _, mark in ipairs(marks) do
+      local tx, ty = cellOf(mark.px, mark.py)
+      buf:blit(tx, ty, mark.symbol, PALETTE[mark.index].c, theme.bg)
+    end
+
     -- Compass letters just outside the outer ring.
     local bearings = cellW >= 34
       and { 0, 45, 90, 135, 180, 225, 270, 315 } or { 0, 90, 180, 270 }
@@ -161,10 +184,18 @@ function view.build(container, app)
     end
 
     -- Range readout, top left.
-    local ring = util.round(blocks)
-    buf:blit(1, 1, config.rangeLabel(app.cfg) .. "  " ..
-      config.modeLabel(app.cfg, true), theme.dim, theme.bg)
-    buf:blit(1, 2, ring .. "m ring", theme.line, theme.bg)
+    --
+    -- Not on a 1x1 monitor. Two of the nine rows there went on "1k SHIP" and
+    -- "1000m rings", which is a fifth of the screen spent on two settings that
+    -- do not change on their own -- and both of them sat over the top left
+    -- quarter of the picture the screen exists to show. Every larger display
+    -- has the rows to spare and keeps them.
+    if not ui.isTiny(cellW) then
+      local ring = util.round(blocks)
+      buf:blit(1, 1, config.rangeLabel(app.cfg) .. "  " ..
+        config.modeLabel(app.cfg, true), theme.dim, theme.bg)
+      buf:blit(1, 2, ring .. "m ring", theme.line, theme.bg)
+    end
 
     -- Nearest contact, top right.
     local nearest = app.contacts[1]
